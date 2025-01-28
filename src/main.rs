@@ -1,4 +1,7 @@
+use std::path::Path;
+use std::fmt::Display;
 use std::fs::{self, File};
+use std::time::SystemTime;
 use std::process::{Command, ExitCode};
 
 use memmap2::Mmap;
@@ -136,6 +139,7 @@ struct Job<'a> {
     target: &'a str,
     rule: &'a str,
     inputs: Vec::<&'a str>,
+    deps: Vec::<&'a str>
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -196,7 +200,7 @@ impl<'a> Parser<'a> {
                     }
                 }
 
-                let ref command = line[second_space + 1 + 1..].trim();
+                let command = line[second_space + 1 + 1..].trim();
 
                 let rule = Rule::new(command);
                 self.parsed.rules.insert(name, rule);
@@ -208,17 +212,24 @@ impl<'a> Parser<'a> {
                     },
                     "build" => {
                         let colon_idx = line.chars().position(|c| c == ':').unwrap();
-                        let ref post_colon = line[colon_idx + 1..].trim();
-                        let ref target = line[first_space..colon_idx].trim();
-                        let mut tokens = post_colon.split_ascii_whitespace();
-                        let Some(rule) = tokens.next() else { return };
-                        let inputs = tokens.collect();
-                        let job = Job {target, rule, inputs};
+                        let post_colon = line[colon_idx + 1..].trim();
+                        let target = line[first_space..colon_idx].trim();
+                        let or_idx = post_colon.chars().position(|c| c == '|');
+                        let (mut input_tokens, deps) = if let Some(or_idx) = or_idx {
+                            let input_tokens = post_colon[..or_idx].split_ascii_whitespace();
+                            let deps = post_colon[or_idx + 1..].split_ascii_whitespace().collect();
+                            (input_tokens, deps)
+                        } else {
+                            (post_colon.split_ascii_whitespace(), Vec::new())
+                        };
+                        let Some(rule) = input_tokens.next() else { return };
+                        let inputs = input_tokens.collect();
+                        let job = Job {target, rule, inputs, deps};
                         self.parsed.jobs.insert(target, job);
                     },
                     _ => {
-                        let ref name = first_token;
-                        let ref value = line[second_space + 1..].trim();
+                        let name = first_token;
+                        let value = line[second_space + 1..].trim();
                         let def = Def { value };
                         self.parsed.defs.insert(name, def);
                     }
@@ -282,7 +293,17 @@ fn is_dag(graph: &Graph) -> bool {
     true
 }
 
-fn topological_sort<'a>(graph: &Graph<'a>) -> Vec::<&'a str> {
+struct BuildOrder<'a>(Vec::<&'a str>);
+
+impl Display for BuildOrder<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0[0])?;
+        for b in self.0[1..].iter() { write!(f, " -> {b}")? }
+        Ok(())
+    }
+}
+
+fn topological_sort<'a>(graph: &Graph<'a>) -> BuildOrder<'a> {
     let n = graph.len();
     let mut ret = Vec::with_capacity(n);
     let mut visited = StrHashSet::default(); visited.reserve(n);
@@ -303,23 +324,73 @@ fn topological_sort<'a>(graph: &Graph<'a>) -> Vec::<&'a str> {
         dfs(node, graph, &mut visited, &mut ret)
     }
 
-    ret
+    BuildOrder(ret)
+}
+
+#[derive(Copy, Clone, PartialEq, PartialOrd)]
+struct Metadata {
+    mtime: SystemTime,
+}
+
+struct MetadataCache<'a> {
+    files: StrHashMap::<'a, Metadata>,
+}
+
+impl<'a> MetadataCache<'a> {
+    #[inline]
+    fn new(files_count: usize) -> Self {
+        Self {
+            files: {
+                let mut map = StrHashMap::default();
+                map.reserve(files_count);
+                map
+            }
+        }
+    }
+
+    fn needs_rebuild(&mut self, job: &Job<'a>) -> bool {
+        #[inline]
+        fn mtime<'a>(f: &'a str, cache: &mut MetadataCache<'a>) -> std::io::Result::<Metadata> {
+            if let Some(mtime) = cache.files.get(f) {
+                Ok(*mtime)
+            } else {
+                let p: &Path = f.as_ref();
+                let m = p.metadata()?;
+                let mtime = m.modified()?;
+                let m = Metadata { mtime };
+                cache.files.insert(f, m);
+                Ok(m)
+            }
+        }
+
+        let mtimes = job.inputs.iter()
+            .chain(job.deps.iter())
+            .filter_map(|f| mtime(f, self).ok())
+            .collect::<Vec::<_>>();
+
+        let Ok(target_mtime) = mtime(job.target, self) else {
+            return true
+        };
+
+        mtimes.into_iter().any(|src_mtime| src_mtime > target_mtime)
+    }
 }
 
 fn resolve_and_build<'a>(
     job: &Job<'a>,
     parsed: &Parsed<'a>,
     built: &mut StrHashSet<'a>,
-    commands: &mut Vec::<String>
+    commands: &mut Vec::<String>,
+    metadata_cache: &mut MetadataCache<'a>,
 ) {
-    if built.contains(job.target) {
+    if built.contains(job.target) || !metadata_cache.needs_rebuild(job) {
         println!("{target} is already built", target = job.target);
         return
     }
 
     for input in job.inputs.iter() {
         if let Some(dep_job) = parsed.jobs.get(input) {
-            resolve_and_build(dep_job, parsed, built, commands)
+            resolve_and_build(dep_job, parsed, built, commands, metadata_cache)
         } else if !built.contains(input) {
             println!("dependency {input} is assumed to exist")
         }
@@ -336,6 +407,7 @@ fn resolve_and_build<'a>(
 
 fn main() -> ExitCode {
     let Some(rush) = read_rush() else {
+        eprintln!("no rush file found in cwd");
         return ExitCode::FAILURE
     };
 
@@ -346,25 +418,22 @@ fn main() -> ExitCode {
 
     #[cfg(debug_assertions)]
     if !is_dag(&graph) {
-        eprintln!("Error: Dependency graph contains cycles");
+        eprintln!("[FATAL] dependency graph contains cycles");
         return ExitCode::FAILURE
     }
 
     let build_order = topological_sort(&graph);
-    println!("build order:");
-    print!("{}", build_order[0]);
-    build_order[1..].iter().for_each(|b| {
-        print!(" -> {b}")
-    });
-    println!();
+    println!("build order:\n{build_order}");
 
+    let BuildOrder(build_order) = build_order;
     let n = build_order.len();
     let mut built = StrHashSet::default(); built.reserve(n);
     let mut commands = Vec::with_capacity(n);
+    let mut metadata_cache = MetadataCache::new(n);
 
     for target in build_order {
         if let Some(job) = parsed.jobs.get(target) {
-            resolve_and_build(job, &parsed, &mut built, &mut commands);
+            resolve_and_build(job, &parsed, &mut built, &mut commands, &mut metadata_cache);
         }
     }
 
