@@ -5,4 +5,5 @@ edition = "2021"
 authors = ["Mark Tyrkba <marktyrkba456@gmail.com>"]
 
 [dependencies]
+fxhash = "0.2.1"
 memmap2 = "0.9.5"
