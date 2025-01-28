@@ -234,19 +234,18 @@ impl<'a> Parser<'a> {
 
 fn resolve_and_build<'a>(
     job: &Job<'a>,
-    output_to_job: &HashMap::<&str, Job<'a>>,
+    parsed: &Parsed<'a>,
+    commands: &mut Vec::<String>,
     built_outputs: &mut HashSet::<&'a str>,
-    commands: &mut Vec<String>,
-    parsed: &Parsed,
 ) {
     if built_outputs.contains(job.target) {
         println!("{target} is already built", target = job.target);
         return
     }
 
-    for &input in &job.inputs {
-        if let Some(dep_job) = output_to_job.get(input) {
-            resolve_and_build(dep_job, output_to_job, built_outputs, commands, parsed)
+    for input in job.inputs.iter() {
+        if let Some(dep_job) = parsed.jobs.get(input) {
+            resolve_and_build(dep_job, parsed, commands, built_outputs)
         } else if !built_outputs.contains(input) {
             println!("dependency {input} is assumed to exist")
         }
@@ -273,10 +272,10 @@ fn main() -> ExitCode {
     let mut built_outputs = HashSet::new();
 
     for job in parsed.jobs.values() {
-        resolve_and_build(job, &parsed.jobs, &mut built_outputs, &mut commands, &parsed)
+        resolve_and_build(job, &parsed, &mut commands, &mut built_outputs)
     }
 
-    for command in &commands {
+    for command in commands.iter() {
         println!("{command}");
         let out = Command::new("sh").arg("-c")
             .arg(command)
