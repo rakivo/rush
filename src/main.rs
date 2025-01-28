@@ -51,31 +51,21 @@ struct Template<'a> {
 
 impl Template<'_> {
     fn compile(&self, job: &Job, context: &Parsed) -> String {
-        let mut ret = String::with_capacity(self.statics_len);
-        for chunk in &self.chunks {
-            match chunk {
-                TemplateChunk::Static(s) => {
-                    ret.push_str(s);
-                    ret.push(' ')
-                },
+        self.chunks.iter().flat_map(|c| {
+            let s = match c {
+                TemplateChunk::Static(s) => s,
                 TemplateChunk::Placeholder(placeholder) => match *placeholder {
-                    "in" => {
-                        ret.push_str(&job.inputs.join(" "));
-                        ret.push(' ')
-                    },
-                    "out" => {
-                        ret.push_str(job.target);
-                        ret.push(' ')
-                    },
+                    "in" => job.inputs_wo_rule_str,
+                    "out" => job.target,
                     _ => if let Some(def) = context.defs.get(placeholder) {
-                        ret.push_str(def.value);
-                        ret.push(' ')
+                        def.value
                     } else {
                         panic!("undefined: {placeholder}")
                     }
                 }
             };
-        } ret
+            [s, " "]
+        }).collect()
     }
 }
 
@@ -141,6 +131,7 @@ struct Job<'a> {
     target: &'a str,
     rule: &'a str,
     inputs: Vec::<&'a str>,
+    inputs_wo_rule_str: &'a str,
     deps: Vec::<&'a str>
 }
 
@@ -217,16 +208,19 @@ impl<'a> Parser<'a> {
                         let post_colon = line[colon_idx + 1..].trim();
                         let target = line[first_space..colon_idx].trim();
                         let or_idx = post_colon.chars().position(|c| c == '|');
-                        let (mut input_tokens, deps) = if let Some(or_idx) = or_idx {
-                            let input_tokens = post_colon[..or_idx].split_ascii_whitespace();
+                        let (inputs_str, deps) = if let Some(or_idx) = or_idx {
+                            let inputs_str = post_colon[..or_idx].trim();
                             let deps = post_colon[or_idx + 1..].split_ascii_whitespace().collect();
-                            (input_tokens, deps)
+                            (inputs_str, deps)
                         } else {
-                            (post_colon.split_ascii_whitespace(), Vec::new())
+                            (post_colon, Vec::new())
                         };
+                        let mut input_tokens = inputs_str.split_ascii_whitespace();
                         let Some(rule) = input_tokens.next() else { return };
+                        let rule_len = rule.len();
                         let inputs = input_tokens.collect();
-                        let job = Job {target, rule, inputs, deps};
+                        let ref inputs_wo_rule_str = inputs_str[rule_len..];
+                        let job = Job {target, rule, inputs, inputs_wo_rule_str, deps};
                         self.parsed.jobs.insert(target, job);
                     },
                     _ => {
@@ -337,6 +331,7 @@ fn is_dag(graph: &Graph) -> bool {
 struct BuildOrder<'a>(Vec::<&'a str>);
 
 impl Display for BuildOrder<'_> {
+    #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0[0])?;
         for b in self.0[1..].iter() { write!(f, " -> {b}")? }
@@ -437,6 +432,7 @@ fn resolve_and_build<'a>(
 
     if let Some(rule) = parsed.rules.get(job.rule) {
         let command = rule.template.compile(job, parsed);
+        println!("{command}");
         built.insert(job.target);
         commands.push(command)
     } else {
