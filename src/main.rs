@@ -5,6 +5,8 @@ use std::time::SystemTime;
 use std::process::{Command, ExitCode};
 
 use memmap2::Mmap;
+use dashmap::DashMap;
+use rayon::prelude::*;
 use fxhash::{FxHashMap, FxHashSet};
 
 type StrHashSet<'a> = FxHashSet::<&'a str>;
@@ -248,15 +250,54 @@ impl<'a> Parser<'a> {
     }
 }
 
-fn build_dependency_graph<'a>(parsed: &'a Parsed) -> Graph<'a> {
-    let mut graph = StrHashMap::default();
+// TODO: clone less here
+fn build_dependency_graph<'a>(
+    parsed: &'a Parsed,
+    visited: &mut StrHashSet<'a>,
+    transitive_deps: &mut StrHashMap::<'a, Vec::<&'a str>>,
+) -> Graph<'a> {
+    fn collect_deps<'a>(
+        node: &'a str,
+        parsed: &'a Parsed,
+        visited: &mut StrHashSet<'a>,
+        graph: &mut Graph<'a>,
+        transitive_deps: &mut StrHashMap::<'a, Vec::<&'a str>>,
+    ) -> Vec::<&'a str> {
+        if visited.contains(node) {
+            return transitive_deps.get(node).cloned().unwrap_or_default();
+        }
 
-    for (target, job) in &parsed.jobs {
-        let dependencies = job.inputs.iter().cloned().collect();
-        graph.insert(target, dependencies);
+        visited.insert(node);
+
+        let mut deps = parsed.jobs.get(node)
+            .map(|job| {
+                job.inputs
+                    .iter()
+                    .chain(job.deps.iter())
+                    .cloned()
+                    .collect::<Vec::<_>>()
+            }).unwrap_or_default();
+
+        let mut transitive = Vec::new();
+        for dep in &deps {
+            transitive.extend(collect_deps(dep, parsed, visited, graph, transitive_deps));
+        }
+
+        deps.extend(transitive);
+        deps.dedup();
+
+        graph.insert(node, deps.iter().cloned().collect());
+        transitive_deps.insert(node, deps.clone());
+
+        deps
     }
 
-    graph
+    let mut graph = StrHashMap::default();
+    graph.reserve(parsed.jobs.len());
+
+    for target in parsed.jobs.keys() {
+        collect_deps(target, parsed, visited, &mut graph, transitive_deps);
+    } graph
 }
 
 #[cfg(debug_assertions)]
@@ -333,46 +374,43 @@ struct Metadata {
 }
 
 struct MetadataCache<'a> {
-    files: StrHashMap::<'a, Metadata>,
+    files: DashMap::<&'a str, Metadata>,
 }
 
 impl<'a> MetadataCache<'a> {
     #[inline]
     fn new(files_count: usize) -> Self {
         Self {
-            files: {
-                let mut map = StrHashMap::default();
-                map.reserve(files_count);
-                map
-            }
+            files: DashMap::with_capacity(files_count),
         }
     }
 
-    fn needs_rebuild(&mut self, job: &Job<'a>) -> bool {
+    fn needs_rebuild(&mut self, job: &Job<'a>, transitive_deps: &StrHashMap::<Vec::<&'a str>>) -> bool {
         #[inline]
-        fn mtime<'a>(f: &'a str, cache: &mut MetadataCache<'a>) -> std::io::Result::<Metadata> {
+        fn mtime<'a>(f: &'a str, cache: &MetadataCache<'a>) -> std::io::Result<Metadata> {
             if let Some(mtime) = cache.files.get(f) {
                 Ok(*mtime)
             } else {
                 let p: &Path = f.as_ref();
-                let m = p.metadata()?;
-                let mtime = m.modified()?;
+                let metadata = p.metadata()?;
+                let mtime = metadata.modified()?;
                 let m = Metadata { mtime };
                 cache.files.insert(f, m);
                 Ok(m)
             }
         }
 
-        let mtimes = job.inputs.iter()
-            .chain(job.deps.iter())
-            .filter_map(|f| mtime(f, self).ok())
+        let mtimes = transitive_deps.get(job.target)
+            .unwrap()
+            .par_iter()
+            .filter_map(|dep| mtime(dep, self).ok())
             .collect::<Vec::<_>>();
 
         let Ok(target_mtime) = mtime(job.target, self) else {
             return true
         };
 
-        mtimes.into_iter().any(|src_mtime| src_mtime > target_mtime)
+        mtimes.into_par_iter().any(|src_mtime| src_mtime > target_mtime)
     }
 }
 
@@ -382,15 +420,16 @@ fn resolve_and_build<'a>(
     built: &mut StrHashSet<'a>,
     commands: &mut Vec::<String>,
     metadata_cache: &mut MetadataCache<'a>,
+    transistive_deps: &StrHashMap::<Vec::<&'a str>>
 ) {
-    if built.contains(job.target) || !metadata_cache.needs_rebuild(job) {
+    if built.contains(job.target) || !metadata_cache.needs_rebuild(job, transistive_deps) {
         println!("{target} is already built", target = job.target);
         return
     }
 
     for input in job.inputs.iter() {
         if let Some(dep_job) = parsed.jobs.get(input) {
-            resolve_and_build(dep_job, parsed, built, commands, metadata_cache)
+            resolve_and_build(dep_job, parsed, built, commands, metadata_cache, transistive_deps)
         } else if !built.contains(input) {
             println!("dependency {input} is assumed to exist")
         }
@@ -414,7 +453,11 @@ fn main() -> ExitCode {
     let content = to_str(&rush[..]);
     let parsed = Parser::parse(content);
 
-    let graph = build_dependency_graph(&parsed);
+    let n = parsed.jobs.len();
+
+    let mut visited = StrHashSet::default(); visited.reserve(n);
+    let mut transitive_deps = StrHashMap::default(); transitive_deps.reserve(n);
+    let graph = build_dependency_graph(&parsed, &mut visited, &mut transitive_deps);
 
     #[cfg(debug_assertions)]
     if !is_dag(&graph) {
@@ -426,14 +469,13 @@ fn main() -> ExitCode {
     println!("build order:\n{build_order}");
 
     let BuildOrder(build_order) = build_order;
-    let n = build_order.len();
     let mut built = StrHashSet::default(); built.reserve(n);
     let mut commands = Vec::with_capacity(n);
     let mut metadata_cache = MetadataCache::new(n);
 
     for target in build_order {
         if let Some(job) = parsed.jobs.get(target) {
-            resolve_and_build(job, &parsed, &mut built, &mut commands, &mut metadata_cache);
+            resolve_and_build(job, &parsed, &mut built, &mut commands, &mut metadata_cache, &transitive_deps)
         }
     }
 

@@ -5,5 +5,7 @@ edition = "2021"
 authors = ["Mark Tyrkba <marktyrkba456@gmail.com>"]
 
 [dependencies]
+rayon = "1.10.0"
 fxhash = "0.2.1"
 memmap2 = "0.9.5"
+dashmap = "6.1.0"
