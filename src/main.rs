@@ -365,25 +365,26 @@ impl<'a> MetadataCache<'a> {
         }
     }
 
-    fn needs_rebuild(&self, job: &Job<'a>, transitive_deps: &TransitiveDeps<'a>) -> bool {
-        #[inline]
-        fn mtime<'a>(f: &'a str, cache: &MetadataCache<'a>) -> std::io::Result::<Metadata> {
-            if let Some(mtime) = cache.files.get(f) {
-                Ok(*mtime)
-            } else {
-                let p: &Path = f.as_ref();
-                let m = Metadata { mtime: p.metadata()?.modified()? };
-                cache.files.insert(f, m);
-                Ok(m)
-            }
+    #[inline]
+    fn mtime(&self, f: &'a str) -> std::io::Result::<Metadata> {
+        if let Some(mtime) = self.files.get(f) {
+            Ok(*mtime)
+        } else {
+            let p: &Path = f.as_ref();
+            let m = Metadata { mtime: p.metadata()?.modified()? };
+            self.files.insert(f, m);
+            Ok(m)
         }
+    }
 
+    #[inline]
+    fn needs_rebuild(&self, job: &Job<'a>, transitive_deps: &TransitiveDeps<'a>) -> bool {
         // TODO: do something here if dependent file does not exist
         let mtimes = unsafe {
             transitive_deps.get(job.target).unwrap_unchecked()
-        }.par_iter().filter_map(|dep| mtime(dep, self).ok()).collect::<Vec::<_>>();
+        }.par_iter().filter_map(|dep| self.mtime(dep).ok()).collect::<Vec::<_>>();
 
-        let Ok(target_mtime) = mtime(job.target, self) else {
+        let Ok(target_mtime) = self.mtime(job.target) else {
             return true
         };
 
