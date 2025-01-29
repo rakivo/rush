@@ -1,9 +1,8 @@
 use std::path::Path;
 use std::fs::{self, File};
 use std::time::SystemTime;
-use std::sync::{Arc, Mutex};
 use std::collections::VecDeque;
-use std::process::{Command, ExitCode};
+use std::process::{self, ExitCode};
 
 use memmap2::Mmap;
 use rayon::prelude::*;
@@ -389,33 +388,32 @@ impl<'a> MetadataCache<'a> {
     }
 }
 
-struct Commands(Arc::<Mutex::<Vec::<String>>>);
+struct Command<'a>(&'a str);
 
-impl Commands {
+impl Command<'_> {
     fn execute(&self) -> ExitCode {
-        for command in self.0.lock().unwrap().iter() {
-            println!("{command}");
-            let Ok(out) = Command::new("sh")
-                .arg("-c")
-                .arg(command)
-                .output() else {
-                    return ExitCode::FAILURE
-                };
-
-            let out = if out.status.success() {
-                unsafe { std::str::from_utf8_unchecked(&out.stdout) }
-            } else {
-                unsafe { std::str::from_utf8_unchecked(&out.stderr) }
+        let Self(command) = self;
+        println!("{command}");
+        let Ok(out) = process::Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .output() else {
+                return ExitCode::FAILURE
             };
-            print!("{out}")
-        } ExitCode::SUCCESS
+
+        let out = if out.status.success() {
+            unsafe { std::str::from_utf8_unchecked(&out.stdout) }
+        } else {
+            unsafe { std::str::from_utf8_unchecked(&out.stderr) }
+        };
+        print!("{out}");
+        ExitCode::SUCCESS
     }
 }
 
 struct CommandBuilder<'a> {
     parsed: &'a Parsed<'a>,
-    built: DashSet::<&'a str>,
-    commands: Arc::<Mutex::<Vec::<String>>>,
+    compiled: DashSet::<&'a str>,
     metadata_cache: MetadataCache<'a>,
     transitive_deps: &'a StrHashMap::<'a, StrHashSet::<'a>>
 }
@@ -425,37 +423,37 @@ impl<'a> CommandBuilder<'a> {
         let n = parsed.jobs.len();
         Self {
             parsed,
-            built: DashSet::with_capacity(n),
-            commands: Arc::new(Mutex::new(Vec::with_capacity(n))),
+            compiled: DashSet::with_capacity(n),
             metadata_cache: MetadataCache::new(n),
             transitive_deps
         }
     }
 
-    fn _resolve_and_build(&self, job: &Job<'a>) {
-        if self.built.contains(job.target) || !self.metadata_cache.needs_rebuild(job, &self.transitive_deps) {
+    fn _resolve_and_run(&self, job: &Job<'a>) {
+        if self.compiled.contains(job.target) || !self.metadata_cache.needs_rebuild(job, &self.transitive_deps) {
             println!("{target} is already built", target = job.target);
             return
         }
 
         for input in job.inputs.iter() {
             if let Some(dep_job) = self.parsed.jobs.get(input) {
-                self._resolve_and_build(dep_job)
-            } else if !self.built.contains(input) {
+                self._resolve_and_run(dep_job)
+            } else if !self.compiled.contains(input) {
                 println!("dependency {input} is assumed to exist")
             }
         }
 
         if let Some(rule) = self.parsed.rules.get(job.rule) {
+            self.compiled.insert(job.target);
             let command = rule.template.compile(job, self.parsed);
-            self.built.insert(job.target);
-            self.commands.lock().unwrap().push(command)
+            let command = Command(&command);
+            command.execute();
         } else {
             eprintln!("no rule found for job: {target}", target = job.target)
         }
     }
 
-    fn build(self, graph: &Graph) -> Commands {
+    fn resolve_and_run(self, graph: &Graph) {
         let levels = topological_sort_levels(graph);
 
         #[cfg(feature = "dbg")]
@@ -466,12 +464,10 @@ impl<'a> CommandBuilder<'a> {
         for level in levels.into_iter() {
             level.into_par_iter().for_each(|target| {
                 if let Some(job) = self.parsed.jobs.get(target) {
-                    self._resolve_and_build(job)
+                    self._resolve_and_run(job)
                 }
             });
         }
-
-        Commands(self.commands)
     }
 }
 
@@ -491,8 +487,7 @@ fn main() -> ExitCode {
     let graph = build_dependency_graph(&parsed, &mut visited, &mut transitive_deps);
 
     let cmd_builder = CommandBuilder::new(&parsed, &transitive_deps);
-    let commands = cmd_builder.build(&graph);
-    commands.execute();
+    cmd_builder.resolve_and_run(&graph);
 
     ExitCode::SUCCESS
 }
