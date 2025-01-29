@@ -284,13 +284,12 @@ fn build_dependency_graph<'a>(
 
         let mut transitive = Vec::with_capacity(deps.len());
         for dep in deps.iter() {
- transitive.extend(collect_deps(dep, parsed, graph, visited, transitive_deps))
+            transitive.extend(collect_deps(dep, parsed, graph, visited, transitive_deps))
         }
 
         deps.extend(transitive);
         graph.insert(node, deps.iter().cloned().collect());
         transitive_deps.insert(node, deps.clone());
-
         deps
     }
 
