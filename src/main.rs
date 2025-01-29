@@ -432,7 +432,6 @@ fn resolve_and_build<'a>(
 
     if let Some(rule) = parsed.rules.get(job.rule) {
         let command = rule.template.compile(job, parsed);
-        println!("{command}");
         built.insert(job.target);
         commands.push(command)
     } else {
