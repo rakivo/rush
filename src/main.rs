@@ -1,8 +1,8 @@
 use std::path::Path;
-use std::sync::Mutex;
 use std::fs::{self, File};
 use std::time::SystemTime;
 use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 use std::process::{self, Stdio, ExitCode};
 
 use memmap2::Mmap;
@@ -13,8 +13,8 @@ use fxhash::{FxHashMap, FxHashSet};
 type StrHashSet<'a> = FxHashSet::<&'a str>;
 type StrHashMap<'a, T> = FxHashMap::<&'a str, T>;
 
-type Graph<'a> = StrHashMap::<'a, StrHashSet<'a>>;
-type TransitiveDeps<'a> = StrHashMap::<'a, StrHashSet<'a>>;
+type Graph<'a> = StrHashMap::<'a, Arc::<StrHashSet<'a>>>;
+type TransitiveDeps<'a> = StrHashMap::<'a, Arc::<StrHashSet<'a>>>;
 
 const RUSH_FILE_NAME: &str = "build.rush";
 
@@ -266,7 +266,7 @@ fn build_dependency_graph<'a>(
         graph: &mut Graph<'a>,
         visited: &mut StrHashSet<'a>,
         transitive_deps: &mut TransitiveDeps<'a>
-    ) -> StrHashSet<'a> {
+    ) -> Arc::<StrHashSet<'a>> {
         if visited.contains(node) {
             return transitive_deps.get(node).cloned().unwrap_or_default();
         }
@@ -283,12 +283,14 @@ fn build_dependency_graph<'a>(
 
         let mut transitive = Vec::with_capacity(deps.len());
         for dep in deps.iter() {
-            transitive.extend(collect_deps(dep, parsed, graph, visited, transitive_deps))
+            transitive.extend(collect_deps(dep, parsed, graph, visited, transitive_deps).iter().cloned())
         }
 
         deps.extend(transitive);
-        graph.insert(node, deps.clone());
-        transitive_deps.insert(node, deps.clone());
+
+        let deps = Arc::new(deps);
+        graph.insert(node, Arc::clone(&deps));
+        transitive_deps.insert(node, Arc::clone(&deps));
         deps
     }
 
@@ -307,7 +309,7 @@ fn topological_sort_levels<'a>(graph: &Graph<'a>) -> Vec::<Vec::<&'a str>> {
 
     for (node, deps) in graph {
         in_degree.entry(node).or_insert(0);
-        for dep in deps {
+        for dep in deps.iter() {
             *in_degree.entry(dep).or_insert(0) += 1
         }
     }
@@ -325,7 +327,7 @@ fn topological_sort_levels<'a>(graph: &Graph<'a>) -> Vec::<Vec::<&'a str>> {
             curr_level.push(node);
 
             let Some(deps) = graph.get(node) else { continue };
-            for dep in deps {
+            for dep in deps.iter() {
                 let e = unsafe { in_degree.get_mut(dep).unwrap_unchecked() };
                 *e -= 1;
                 if *e == 0 {
@@ -363,7 +365,7 @@ impl<'a> MetadataCache<'a> {
         }
     }
 
-    fn needs_rebuild(&self, job: &Job<'a>, transitive_deps: &StrHashMap::<StrHashSet::<'a>>) -> bool {
+    fn needs_rebuild(&self, job: &Job<'a>, transitive_deps: &TransitiveDeps<'a>) -> bool {
         #[inline]
         fn mtime<'a>(f: &'a str, cache: &MetadataCache<'a>) -> std::io::Result::<Metadata> {
             if let Some(mtime) = cache.files.get(f) {
