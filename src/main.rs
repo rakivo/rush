@@ -380,26 +380,23 @@ impl<'a> MetadataCache<'a> {
         }
     }
 
-    fn needs_rebuild(&mut self, job: &Job<'a>, transitive_deps: &StrHashMap::<Vec::<&'a str>>) -> bool {
+    fn needs_rebuild(&self, job: &Job<'a>, transitive_deps: &StrHashMap::<Vec::<&'a str>>) -> bool {
         #[inline]
-        fn mtime<'a>(f: &'a str, cache: &MetadataCache<'a>) -> std::io::Result<Metadata> {
+        fn mtime<'a>(f: &'a str, cache: &MetadataCache<'a>) -> std::io::Result::<Metadata> {
             if let Some(mtime) = cache.files.get(f) {
                 Ok(*mtime)
             } else {
                 let p: &Path = f.as_ref();
-                let metadata = p.metadata()?;
-                let mtime = metadata.modified()?;
-                let m = Metadata { mtime };
+                let m = Metadata { mtime: p.metadata()?.modified()? };
                 cache.files.insert(f, m);
                 Ok(m)
             }
         }
 
-        let mtimes = transitive_deps.get(job.target)
-            .unwrap()
-            .par_iter()
-            .filter_map(|dep| mtime(dep, self).ok())
-            .collect::<Vec::<_>>();
+        // TODO: do something here if dependent file does not exist
+        let mtimes = unsafe {
+            transitive_deps.get(job.target).unwrap_unchecked()
+        }.par_iter().filter_map(|dep| mtime(dep, self).ok()).collect::<Vec::<_>>();
 
         let Ok(target_mtime) = mtime(job.target, self) else {
             return true
@@ -409,33 +406,84 @@ impl<'a> MetadataCache<'a> {
     }
 }
 
-fn resolve_and_build<'a>(
-    job: &Job<'a>,
-    parsed: &Parsed<'a>,
-    built: &mut StrHashSet<'a>,
-    commands: &mut Vec::<String>,
-    metadata_cache: &mut MetadataCache<'a>,
-    transistive_deps: &StrHashMap::<Vec::<&'a str>>
-) {
-    if built.contains(job.target) || !metadata_cache.needs_rebuild(job, transistive_deps) {
-        println!("{target} is already built", target = job.target);
-        return
-    }
+struct Commands(Vec::<String>);
 
-    for input in job.inputs.iter() {
-        if let Some(dep_job) = parsed.jobs.get(input) {
-            resolve_and_build(dep_job, parsed, built, commands, metadata_cache, transistive_deps)
-        } else if !built.contains(input) {
-            println!("dependency {input} is assumed to exist")
+impl Commands {
+    fn execute(&self) -> ExitCode {
+        for command in self.0.iter() {
+            println!("{command}");
+            let Ok(out) = Command::new("sh")
+                .arg("-c")
+                .arg(command)
+                .output() else {
+                    return ExitCode::FAILURE
+                };
+
+            let out = if out.status.success() {
+                unsafe { std::str::from_utf8_unchecked(&out.stdout) }
+            } else {
+                unsafe { std::str::from_utf8_unchecked(&out.stderr) }
+            };
+            print!("{out}")
+        } ExitCode::SUCCESS
+    }
+}
+
+struct CommandBuilder<'a> {
+    parsed: &'a Parsed<'a>,
+    built: StrHashSet<'a>,
+    commands: Vec::<String>,
+    metadata_cache: MetadataCache<'a>,
+    transitive_deps: &'a StrHashMap::<'a, Vec::<&'a str>>
+}
+
+impl<'a> CommandBuilder<'a> {
+    fn new(parsed: &'a Parsed<'a>, transitive_deps: &'a StrHashMap::<Vec::<&'a str>>) -> Self {
+        let n = parsed.jobs.len();
+        Self {
+            parsed,
+            built: {
+                let mut map = StrHashSet::default();
+                map.reserve(n);
+                map
+            },
+            commands: Vec::with_capacity(n),
+            metadata_cache: MetadataCache::new(n),
+            transitive_deps
         }
     }
 
-    if let Some(rule) = parsed.rules.get(job.rule) {
-        let command = rule.template.compile(job, parsed);
-        built.insert(job.target);
-        commands.push(command)
-    } else {
-        eprintln!("no rule found for job: {target}", target = job.target)
+    fn _resolve_and_build(&mut self, job: &Job<'a>) {
+        if self.built.contains(job.target) || !self.metadata_cache.needs_rebuild(job, &self.transitive_deps) {
+            println!("{target} is already built", target = job.target);
+            return
+        }
+
+        for input in job.inputs.iter() {
+            if let Some(dep_job) = self.parsed.jobs.get(input) {
+                self._resolve_and_build(dep_job)
+            } else if !self.built.contains(input) {
+                println!("dependency {input} is assumed to exist")
+            }
+        }
+
+        if let Some(rule) = self.parsed.rules.get(job.rule) {
+            let command = rule.template.compile(job, self.parsed);
+            self.built.insert(job.target);
+            self.commands.push(command)
+        } else {
+            eprintln!("no rule found for job: {target}", target = job.target)
+        }
+    }
+
+    fn build(mut self, graph: &Graph) -> Commands {
+        let build_order = topological_sort(graph);
+        println!("build order:\n{build_order}");
+        for target in build_order.0 {
+            if let Some(job) = self.parsed.jobs.get(target) {
+                self._resolve_and_build(job)
+            }
+        } Commands(self.commands)
     }
 }
 
@@ -460,36 +508,9 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE
     }
 
-    let build_order = topological_sort(&graph);
-    println!("build order:\n{build_order}");
-
-    let BuildOrder(build_order) = build_order;
-    let mut built = StrHashSet::default(); built.reserve(n);
-    let mut commands = Vec::with_capacity(n);
-    let mut metadata_cache = MetadataCache::new(n);
-
-    for target in build_order {
-        if let Some(job) = parsed.jobs.get(target) {
-            resolve_and_build(job, &parsed, &mut built, &mut commands, &mut metadata_cache, &transitive_deps)
-        }
-    }
-
-    for command in commands.iter() {
-        println!("{command}");
-        let Ok(out) = Command::new("sh")
-            .arg("-c")
-            .arg(command)
-            .output() else {
-                return ExitCode::FAILURE
-            };
-
-        let out = if out.status.success() {
-            unsafe { std::str::from_utf8_unchecked(&out.stdout) }
-        } else {
-            unsafe { std::str::from_utf8_unchecked(&out.stderr) }
-        };
-        print!("{out}")
-    }
+    let cmd_builder = CommandBuilder::new(&parsed, &transitive_deps);
+    let commands = cmd_builder.build(&graph);
+    commands.execute();
 
     ExitCode::SUCCESS
 }
