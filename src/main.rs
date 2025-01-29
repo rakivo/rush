@@ -1,8 +1,9 @@
 use std::path::Path;
+use std::sync::Mutex;
 use std::fs::{self, File};
 use std::time::SystemTime;
 use std::collections::VecDeque;
-use std::process::{self, ExitCode};
+use std::process::{self, Stdio, ExitCode};
 
 use memmap2::Mmap;
 use rayon::prelude::*;
@@ -388,38 +389,42 @@ impl<'a> MetadataCache<'a> {
     }
 }
 
-struct Command<'a>(&'a str);
+struct Command(String);
 
-impl Command<'_> {
-    fn execute(&self) -> ExitCode {
+impl Command {
+    fn execute(self) -> std::io::Result::<Output> {
         let Self(command) = self;
-        println!("{command}");
-        let Ok(out) = process::Command::new("sh")
+        let out = process::Command::new("sh")
             .arg("-c")
-            .arg(command)
-            .output() else {
-                return ExitCode::FAILURE
-            };
+            .arg(&command)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()?;
 
-        let out = if out.status.success() {
-            unsafe { std::str::from_utf8_unchecked(&out.stdout) }
-        } else {
-            unsafe { std::str::from_utf8_unchecked(&out.stderr) }
-        };
-        print!("{out}");
-        ExitCode::SUCCESS
+        let stdout = unsafe { String::from_utf8_unchecked(out.stdout) };
+        let stderr = unsafe { String::from_utf8_unchecked(out.stderr) };
+
+        Ok(Output {stdout, stderr, command})
     }
 }
+
+struct Output {
+    stdout: String,
+    stderr: String,
+    command: String,
+}
+
+type Outputs = Mutex::<Vec::<Output>>;
 
 struct CommandBuilder<'a> {
     parsed: &'a Parsed<'a>,
     compiled: DashSet::<&'a str>,
-    metadata_cache: MetadataCache<'a>,
-    transitive_deps: &'a StrHashMap::<'a, StrHashSet::<'a>>
+    metadata_cache: MetadataCache<'a>,    
+    transitive_deps: &'a TransitiveDeps<'a>
 }
 
 impl<'a> CommandBuilder<'a> {
-    fn new(parsed: &'a Parsed<'a>, transitive_deps: &'a StrHashMap::<StrHashSet::<'a>>) -> Self {
+    fn new(parsed: &'a Parsed, transitive_deps: &'a TransitiveDeps) -> Self {
         let n = parsed.jobs.len();
         Self {
             parsed,
@@ -429,7 +434,7 @@ impl<'a> CommandBuilder<'a> {
         }
     }
 
-    fn _resolve_and_run(&self, job: &Job<'a>) {
+    fn _resolve_and_run(&self, job: &Job<'a>, outputs: &Outputs) {
         if self.compiled.contains(job.target) || !self.metadata_cache.needs_rebuild(job, &self.transitive_deps) {
             println!("{target} is already built", target = job.target);
             return
@@ -437,7 +442,7 @@ impl<'a> CommandBuilder<'a> {
 
         for input in job.inputs.iter() {
             if let Some(dep_job) = self.parsed.jobs.get(input) {
-                self._resolve_and_run(dep_job)
+                self._resolve_and_run(dep_job, outputs)
             } else if !self.compiled.contains(input) {
                 println!("dependency {input} is assumed to exist")
             }
@@ -445,9 +450,18 @@ impl<'a> CommandBuilder<'a> {
 
         if let Some(rule) = self.parsed.rules.get(job.rule) {
             self.compiled.insert(job.target);
-            let command = rule.template.compile(job, self.parsed);
-            let command = Command(&command);
-            command.execute();
+            let command = Command(rule.template.compile(job, self.parsed));
+            let output = match command.execute() {
+                Ok(ok) => ok,
+                Err(e) => {
+                    eprintln!{
+                        "could not execute job: {target}: {e}",
+                        target = job.target
+                    };
+                    return
+                }
+            };
+            outputs.lock().unwrap().push(output);
         } else {
             eprintln!("no rule found for job: {target}", target = job.target)
         }
@@ -461,13 +475,17 @@ impl<'a> CommandBuilder<'a> {
             println!("{i}: {level:?}")
         });
 
-        for level in levels.into_iter() {
-            level.into_par_iter().for_each(|target| {
-                if let Some(job) = self.parsed.jobs.get(target) {
-                    self._resolve_and_run(job)
-                }
+        levels.into_iter().for_each(|level| {
+            let outputs = Mutex::new(Vec::with_capacity(level.len()));
+            level.into_par_iter().filter_map(|t| self.parsed.jobs.get(t)).for_each(|job| {
+                self._resolve_and_run(job, &outputs)
             });
-        }
+            for Output { stdout, stderr, command } in outputs.lock().unwrap().iter() {
+                println!("{command}");
+                print!("{stdout}");
+                print!("{stderr}");
+            }
+        });
     }
 }
 
