@@ -255,7 +255,6 @@ impl<'a> Parser<'a> {
     }
 }
 
-// TODO: clone less here
 fn build_dependency_graph<'a>(
     parsed: &'a Parsed,
     visited: &mut StrHashSet<'a>,
@@ -288,7 +287,7 @@ fn build_dependency_graph<'a>(
         }
 
         deps.extend(transitive);
-        graph.insert(node, deps.iter().cloned().collect());
+        graph.insert(node, deps.clone());
         transitive_deps.insert(node, deps.clone());
         deps
     }
@@ -319,8 +318,9 @@ fn topological_sort_levels<'a>(graph: &Graph<'a>) -> Vec::<Vec::<&'a str>> {
         .collect::<VecDeque::<_>>();
 
     while !queue.is_empty() {
-        let mut curr_level = Vec::with_capacity(queue.len());
-        for _ in 0..queue.len() {
+        let n = queue.len();
+        let mut curr_level = Vec::with_capacity(n);
+        for _ in 0..n {
             let node = unsafe { queue.pop_front().unwrap_unchecked() };
             curr_level.push(node);
 
