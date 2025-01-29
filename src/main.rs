@@ -1,18 +1,20 @@
 use std::path::Path;
-use std::fmt::Display;
 use std::fs::{self, File};
 use std::time::SystemTime;
+use std::sync::{Arc, Mutex};
+use std::collections::VecDeque;
 use std::process::{Command, ExitCode};
 
 use memmap2::Mmap;
-use dashmap::DashMap;
 use rayon::prelude::*;
+use dashmap::{DashMap, DashSet};
 use fxhash::{FxHashMap, FxHashSet};
 
 type StrHashSet<'a> = FxHashSet::<&'a str>;
 type StrHashMap<'a, T> = FxHashMap::<&'a str, T>;
 
 type Graph<'a> = StrHashMap::<'a, StrHashSet<'a>>;
+type TransitiveDeps<'a> = StrHashMap::<'a, StrHashSet<'a>>;
 
 const RUSH_FILE_NAME: &str = "build.rush";
 
@@ -37,13 +39,15 @@ fn read_rush() -> Option::<Mmap> {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(PartialEq)]
+#[cfg_attr(feature = "dbg", derive(Debug))]
 enum TemplateChunk<'a> {
     Static(&'a str),
     Placeholder(&'a str),
 }
 
-#[derive(Debug, Default, PartialEq)]
+#[derive(Default, PartialEq)]
+#[cfg_attr(feature = "dbg", derive(Debug))]
 struct Template<'a> {
     statics_len: usize,
     chunks: Vec::<TemplateChunk<'a>>,
@@ -69,7 +73,8 @@ impl Template<'_> {
     }
 }
 
-#[derive(Debug, Default, PartialEq)]
+#[derive(Default, PartialEq)]
+#[cfg_attr(feature = "dbg", derive(Debug))]
 struct Rule<'a> {
     command: &'a str,
     template: Template<'a>,
@@ -84,9 +89,9 @@ impl<'a> Rule<'a> {
     }
 
     fn template(command: &str) -> Template {
-        let mut chunks = Vec::new();
         let mut start = 0;
         let mut statics_len = 0;
+        let mut chunks = Vec::new();
 
         while let Some(i) = command[start..].find('$') {
             let i = start + i;
@@ -126,7 +131,8 @@ impl<'a> Rule<'a> {
     }
 }
 
-#[derive(Debug, Default, PartialEq)]
+#[derive(Default, PartialEq)]
+#[cfg_attr(feature = "dbg", derive(Debug))]
 struct Job<'a> {
     target: &'a str,
     rule: &'a str,
@@ -135,26 +141,31 @@ struct Job<'a> {
     deps: Vec::<&'a str>
 }
 
-#[derive(Debug, Default, PartialEq)]
+#[repr(transparent)]
+#[derive(Default, PartialEq)]
+#[cfg_attr(feature = "dbg", derive(Debug))]
 struct Def<'a> {
     value: &'a str
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
+#[cfg_attr(feature = "dbg", derive(Debug))]
 struct Parsed<'a> {
     jobs: StrHashMap::<'a, Job<'a>>,
     defs: StrHashMap::<'a, Def<'a>>,
     rules: StrHashMap::<'a, Rule<'a>>,
 }
 
-#[derive(Debug, Default, PartialEq)]
+#[derive(Default, PartialEq)]
+#[cfg_attr(feature = "dbg", derive(Debug))]
 enum Context<'a> {
     #[default]
     Global,
     Rule(&'a str),
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
+#[cfg_attr(feature = "dbg", derive(Debug))]
 struct Parser<'a> {
     cursor: usize,
     parsed: Parsed<'a>,
@@ -248,38 +259,35 @@ impl<'a> Parser<'a> {
 fn build_dependency_graph<'a>(
     parsed: &'a Parsed,
     visited: &mut StrHashSet<'a>,
-    transitive_deps: &mut StrHashMap::<'a, Vec::<&'a str>>,
+    transitive_deps: &mut TransitiveDeps<'a>
 ) -> Graph<'a> {
     fn collect_deps<'a>(
         node: &'a str,
         parsed: &'a Parsed,
-        visited: &mut StrHashSet<'a>,
         graph: &mut Graph<'a>,
-        transitive_deps: &mut StrHashMap::<'a, Vec::<&'a str>>,
-    ) -> Vec::<&'a str> {
+        visited: &mut StrHashSet<'a>,
+        transitive_deps: &mut TransitiveDeps<'a>
+    ) -> StrHashSet<'a> {
         if visited.contains(node) {
             return transitive_deps.get(node).cloned().unwrap_or_default();
         }
 
         visited.insert(node);
 
-        let mut deps = parsed.jobs.get(node)
-            .map(|job| {
-                job.inputs
-                    .iter()
-                    .chain(job.deps.iter())
-                    .cloned()
-                    .collect::<Vec::<_>>()
-            }).unwrap_or_default();
+        let mut deps = parsed.jobs.get(node).map(|job| {
+            job.inputs
+                .iter()
+                .chain(job.deps.iter())
+                .cloned()
+                .collect::<StrHashSet>()
+        }).unwrap_or_default();
 
-        let mut transitive = Vec::new();
-        for dep in &deps {
-            transitive.extend(collect_deps(dep, parsed, visited, graph, transitive_deps));
+        let mut transitive = Vec::with_capacity(deps.len());
+        for dep in deps.iter() {
+ transitive.extend(collect_deps(dep, parsed, graph, visited, transitive_deps))
         }
 
         deps.extend(transitive);
-        deps.dedup();
-
         graph.insert(node, deps.iter().cloned().collect());
         transitive_deps.insert(node, deps.clone());
 
@@ -290,86 +298,62 @@ fn build_dependency_graph<'a>(
     graph.reserve(parsed.jobs.len());
 
     for target in parsed.jobs.keys() {
-        collect_deps(target, parsed, visited, &mut graph, transitive_deps);
+        collect_deps(target, parsed, &mut graph, visited, transitive_deps);
     } graph
 }
 
-#[cfg(debug_assertions)]
-fn is_dag(graph: &Graph) -> bool {
-    let n = graph.len();
-    let mut stack = StrHashSet::default(); stack.reserve(n);
-    let mut visited = StrHashSet::default(); visited.reserve(n);
+fn topological_sort_levels<'a>(graph: &Graph<'a>) -> Vec::<Vec::<&'a str>> {
+    let mut levels = Vec::new();
+    let mut in_degree = StrHashMap::default();
+    in_degree.reserve(graph.len());
 
-    fn dfs<'a>(node: &'a str, graph: &Graph<'a>, visited: &mut StrHashSet<'a>, stack: &mut StrHashSet<'a>) -> bool {
-        if stack.contains(node) { return false }
-        if visited.contains(node) { return true }
+    for (node, deps) in graph {
+        in_degree.entry(node).or_insert(0);
+        for dep in deps {
+            *in_degree.entry(dep).or_insert(0) += 1
+        }
+    }
 
-        stack.insert(node);
-        visited.insert(node);
+    let mut queue = in_degree.iter()
+        .filter(|(.., degree)| **degree == 0)
+        .map(|(node, ..)| *node)
+        .collect::<VecDeque::<_>>();
 
-        if let Some(dependencies) = graph.get(node) {
-            for dep in dependencies {
-                if !dfs(dep, graph, visited, stack) {
-                    return false
+    while !queue.is_empty() {
+        let mut curr_level = Vec::with_capacity(queue.len());
+        for _ in 0..queue.len() {
+            let node = unsafe { queue.pop_front().unwrap_unchecked() };
+            curr_level.push(node);
+
+            let Some(deps) = graph.get(node) else { continue };
+            for dep in deps {
+                let e = unsafe { in_degree.get_mut(dep).unwrap_unchecked() };
+                *e -= 1;
+                if *e == 0 {
+                    queue.push_back(*dep)
                 }
             }
         }
 
-        stack.remove(node);
-        true
+        levels.push(curr_level)
     }
 
-    for node in graph.keys() {
-        if !dfs(node, graph, &mut visited, &mut stack) {
-            return false
-        }
+    #[cfg(feature = "dbg")]
+    if in_degree.values().any(|&degree| degree > 0) {
+        panic!("[FATAL] cycle has been detected in the dependency graph")
     }
 
-    true
-}
-
-struct BuildOrder<'a>(Vec::<&'a str>);
-
-impl Display for BuildOrder<'_> {
-    #[inline]
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0[0])?;
-        for b in self.0[1..].iter() { write!(f, " -> {b}")? }
-        Ok(())
-    }
-}
-
-fn topological_sort<'a>(graph: &Graph<'a>) -> BuildOrder<'a> {
-    let n = graph.len();
-    let mut ret = Vec::with_capacity(n);
-    let mut visited = StrHashSet::default(); visited.reserve(n);
-
-    fn dfs<'a>(node: &'a str, graph: &Graph<'a>, visited: &mut StrHashSet<'a>, ret: &mut Vec::<&'a str>) {
-        if visited.contains(node) { return }
-
-        visited.insert(node);
-
-        graph.get(node).map(|deps| {
-            deps.iter().for_each(|dep| dfs(dep, graph, visited, ret));
-        });
-
-        ret.push(node)
-    }
-
-    for node in graph.keys() {
-        dfs(node, graph, &mut visited, &mut ret)
-    }
-
-    BuildOrder(ret)
+    levels.reverse();
+    levels
 }
 
 #[derive(Copy, Clone, PartialEq, PartialOrd)]
 struct Metadata {
-    mtime: SystemTime,
+    mtime: SystemTime
 }
 
 struct MetadataCache<'a> {
-    files: DashMap::<&'a str, Metadata>,
+    files: DashMap::<&'a str, Metadata>
 }
 
 impl<'a> MetadataCache<'a> {
@@ -380,7 +364,7 @@ impl<'a> MetadataCache<'a> {
         }
     }
 
-    fn needs_rebuild(&self, job: &Job<'a>, transitive_deps: &StrHashMap::<Vec::<&'a str>>) -> bool {
+    fn needs_rebuild(&self, job: &Job<'a>, transitive_deps: &StrHashMap::<StrHashSet::<'a>>) -> bool {
         #[inline]
         fn mtime<'a>(f: &'a str, cache: &MetadataCache<'a>) -> std::io::Result::<Metadata> {
             if let Some(mtime) = cache.files.get(f) {
@@ -406,11 +390,11 @@ impl<'a> MetadataCache<'a> {
     }
 }
 
-struct Commands(Vec::<String>);
+struct Commands(Arc::<Mutex::<Vec::<String>>>);
 
 impl Commands {
     fn execute(&self) -> ExitCode {
-        for command in self.0.iter() {
+        for command in self.0.lock().unwrap().iter() {
             println!("{command}");
             let Ok(out) = Command::new("sh")
                 .arg("-c")
@@ -431,29 +415,25 @@ impl Commands {
 
 struct CommandBuilder<'a> {
     parsed: &'a Parsed<'a>,
-    built: StrHashSet<'a>,
-    commands: Vec::<String>,
+    built: DashSet::<&'a str>,
+    commands: Arc::<Mutex::<Vec::<String>>>,
     metadata_cache: MetadataCache<'a>,
-    transitive_deps: &'a StrHashMap::<'a, Vec::<&'a str>>
+    transitive_deps: &'a StrHashMap::<'a, StrHashSet::<'a>>
 }
 
 impl<'a> CommandBuilder<'a> {
-    fn new(parsed: &'a Parsed<'a>, transitive_deps: &'a StrHashMap::<Vec::<&'a str>>) -> Self {
+    fn new(parsed: &'a Parsed<'a>, transitive_deps: &'a StrHashMap::<StrHashSet::<'a>>) -> Self {
         let n = parsed.jobs.len();
         Self {
             parsed,
-            built: {
-                let mut map = StrHashSet::default();
-                map.reserve(n);
-                map
-            },
-            commands: Vec::with_capacity(n),
+            built: DashSet::with_capacity(n),
+            commands: Arc::new(Mutex::new(Vec::with_capacity(n))),
             metadata_cache: MetadataCache::new(n),
             transitive_deps
         }
     }
 
-    fn _resolve_and_build(&mut self, job: &Job<'a>) {
+    fn _resolve_and_build(&self, job: &Job<'a>) {
         if self.built.contains(job.target) || !self.metadata_cache.needs_rebuild(job, &self.transitive_deps) {
             println!("{target} is already built", target = job.target);
             return
@@ -470,20 +450,29 @@ impl<'a> CommandBuilder<'a> {
         if let Some(rule) = self.parsed.rules.get(job.rule) {
             let command = rule.template.compile(job, self.parsed);
             self.built.insert(job.target);
-            self.commands.push(command)
+            self.commands.lock().unwrap().push(command)
         } else {
             eprintln!("no rule found for job: {target}", target = job.target)
         }
     }
 
-    fn build(mut self, graph: &Graph) -> Commands {
-        let build_order = topological_sort(graph);
-        println!("build order:\n{build_order}");
-        for target in build_order.0 {
-            if let Some(job) = self.parsed.jobs.get(target) {
-                self._resolve_and_build(job)
-            }
-        } Commands(self.commands)
+    fn build(self, graph: &Graph) -> Commands {
+        let levels = topological_sort_levels(graph);
+
+        #[cfg(feature = "dbg")]
+        levels.iter().enumerate().for_each(|(i, level)| {
+            println!("{i}: {level:?}")
+        });
+
+        for level in levels.into_iter() {
+            level.into_par_iter().for_each(|target| {
+                if let Some(job) = self.parsed.jobs.get(target) {
+                    self._resolve_and_build(job)
+                }
+            });
+        }
+
+        Commands(self.commands)
     }
 }
 
@@ -501,12 +490,6 @@ fn main() -> ExitCode {
     let mut visited = StrHashSet::default(); visited.reserve(n);
     let mut transitive_deps = StrHashMap::default(); transitive_deps.reserve(n);
     let graph = build_dependency_graph(&parsed, &mut visited, &mut transitive_deps);
-
-    #[cfg(debug_assertions)]
-    if !is_dag(&graph) {
-        eprintln!("[FATAL] dependency graph contains cycles");
-        return ExitCode::FAILURE
-    }
 
     let cmd_builder = CommandBuilder::new(&parsed, &transitive_deps);
     let commands = cmd_builder.build(&graph);

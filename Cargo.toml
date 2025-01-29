@@ -4,8 +4,11 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Mark Tyrkba <marktyrkba456@gmail.com>"]
 
+[features]
+dbg = []
+
 [dependencies]
 rayon = "1.10.0"
 fxhash = "0.2.1"
 memmap2 = "0.9.5"
-dashmap = "6.1.0"
+dashmap = { version = "6.1.0", features = ["inline"] }
