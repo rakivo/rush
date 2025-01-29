@@ -311,8 +311,7 @@ fn build_dependency_graph<'a>(
         deps
     }
 
-    let mut graph = StrHashMap::default();
-    graph.reserve(parsed.jobs.len());
+    let mut graph = StrHashMap::with_capacity(parsed.jobs.len());
 
     for target in parsed.jobs.keys() {
         collect_deps(target, parsed, &mut graph, visited, transitive_deps);
@@ -321,10 +320,9 @@ fn build_dependency_graph<'a>(
 
 fn topological_sort_levels<'a>(graph: &Graph<'a>) -> Vec::<Vec::<&'a str>> {
     let mut levels = Vec::new();
-    let mut in_degree = StrHashMap::<i64>::default();
-    in_degree.reserve(graph.len());
+    let mut in_degree = StrHashMap::<i64>::with_capacity(graph.len());
 
-    for (node, deps) in graph {
+    for (node, deps) in graph.iter() {
         in_degree.entry(node).or_insert(0);
         for dep in deps.iter() {
             *in_degree.entry(dep).or_insert(0) += 1
@@ -577,8 +575,8 @@ fn main() -> ExitCode {
     let parsed = Parser::parse(content);
 
     let n = parsed.jobs.len();
-    let mut visited = StrHashSet::default(); visited.reserve(n);
-    let mut transitive_deps = StrHashMap::default(); transitive_deps.reserve(n);
+    let mut visited = StrHashSet::with_capacity(n);
+    let mut transitive_deps = StrHashMap::with_capacity(n);
     let graph = build_dependency_graph(&parsed, &mut visited, &mut transitive_deps);
 
     let cmd_builder = CommandBuilder::new(&parsed, &transitive_deps);

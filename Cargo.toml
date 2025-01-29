@@ -8,8 +8,8 @@ authors = ["Mark Tyrkba <marktyrkba456@gmail.com>"]
 dbg = []
 
 [dependencies]
+libc = "0.2.169"
 rayon = "1.10.0"
-fxhash = "0.2.1"
 memmap2 = "0.9.5"
 dashmap = { version = "6.1.0", features = ["inline"] }
-libc = "0.2.169"
+fxhash = { git = "https://github.com/rakivo/fxhash", rev = "b4b5461" }
