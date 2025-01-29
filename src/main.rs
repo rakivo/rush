@@ -81,11 +81,9 @@ struct Rule<'a> {
 }
 
 impl<'a> Rule<'a> {
+    #[inline]
     fn new(command: &'a str) -> Self {
-        Self {
-            command,
-            template: Self::template(command)
-        }
+        Self {command, template: Self::template(command)}
     }
 
     fn template(command: &str) -> Template {
@@ -245,6 +243,7 @@ impl<'a> Parser<'a> {
         };
     }
 
+    #[inline]
     fn parse(content: &'a str) -> Parsed<'a> {
         let mut parser = Self::default();
         for line in content.lines() {
@@ -360,9 +359,7 @@ struct MetadataCache<'a> {
 impl<'a> MetadataCache<'a> {
     #[inline]
     fn new(files_count: usize) -> Self {
-        Self {
-            files: DashMap::with_capacity(files_count),
-        }
+        Self {files: DashMap::with_capacity(files_count)}
     }
 
     #[inline]
@@ -392,6 +389,7 @@ impl<'a> MetadataCache<'a> {
     }
 }
 
+#[repr(transparent)]
 struct Command(String);
 
 impl Command {
@@ -427,6 +425,7 @@ struct CommandBuilder<'a> {
 }
 
 impl<'a> CommandBuilder<'a> {
+    #[inline]
     fn new(parsed: &'a Parsed, transitive_deps: &'a TransitiveDeps) -> Self {
         let n = parsed.jobs.len();
         Self {
