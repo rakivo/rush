@@ -1,10 +1,15 @@
+use std::io;
+use std::mem;
+use std::ptr;
+use std::ffi::CStr;
 use std::path::Path;
 use std::str::Lines;
 use std::fs::{self, File};
 use std::time::SystemTime;
+use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 use std::collections::VecDeque;
-use std::process::{self, Stdio, ExitCode};
+use std::os::fd::{FromRawFd, IntoRawFd};
 
 use memmap2::Mmap;
 use rayon::prelude::*;
@@ -18,6 +23,10 @@ type Graph<'a> = StrHashMap::<'a, Arc::<StrHashSet<'a>>>;
 type TransitiveDeps<'a> = StrHashMap::<'a, Arc::<StrHashSet<'a>>>;
 
 const RUSH_FILE_NAME: &str = "build.rush";
+
+const SHELL_CSTR: &CStr = &unsafe { CStr::from_bytes_with_nul_unchecked(b"/bin/sh\0") };
+const ARG_C_CSTR: &CStr = &unsafe { CStr::from_bytes_with_nul_unchecked(b"-c\0") };
+const ENV_PATH_CSTR: &CStr = &unsafe { CStr::from_bytes_with_nul_unchecked(b"PATH=/usr/bin:/bin\0") };
 
 #[inline(always)]
 fn to_str(bytes: &[u8]) -> &str {
@@ -371,7 +380,7 @@ impl<'a> MetadataCache<'a> {
     }
 
     #[inline]
-    fn mtime(&self, f: &'a str) -> std::io::Result::<Metadata> {
+    fn mtime(&self, f: &'a str) -> io::Result::<Metadata> {
         if let Some(mtime) = self.files.get(f) {
             Ok(*mtime)
         } else {
@@ -400,20 +409,79 @@ impl<'a> MetadataCache<'a> {
 #[repr(transparent)]
 struct Command(String);
 
+// Custom implementation of `Command` to avoid fork + exec overhead
 impl Command {
-    fn execute(self) -> std::io::Result::<Output> {
+    fn create_pipe() -> io::Result::<(File, File)> {
+        let mut fds = [0; 2];
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+            return Err(io::Error::last_os_error())
+        }
+        let r = unsafe { File::from_raw_fd(fds[0]) };
+        let w = unsafe { File::from_raw_fd(fds[1]) };
+        Ok((r, w))
+    }
+
+    fn execute(self) -> io::Result::<Output> {
         let Self(command) = self;
-        let out = process::Command::new("sh")
-            .arg("-c")
-            .arg(&command)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()?;
 
-        let stdout = unsafe { String::from_utf8_unchecked(out.stdout) };
-        let stderr = unsafe { String::from_utf8_unchecked(out.stderr) };
+        let (mut stdout_reader, stdout_writer) = Self::create_pipe()?;
+        let (mut stderr_reader, stderr_writer) = Self::create_pipe()?;
 
-        Ok(Output {stdout, stderr, command})
+        let cmd = unsafe { CStr::from_ptr(command.as_ptr() as *const _) };
+        let args = [SHELL_CSTR.as_ptr(), ARG_C_CSTR.as_ptr(), cmd.as_ptr(), ptr::null()];
+
+        let stdout_writer_fd = stdout_writer.into_raw_fd();
+        let stderr_writer_fd = stderr_writer.into_raw_fd();
+
+        let mut file_actions = unsafe { mem::zeroed() };
+        unsafe {
+            libc::posix_spawn_file_actions_init(&mut file_actions);
+            libc::posix_spawn_file_actions_adddup2(&mut file_actions, stdout_writer_fd, libc::STDOUT_FILENO);
+            libc::posix_spawn_file_actions_adddup2(&mut file_actions, stderr_writer_fd, libc::STDERR_FILENO);
+        }
+
+        let mut attr = unsafe { mem::zeroed() };
+        unsafe {
+            libc::posix_spawnattr_init(&mut attr);
+        }
+
+        let env = [ENV_PATH_CSTR.as_ptr(), ptr::null()];
+
+        let mut pid = 0;
+        let ret = unsafe {
+            libc::posix_spawn(
+                &mut pid,
+                SHELL_CSTR.as_ptr(),
+                &file_actions,
+                &attr,
+                args.as_ptr() as *const *mut _,
+                env.as_ptr() as *const *mut _
+            )
+        };
+
+        if ret != 0 {
+            return Err(io::Error::last_os_error())
+        }
+
+        unsafe {
+            libc::close(stdout_writer_fd);
+            libc::close(stderr_writer_fd);
+        }
+
+        let stdout = io::read_to_string(&mut stdout_reader)?;
+        let stderr = io::read_to_string(&mut stderr_reader)?;
+
+        let mut status = 0;
+        unsafe {
+            libc::waitpid(pid, &mut status, 0);
+        }
+
+        unsafe {
+            libc::posix_spawn_file_actions_destroy(&mut file_actions);
+            libc::posix_spawnattr_destroy(&mut attr);
+        }
+
+        Ok(Output {command, stdout, stderr})
     }
 }
 
@@ -509,7 +577,6 @@ fn main() -> ExitCode {
     let parsed = Parser::parse(content);
 
     let n = parsed.jobs.len();
-
     let mut visited = StrHashSet::default(); visited.reserve(n);
     let mut transitive_deps = StrHashMap::default(); transitive_deps.reserve(n);
     let graph = build_dependency_graph(&parsed, &mut visited, &mut transitive_deps);
