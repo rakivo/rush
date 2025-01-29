@@ -5,7 +5,7 @@
 cflags = -Wall -Wextra -O2
 
 rule cc
-  command = cc -o $out -c $in
+  command = cc $cflags -o $out -c $in
 
 rule link
   command = cc -o $out $in
