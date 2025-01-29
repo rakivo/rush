@@ -1,8 +1,9 @@
 use std::path::Path;
+use std::str::Lines;
 use std::fs::{self, File};
 use std::time::SystemTime;
-use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use std::collections::VecDeque;
 use std::process::{self, Stdio, ExitCode};
 
 use memmap2::Mmap;
@@ -172,18 +173,14 @@ struct Parser<'a> {
 
 impl<'a> Parser<'a> {
     fn parse_line(&mut self, line: &'a str) {
-        let start = line.chars().take_while(|c| c.is_ascii_whitespace()).count();
-
-        if start == 0 && matches!(self.context, Context::Rule(..)) {
+        if line.is_empty() && matches!(self.context, Context::Rule(..)) {
             self.context = Context::Global;
             return
         }
 
-        let Some(first_space) = line[start..].chars()
-            .position(|c| c.is_ascii_whitespace())
-            .map(|p| p + start) else {
-                return
-            };
+        let Some(first_space) = line.chars().position(|c| c.is_ascii_whitespace()) else {
+            return
+        };
 
         let Some(second_space) = line[first_space..].chars()
             .position(|c| !c.is_ascii_whitespace())
@@ -191,7 +188,7 @@ impl<'a> Parser<'a> {
                 return
             };
 
-        let first_token = line[start..first_space].trim();
+        let ref first_token = line[..first_space];
 
         match &self.context {
             Context::Rule(name) => {
@@ -210,7 +207,7 @@ impl<'a> Parser<'a> {
             Context::Global => {
                 match first_token {
                     "rule" => {
-                        self.context = Context::Rule(&line[second_space..].trim())
+                        self.context = Context::Rule(line[second_space..].trim_end())
                     },
                     "build" => {
                         let colon_idx = line.chars().position(|c| c == ':').unwrap();
@@ -218,7 +215,7 @@ impl<'a> Parser<'a> {
                         let target = line[first_space..colon_idx].trim();
                         let or_idx = post_colon.chars().position(|c| c == '|');
                         let (inputs_str, deps) = if let Some(or_idx) = or_idx {
-                            let inputs_str = post_colon[..or_idx].trim();
+                            let inputs_str = post_colon[..or_idx].trim_end();
                             let deps = post_colon[or_idx + 1..].split_ascii_whitespace().collect();
                             (inputs_str, deps)
                         } else {
@@ -228,7 +225,7 @@ impl<'a> Parser<'a> {
                         let Some(rule) = input_tokens.next() else { return };
                         let rule_len = rule.len();
                         let inputs = input_tokens.collect();
-                        let ref inputs_wo_rule_str = inputs_str[rule_len..];
+                        let inputs_wo_rule_str = inputs_str[rule_len + 1..].trim_end();
                         let job = Job {target, rule, inputs, inputs_wo_rule_str, deps};
                         self.parsed.jobs.insert(target, job);
                     },
@@ -243,14 +240,27 @@ impl<'a> Parser<'a> {
         };
     }
 
+    fn handle_newline_escape(&mut self, line: &'a str, lines: &mut Lines<'a>) -> &'a str {
+        let mut full_line = line.trim_end();
+        while full_line.as_bytes().last() == Some(&b'$') {
+            let trimmed = full_line[..full_line.len() - 1].trim_end();
+            let Some(next_line) = lines.next() else { break };
+            self.cursor += 1;
+            let next_trimmed = next_line.trim();
+            let concat = format!("{trimmed} {next_trimmed}");
+            full_line = Box::leak(concat.into_boxed_str());
+        } full_line.trim_start()
+    }
+
     #[inline]
     fn parse(content: &'a str) -> Parsed<'a> {
         let mut parser = Self::default();
-        for line in content.lines() {
+        let mut lines = content.lines();
+        while let Some(line) = lines.next() {
             parser.cursor += 1;
+            let line = parser.handle_newline_escape(line, &mut lines);
             parser.parse_line(line)
-        }
-        parser.parsed
+        } parser.parsed
     }
 }
 
@@ -273,8 +283,7 @@ fn build_dependency_graph<'a>(
         visited.insert(node);
 
         let mut deps = parsed.jobs.get(node).map(|job| {
-            job.inputs
-                .iter()
+            job.inputs.iter()
                 .chain(job.deps.iter())
                 .cloned()
                 .collect::<StrHashSet>()
@@ -303,7 +312,7 @@ fn build_dependency_graph<'a>(
 
 fn topological_sort_levels<'a>(graph: &Graph<'a>) -> Vec::<Vec::<&'a str>> {
     let mut levels = Vec::new();
-    let mut in_degree = StrHashMap::default();
+    let mut in_degree = StrHashMap::<i64>::default();
     in_degree.reserve(graph.len());
 
     for (node, deps) in graph {
@@ -338,8 +347,7 @@ fn topological_sort_levels<'a>(graph: &Graph<'a>) -> Vec::<Vec::<&'a str>> {
         levels.push(curr_level)
     }
 
-    #[cfg(feature = "dbg")]
-    if in_degree.values().any(|&degree| degree > 0) {
+    if cfg!(feature = "dbg") && in_degree.values().any(|d| d.is_positive()) {
         panic!("[FATAL] cycle has been detected in the dependency graph")
     }
 
