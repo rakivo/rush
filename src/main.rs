@@ -417,6 +417,7 @@ impl<'a> Parser<'a> {
         let mut lines = content.lines();
         while let Some(line) = lines.next() {
             parser.cursor += 1;
+            if line.as_bytes().first() == Some(&b'#') { continue }
             let line = parser.handle_newline_escape(line, &mut lines);
             parser.parse_line(line)
         } parser.parsed
