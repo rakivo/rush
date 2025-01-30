@@ -1,18 +1,24 @@
 # [rush](https://github.com/rakivo/rush/tree/master)
 
-# Currently supported functionality
+# Currently Supported Functionality
 ```ninja
-cflags = -Wall -Wextra -O2
+cflags =
 
 rule cc
   command = cc $cflags -o $out -c $in
+  description = compile $in to $out
 
 rule link
-  command = cc -o $out $in
+  command = cc $cflags -o $out $in
+  description = link $in into $out
 
 build foo.o: cc foo.c | foo.h
 build bar.o: cc bar.c | bar.h
 build main.o: cc main.c
+  cflags = -Wall -Wextra -O3
 
-build main: link foo.o bar.o main.o
+build main: link foo.o $
+  bar.o $
+  main.o
+  cflags = -O3
 ```
