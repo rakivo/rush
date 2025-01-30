@@ -783,9 +783,12 @@ fn main() -> ExitCode {
     let parsed = Parser::parse(content);
 
     let n = parsed.jobs.len();
-    let mut visited = StrHashSet::with_capacity(n);
     let mut transitive_deps = StrHashMap::with_capacity(n);
-    let graph = build_dependency_graph(&parsed, &mut visited, &mut transitive_deps);
+    let graph = build_dependency_graph(
+        &parsed,
+        &mut StrHashSet::with_capacity(n),
+        &mut transitive_deps
+    );
 
     let cmd_builder = CommandBuilder::new(&parsed, &transitive_deps);
     cmd_builder.resolve_and_run(&graph);
