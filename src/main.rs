@@ -6,8 +6,8 @@ use std::path::Path;
 use std::str::Lines;
 use std::fs::{self, File};
 use std::time::SystemTime;
-use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
+use std::process::{ExitCode};
 use std::collections::VecDeque;
 use std::os::fd::{FromRawFd, IntoRawFd};
 
@@ -24,8 +24,8 @@ type TransitiveDeps<'a> = StrHashMap::<'a, Arc::<StrHashSet<'a>>>;
 
 const RUSH_FILE_NAME: &str = "build.rush";
 
-const SHELL_CSTR: &CStr = &unsafe { CStr::from_bytes_with_nul_unchecked(b"/bin/sh\0") };
 const ARG_C_CSTR: &CStr = &unsafe { CStr::from_bytes_with_nul_unchecked(b"-c\0") };
+const SHELL_CSTR: &CStr = &unsafe { CStr::from_bytes_with_nul_unchecked(b"/bin/sh\0") };
 const ENV_PATH_CSTR: &CStr = &unsafe { CStr::from_bytes_with_nul_unchecked(b"PATH=/usr/bin:/bin\0") };
 
 #[inline(always)]
@@ -49,6 +49,30 @@ fn read_rush() -> Option::<Mmap> {
     }
 }
 
+#[repr(transparent)]
+#[derive(Copy, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "dbg", derive(Debug))]
+struct Loc(usize);
+
+impl Loc {
+    #[inline]
+    #[cfg_attr(feature = "dbg", track_caller)]
+    fn report(&self, msg: &str) -> ! {
+        let Self(row) = self;
+        #[cfg(feature = "dbg")] {
+            panic!("{RUSH_FILE_NAME}:{row}: {msg}")
+        } #[cfg(not(feature = "dbg"))] {
+            eprintln!("{RUSH_FILE_NAME}:{row}: {msg}");
+            std::process::exit(1)
+        }
+    }
+}
+
+macro_rules! report {
+    ($loc: expr, $($arg:tt)*) => { $loc.report(&format!($($arg)*)) };
+    ($loc: expr, $lit: literal) => { $loc.report($lit) }
+}
+
 #[derive(PartialEq)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 enum TemplateChunk<'a> {
@@ -59,11 +83,27 @@ enum TemplateChunk<'a> {
 #[derive(Default, PartialEq)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 struct Template<'a> {
+    loc: Loc,
     statics_len: usize,
     chunks: Vec::<TemplateChunk<'a>>,
 }
 
 impl Template<'_> {
+    const CONSTANT_PLACEHOLDERS: &'static [&'static str] = &["in", "out"];
+
+    fn check(&self, context: &Parsed) {
+        self.chunks.iter().filter_map(|c| {
+            match c {
+                TemplateChunk::Placeholder(p) if !Self::CONSTANT_PLACEHOLDERS.contains(p) => Some(p),
+                _ => None
+            }
+        }).for_each(|placeholder| {
+            if !context.defs.contains_key(placeholder) {
+                report!(self.loc, "undefined variable: {placeholder}")
+            }
+        });
+    }
+
     fn compile(&self, job: &Job, context: &Parsed) -> String {
         self.chunks.iter().flat_map(|c| {
             let s = match c {
@@ -74,7 +114,7 @@ impl Template<'_> {
                     _ => if let Some(def) = context.defs.get(placeholder) {
                         def.value
                     } else {
-                        panic!("undefined: {placeholder}")
+                        report!(self.loc, "undefined variable: {placeholder}")
                     }
                 }
             };
@@ -86,17 +126,18 @@ impl Template<'_> {
 #[derive(Default, PartialEq)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 struct Rule<'a> {
+    loc: Loc,
     command: &'a str,
     template: Template<'a>,
 }
 
 impl<'a> Rule<'a> {
     #[inline]
-    fn new(command: &'a str) -> Self {
-        Self {command, template: Self::template(command)}
+    fn new(command: &'a str, loc: Loc) -> Self {
+        Self {loc, command, template: Self::template(command, loc)}
     }
 
-    fn template(command: &str) -> Template {
+    fn template(command: &str, loc: Loc) -> Template {
         let mut start = 0;
         let mut statics_len = 0;
         let mut chunks = Vec::new();
@@ -114,7 +155,7 @@ impl<'a> Rule<'a> {
 
             let placeholder_start = i + 1;
             let placeholder_end = command[placeholder_start..]
-                .find(|c: char| !c.is_alphanumeric() && c != '_')
+                .find(|c: char| c != '_' && !c.is_alphanumeric())
                 .map(|end| placeholder_start + end)
                 .unwrap_or_else(|| command.len());
 
@@ -135,7 +176,7 @@ impl<'a> Rule<'a> {
             }
         }
 
-        Template { chunks, statics_len }
+        Template { loc, chunks, statics_len }
     }
 }
 
@@ -210,7 +251,7 @@ impl<'a> Parser<'a> {
 
                 let command = line[second_space + 1 + 1..].trim();
 
-                let rule = Rule::new(command);
+                let rule = Rule::new(command, Loc(self.cursor));
                 self.parsed.rules.insert(name, rule);
             },
             Context::Global => {
@@ -232,9 +273,8 @@ impl<'a> Parser<'a> {
                         };
                         let mut input_tokens = inputs_str.split_ascii_whitespace();
                         let Some(rule) = input_tokens.next() else { return };
-                        let rule_len = rule.len();
                         let inputs = input_tokens.collect();
-                        let inputs_wo_rule_str = inputs_str[rule_len + 1..].trim_end();
+                        let inputs_wo_rule_str = inputs_str[rule.len() + 1..].trim_end();
                         let job = Job {target, rule, inputs, inputs_wo_rule_str, deps};
                         self.parsed.jobs.insert(target, job);
                     },
@@ -298,10 +338,11 @@ fn build_dependency_graph<'a>(
                 .collect::<StrHashSet>()
         }).unwrap_or_default();
 
-        let mut transitive = Vec::with_capacity(deps.len());
-        for dep in deps.iter() {
-            transitive.extend(collect_deps(dep, parsed, graph, visited, transitive_deps).iter().cloned())
-        }
+        let transitive = deps.iter().fold(Vec::with_capacity(deps.len()), |mut transitive, dep| {
+            let deps = collect_deps(dep, parsed, graph, visited, transitive_deps);
+            transitive.extend(deps.iter().cloned());
+            transitive
+        });
 
         deps.extend(transitive);
 
@@ -511,7 +552,7 @@ impl<'a> CommandBuilder<'a> {
     }
 
     fn _resolve_and_run(&self, job: &Job<'a>, outputs: &Outputs) {
-        if self.compiled.contains(job.target) || !self.metadata_cache.needs_rebuild(job, &self.transitive_deps) {
+        if self.compiled.contains(job.target) {
             println!("{target} is already built", target = job.target);
             return
         }
@@ -526,18 +567,22 @@ impl<'a> CommandBuilder<'a> {
 
         if let Some(rule) = self.parsed.rules.get(job.rule) {
             self.compiled.insert(job.target);
-            let command = Command(rule.template.compile(job, self.parsed));
-            let output = match command.execute() {
-                Ok(ok) => ok,
-                Err(e) => {
-                    eprintln!{
-                        "could not execute job: {target}: {e}",
-                        target = job.target
-                    };
-                    return
-                }
-            };
-            outputs.lock().unwrap().push(output);
+            if self.metadata_cache.needs_rebuild(job, &self.transitive_deps) {
+                let command = Command(rule.template.compile(job, self.parsed));
+                let output = match command.execute() {
+                    Ok(ok) => ok,
+                    Err(e) => {
+                        eprintln!{
+                            "could not execute job: {target}: {e}",
+                            target = job.target
+                        };
+                        return
+                    }
+                };
+                outputs.lock().unwrap().push(output);
+            } else {
+                rule.template.check(self.parsed)
+            }
         } else {
             eprintln!("no rule found for job: {target}", target = job.target)
         }
