@@ -128,18 +128,16 @@ impl Template<'_> {
 #[derive(Default)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 struct Rule<'a> {
-    loc: Loc,
-    template: Template<'a>,
+    command: Template<'a>,
     description: Option::<Template<'a>>,
 }
 
 impl<'a> Rule<'a> {
     #[inline]
-    fn new(loc: Loc, command: &'a str, description: Option::<&'a str>) -> Self {
+    fn new(command_loc: Loc, description_loc: Loc, command: &'a str, description: Option::<&'a str>) -> Self {
         Self {
-            loc,
-            description: description.map(|d| Self::template(d, loc)),
-            template: Self::template(command, loc)
+            command: Self::template(command, command_loc),
+            description: description.map(|d| Self::template(d, description_loc)),
         }
     }
 
@@ -166,7 +164,7 @@ impl<'a> Rule<'a> {
             if placeholder_start < placeholder_end {
                 chunks.push(TemplateChunk::Placeholder(&s[placeholder_start..placeholder_end]));
             } else {
-                panic!("empty placeholder")
+                report!(loc, "empty placeholder")
             }
 
             start = placeholder_end
@@ -298,7 +296,14 @@ impl<'a> Parser<'a> {
                 match first_token {
                     "command" => {
                         let command = line[second_space + 1 + 1..].trim();
-                        let rule = Rule::new(Loc(self.cursor), command, *description);
+                        let command_loc = self.cursor;
+                        let description_loc = self.cursor + 1;
+                        let rule = Rule::new(
+                            Loc(command_loc),
+                            Loc(description_loc),
+                            command,
+                            *description
+                        );
                         self.parsed.rules.insert(name, rule);
                         self.context = Context::Rule {
                             name,
@@ -307,10 +312,11 @@ impl<'a> Parser<'a> {
                         }
                     },
                     "description" => {
+                        let loc = Loc(self.cursor);
                         let description_str = line[second_space + 1 + 1..].trim();
                         if *already_inserted {
                             let rule = unsafe { self.parsed.rules.get_mut(name).unwrap_unchecked() };
-                            rule.description = Some(Rule::template(description_str, rule.loc));
+                            rule.description = Some(Rule::template(description_str, loc));
                         } else {
                             let description = Some(description_str);
                             self.context = Context::Rule {
@@ -646,7 +652,7 @@ impl<'a> CommandBuilder<'a> {
             self.compiled.insert(job.target);
             if self.metadata_cache.needs_rebuild(job, &self.transitive_deps) {
                 let command = Command {
-                    command: rule.template.compile(job, self.parsed),
+                    command: rule.command.compile(job, self.parsed),
                     description: rule.description.as_ref().map(|d| d.compile(job, self.parsed)),
                 };
                 let output = match command.execute() {
@@ -661,7 +667,7 @@ impl<'a> CommandBuilder<'a> {
                 };
                 outputs.lock().unwrap().push(output);
             } else {
-                rule.template.check(self.parsed);
+                rule.command.check(self.parsed);
                 rule.description.as_ref().map(|d| d.check(self.parsed));
                 println!("{target} is already built", target = job.target);
             }
@@ -686,7 +692,7 @@ impl<'a> CommandBuilder<'a> {
             for Output { stdout, stderr, command, description } in outputs.lock().unwrap().iter() {
                 if let Some(d) = description {
                     let d = d.trim();
-                    println!("[{d}]:")
+                    println!("[{d}]")
                 } else {
                     println!("{command}")
                 }
