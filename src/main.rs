@@ -129,24 +129,30 @@ struct Rule<'a> {
     loc: Loc,
     command: &'a str,
     template: Template<'a>,
+    description: Option::<Template<'a>>,
 }
 
 impl<'a> Rule<'a> {
     #[inline]
-    fn new(command: &'a str, loc: Loc) -> Self {
-        Self {loc, command, template: Self::template(command, loc)}
+    fn new(loc: Loc, command: &'a str, description: Option::<&'a str>) -> Self {
+        Self {
+            loc,
+            command,
+            description: description.map(|d| Self::template(d, loc)),
+            template: Self::template(command, loc)
+        }
     }
 
-    fn template(command: &str, loc: Loc) -> Template {
+    fn template(s: &str, loc: Loc) -> Template {
         let mut start = 0;
         let mut statics_len = 0;
         let mut chunks = Vec::new();
 
-        while let Some(i) = command[start..].find('$') {
+        while let Some(i) = s[start..].find('$') {
             let i = start + i;
 
-            if i > start && !command[start..i].trim().is_empty() {
-                let trimmed_static = command[start..i].trim();
+            if i > start && !s[start..i].trim().is_empty() {
+                let trimmed_static = s[start..i].trim();
                 if !trimmed_static.is_empty() {
                     statics_len += trimmed_static.len();
                     chunks.push(TemplateChunk::Static(trimmed_static))
@@ -154,13 +160,13 @@ impl<'a> Rule<'a> {
             }
 
             let placeholder_start = i + 1;
-            let placeholder_end = command[placeholder_start..]
+            let placeholder_end = s[placeholder_start..]
                 .find(|c: char| c != '_' && !c.is_alphanumeric())
                 .map(|end| placeholder_start + end)
-                .unwrap_or_else(|| command.len());
+                .unwrap_or_else(|| s.len());
 
             if placeholder_start < placeholder_end {
-                chunks.push(TemplateChunk::Placeholder(&command[placeholder_start..placeholder_end]));
+                chunks.push(TemplateChunk::Placeholder(&s[placeholder_start..placeholder_end]));
             } else {
                 panic!("empty placeholder")
             }
@@ -168,8 +174,8 @@ impl<'a> Rule<'a> {
             start = placeholder_end
         }
 
-        if start < command.len() {
-            let trimmed_static = command[start..].trim();
+        if start < s.len() {
+            let trimmed_static = s[start..].trim();
             if !trimmed_static.is_empty() {
                 statics_len += trimmed_static.len();
                 chunks.push(TemplateChunk::Static(trimmed_static));
@@ -210,7 +216,11 @@ struct Parsed<'a> {
 enum Context<'a> {
     #[default]
     Global,
-    Rule(&'a str),
+    Rule {
+        name: &'a str,
+        already_inserted: bool,
+        description: Option::<&'a str>,
+    },
 }
 
 #[derive(Default)]
@@ -223,7 +233,7 @@ struct Parser<'a> {
 
 impl<'a> Parser<'a> {
     fn parse_line(&mut self, line: &'a str) {
-        if line.is_empty() && matches!(self.context, Context::Rule(..)) {
+        if line.is_empty() && matches!(self.context, Context::Rule {..}) {
             self.context = Context::Global;
             return
         }
@@ -241,23 +251,46 @@ impl<'a> Parser<'a> {
         let ref first_token = line[..first_space];
 
         match &self.context {
-            Context::Rule(name) => {
-                if first_token != "command" {
-                    if line.is_empty() || line == "\n" {
+            Context::Rule { name, already_inserted, description } => {
+                match first_token {
+                    "command" => {
+                        let command = line[second_space + 1 + 1..].trim();
+                        let rule = Rule::new(Loc(self.cursor), command, *description);
+                        self.parsed.rules.insert(name, rule);
+                        self.context = Context::Rule {
+                            name,
+                            already_inserted: true,
+                            description: *description
+                        }
+                    },
+                    "description" => {
+                        let description_str = line[second_space + 1 + 1..].trim();
+                        if *already_inserted {
+                            let rule = unsafe { self.parsed.rules.get_mut(name).unwrap_unchecked() };
+                            rule.description = Some(Rule::template(description_str, rule.loc));
+                        } else {
+                            let description = Some(description_str);
+                            self.context = Context::Rule {
+                                name,
+                                already_inserted: *already_inserted,
+                                description
+                            }
+                        }
+                    },
+                    _ => if line.is_empty() || line == "\n" {
                         self.context = Context::Global;
                         return
                     }
                 }
-
-                let command = line[second_space + 1 + 1..].trim();
-
-                let rule = Rule::new(command, Loc(self.cursor));
-                self.parsed.rules.insert(name, rule);
             },
             Context::Global => {
                 match first_token {
                     "rule" => {
-                        self.context = Context::Rule(line[second_space..].trim_end())
+                        self.context = Context::Rule {
+                            name: line[second_space..].trim_end(),
+                            already_inserted: false,
+                            description: None
+                        }
                     },
                     "build" => {
                         let colon_idx = line.chars().position(|c| c == ':').unwrap();
@@ -445,8 +478,10 @@ impl<'a> MetadataCache<'a> {
     }
 }
 
-#[repr(transparent)]
-struct Command(String);
+struct Command {
+    command: String,
+    description: Option::<String>
+}
 
 // Custom implementation of `Command` to avoid fork + exec overhead
 impl Command {
@@ -461,7 +496,7 @@ impl Command {
     }
 
     fn execute(self) -> io::Result::<Output> {
-        let Self(command) = self;
+        let Self { command, description } = self;
 
         let (mut stdout_reader, stdout_writer) = Self::create_pipe()?;
         let (mut stderr_reader, stderr_writer) = Self::create_pipe()?;
@@ -520,7 +555,7 @@ impl Command {
             libc::posix_spawnattr_destroy(&mut attr);
         }
 
-        Ok(Output {command, stdout, stderr})
+        Ok(Output {command, stdout, stderr, description})
     }
 }
 
@@ -528,6 +563,7 @@ struct Output {
     stdout: String,
     stderr: String,
     command: String,
+    description: Option::<String>
 }
 
 type Outputs = Mutex::<Vec::<Output>>;
@@ -552,15 +588,14 @@ impl<'a> CommandBuilder<'a> {
     }
 
     fn _resolve_and_run(&self, job: &Job<'a>, outputs: &Outputs) {
-        if self.compiled.contains(job.target) {
-            println!("{target} is already built", target = job.target);
-            return
-        }
+        if self.compiled.contains(job.target) { return }
 
         for input in job.inputs.iter() {
             if let Some(dep_job) = self.parsed.jobs.get(input) {
                 self._resolve_and_run(dep_job, outputs)
-            } else if !self.compiled.contains(input) {
+            } 
+            #[cfg(feature = "dbg")]
+            if !self.compiled.contains(input) {
                 println!("dependency {input} is assumed to exist")
             }
         }
@@ -568,7 +603,10 @@ impl<'a> CommandBuilder<'a> {
         if let Some(rule) = self.parsed.rules.get(job.rule) {
             self.compiled.insert(job.target);
             if self.metadata_cache.needs_rebuild(job, &self.transitive_deps) {
-                let command = Command(rule.template.compile(job, self.parsed));
+                let command = Command {
+                    command: rule.template.compile(job, self.parsed),
+                    description: rule.description.as_ref().map(|d| d.compile(job, self.parsed)),
+                };
                 let output = match command.execute() {
                     Ok(ok) => ok,
                     Err(e) => {
@@ -581,7 +619,9 @@ impl<'a> CommandBuilder<'a> {
                 };
                 outputs.lock().unwrap().push(output);
             } else {
-                rule.template.check(self.parsed)
+                rule.template.check(self.parsed);
+                rule.description.as_ref().map(|d| d.check(self.parsed));
+                println!("{target} is already built", target = job.target);
             }
         } else {
             eprintln!("no rule found for job: {target}", target = job.target)
@@ -601,8 +641,13 @@ impl<'a> CommandBuilder<'a> {
             level.into_par_iter().filter_map(|t| self.parsed.jobs.get(t)).for_each(|job| {
                 self._resolve_and_run(job, &outputs)
             });
-            for Output { stdout, stderr, command } in outputs.lock().unwrap().iter() {
-                println!("{command}");
+            for Output { stdout, stderr, command, description } in outputs.lock().unwrap().iter() {
+                if let Some(d) = description {
+                    let d = d.trim();
+                    println!("[{d}]:")
+                } else {
+                    println!("{command}")
+                }
                 print!("{stdout}");
                 print!("{stderr}");
             }
