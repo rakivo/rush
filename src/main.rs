@@ -60,23 +60,11 @@ struct Loc(usize);
 impl Loc {
     #[inline]
     #[cfg_attr(feature = "dbg", track_caller)]
-    fn report_literal(literal: &str) -> ! {
+    fn report(literal: &str) -> ! {
         #[cfg(feature = "dbg")] {
             panic!("{literal}")
         } #[cfg(not(feature = "dbg"))] {
             eprintln!("{literal}");
-            std::process::exit(1)
-        }
-    }
-
-    #[inline]
-    #[cfg_attr(feature = "dbg", track_caller)]
-    fn report(&self, msg: &str) -> ! {
-        let Self(row) = self;
-        #[cfg(feature = "dbg")] {
-            panic!("{RUSH_FILE_NAME}:{row}: {msg}")
-        } #[cfg(not(feature = "dbg"))] {
-            eprintln!("{RUSH_FILE_NAME}:{row}: {msg}");
             std::process::exit(1)
         }
     }
@@ -100,7 +88,7 @@ macro_rules! report_fmt {
 }
 
 macro_rules! report {
-    ($loc: expr, $($arg:tt)*) => { $loc.report(&report_fmt!($loc, $($arg)*)) }
+    ($loc: expr, $($arg:tt)*) => { Loc::report(&report_fmt!($loc, $($arg)*)) }
 }
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
@@ -404,7 +392,6 @@ impl<'a> Parser<'a> {
         while full_line.as_bytes().last() == Some(&b'$') {
             let trimmed = full_line[..full_line.len() - 1].trim_end();
             let Some(next_line) = lines.next() else { break };
-            self.cursor += 1;
             let next_trimmed = next_line.trim();
             let concat = format!("{trimmed} {next_trimmed}");
             full_line = Box::leak(concat.into_boxed_str());
@@ -752,7 +739,7 @@ impl<'a> CommandBuilder<'a> {
             });
             outputs.lock().unwrap().iter().filter_map(|output| {
                 match output {
-                    Output::Error(err) => Loc::report_literal(err),
+                    Output::Error(err) => Loc::report(err),
                     Output::RushMessage(msg) => {
                         println!("{msg}");
                         None
