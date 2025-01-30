@@ -119,17 +119,17 @@ struct Template<'a> {
 impl Template<'_> {
     const CONSTANT_PLACEHOLDERS: &'static [&'static str] = &["in", "out"];
 
-    fn check(&self, context: &Parsed) {
-        self.chunks.iter().filter_map(|c| {
+    fn check(&self, context: &Parsed) -> Result::<(), String> {
+        for placeholder in self.chunks.iter().filter_map(|c| {
             match c {
                 TemplateChunk::Placeholder(p) if !Self::CONSTANT_PLACEHOLDERS.contains(p) => Some(p),
                 _ => None
             }
-        }).for_each(|placeholder| {
+        }) {
             if !context.defs.contains_key(placeholder) {
-                report!(self.loc, "undefined variable: {placeholder}")
+                return Err(report_fmt!(self.loc, "undefined variable: {placeholder}"))
             }
-        });
+        } Ok(())
     }
 
     fn compile(&self, job: &Job, context: &Parsed) -> String {
@@ -648,6 +648,7 @@ struct CommandOutput {
 
 enum Output {
     Error(String),
+    RushMessage(String),
     CommandOutput(CommandOutput),
 }
 
@@ -705,9 +706,24 @@ impl<'a> CommandBuilder<'a> {
                 let output = Output::CommandOutput(command_output);
                 outputs.lock().unwrap().push(output);
             } else {
-                rule.command.check(self.parsed);
-                rule.description.as_ref().map(|d| d.check(self.parsed));
-                println!("{target} is already built", target = job.target);
+                let mut any_err = false;
+                if let Err(err) = rule.command.check(self.parsed) {
+                    let output = Output::Error(err);
+                    outputs.lock().unwrap().push(output);
+                    any_err = true
+                }
+
+                if let Some(Err(err)) = rule.description.as_ref().map(|d| d.check(self.parsed)) {
+                    let output = Output::Error(err);
+                    outputs.lock().unwrap().push(output);
+                    any_err = true
+                }
+
+                if !any_err {
+                    let msg = format!("{target} is already built", target = job.target);
+                    let output = Output::RushMessage(msg);
+                    outputs.lock().unwrap().push(output)
+                }
             }
         } else {
             let err = report_fmt!{
@@ -737,6 +753,10 @@ impl<'a> CommandBuilder<'a> {
             outputs.lock().unwrap().iter().filter_map(|output| {
                 match output {
                     Output::Error(err) => Loc::report_literal(err),
+                    Output::RushMessage(msg) => {
+                        println!("{msg}");
+                        None
+                    },
                     Output::CommandOutput(output) => Some(output)
                 }
             }).for_each(|CommandOutput { stdout, stderr, command, description }| {
