@@ -72,7 +72,7 @@ impl Loc {
 }
 
 macro_rules! report {
-    ($loc: expr, $($arg:tt)*) => { $loc.report(&format!($($arg)*)) };
+    ($loc: expr, $($arg:tt)*) => { $loc.report(&std::fmt::format(format_args!($($arg)*))) };
     ($loc: expr, $lit: literal) => { $loc.report($lit) }
 }
 
@@ -184,6 +184,7 @@ impl<'a> Rule<'a> {
 #[derive(Default)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 struct Job<'a> {
+    loc: Loc,
     target: &'a str,
     rule: &'a str,
     inputs: Vec::<&'a str>,
@@ -357,7 +358,8 @@ impl<'a> Parser<'a> {
                         let Some(rule) = input_tokens.next() else { return };
                         let inputs = input_tokens.collect();
                         let inputs_wo_rule_str = inputs_str[rule.len() + 1..].trim_end();
-                        let job = Job {target, shadows: None, rule, inputs, inputs_wo_rule_str, deps};
+                        let loc = Loc(self.cursor);
+                        let job = Job {loc, target, shadows: None, rule, inputs, inputs_wo_rule_str, deps};
                         self.parsed.jobs.insert(target, job);
                         self.context = Context::Job {target, shadows: None}
                     },
@@ -516,7 +518,9 @@ impl<'a> MetadataCache<'a> {
         // TODO: do something here if dependent file does not exist
         let mtimes = unsafe {
             transitive_deps.get(job.target).unwrap_unchecked()
-        }.par_iter().filter_map(|dep| self.mtime(dep).ok()).collect::<Vec::<_>>();
+        }.par_iter().filter_map(|dep| {
+            self.mtime(dep).ok()
+        }).collect::<Vec::<_>>();
 
         let Ok(target_mtime) = self.mtime(job.target) else {
             return true
@@ -672,7 +676,18 @@ impl<'a> CommandBuilder<'a> {
                 println!("{target} is already built", target = job.target);
             }
         } else {
-            eprintln!("no rule found for job: {target}", target = job.target)
+            /* TODO:
+                Data races will not let us just `println!` the error to the stdout,
+                instead, I think we should create an enum `CommandOutput`, with two variants:
+                `Output` and `Error`, which are going to be collected into a vector and printed after,
+                without any data races.
+            */
+            report!{
+                job.loc,
+                "no rule named: {rule} found for job {target}",
+                rule = job.rule,
+                target = job.target
+            }
         }
     }
 
