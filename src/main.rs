@@ -237,6 +237,7 @@ enum Context<'a> {
     Rule {
         name: &'a str,
         already_inserted: bool,
+        description_loc: Option::<Loc>,
         description: Option::<&'a str>,
     }
 }
@@ -308,15 +309,14 @@ impl<'a> Parser<'a> {
                     },
                 }
             },
-            Context::Rule { name, already_inserted, description } => {
+            Context::Rule { name, already_inserted, description_loc, description } => {
                 match first_token {
                     "command" => {
                         let command = line[second_space + 1 + 1..].trim();
                         let command_loc = self.cursor;
-                        let description_loc = self.cursor + 1;
                         let rule = Rule::new(
                             Loc(command_loc),
-                            Loc(description_loc),
+                            description_loc.unwrap_or(Loc(command_loc + 1)),
                             command,
                             *description
                         );
@@ -324,20 +324,22 @@ impl<'a> Parser<'a> {
                         self.context = Context::Rule {
                             name,
                             already_inserted: true,
-                            description: *description
+                            description: *description,
+                            description_loc: *description_loc
                         }
                     },
                     "description" => {
-                        let loc = Loc(self.cursor);
+                        let description_loc = Loc(self.cursor);
                         let description_str = line[second_space + 1 + 1..].trim();
                         if *already_inserted {
                             let rule = unsafe { self.parsed.rules.get_mut(name).unwrap_unchecked() };
-                            rule.description = Some(Rule::template(description_str, loc));
+                            rule.description = Some(Rule::template(description_str, description_loc));
                         } else {
                             let description = Some(description_str);
                             self.context = Context::Rule {
                                 name,
                                 already_inserted: *already_inserted,
+                                description_loc: Some(description_loc),
                                 description
                             }
                         }
@@ -354,7 +356,8 @@ impl<'a> Parser<'a> {
                         self.context = Context::Rule {
                             name: line[second_space..].trim_end(),
                             already_inserted: false,
-                            description: None
+                            description: None,
+                            description_loc: None,
                         }
                     },
                     "build" => {
@@ -394,7 +397,7 @@ impl<'a> Parser<'a> {
             let Some(next_line) = lines.next() else { break };
             let next_trimmed = next_line.trim();
             let concat = format!("{trimmed} {next_trimmed}");
-            full_line = Box::leak(concat.into_boxed_str());
+            full_line = Box::leak(concat.into_boxed_str())
         } full_line.trim_start()
     }
 
