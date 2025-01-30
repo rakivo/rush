@@ -2,7 +2,7 @@
 
 # Currently Supported Functionality
 ```ninja
-# 
+# declare cflags to then shadow it in different jobs
 cflags =
 
 rule cc
