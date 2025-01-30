@@ -60,6 +60,17 @@ struct Loc(usize);
 impl Loc {
     #[inline]
     #[cfg_attr(feature = "dbg", track_caller)]
+    fn report_literal(literal: &str) -> ! {
+        #[cfg(feature = "dbg")] {
+            panic!("{literal}")
+        } #[cfg(not(feature = "dbg"))] {
+            eprintln!("{literal}");
+            std::process::exit(1)
+        }
+    }
+
+    #[inline]
+    #[cfg_attr(feature = "dbg", track_caller)]
     fn report(&self, msg: &str) -> ! {
         let Self(row) = self;
         #[cfg(feature = "dbg")] {
@@ -71,9 +82,25 @@ impl Loc {
     }
 }
 
+macro_rules! report_fmt {
+    ($loc: expr, $($arg:tt)*) => {
+        format!{
+            "{RUSH_FILE_NAME}:{row}: {msg}",
+            row = $loc.0,
+            msg = std::fmt::format(format_args!($($arg)*))
+        }
+    };
+    ($loc: expr, $lit: literal) => {
+        format!{
+            "{RUSH_FILE_NAME}:{row}: {msg}",
+            row = $loc.0,
+            msg = $lit
+        }
+    }
+}
+
 macro_rules! report {
-    ($loc: expr, $($arg:tt)*) => { $loc.report(&std::fmt::format(format_args!($($arg)*))) };
-    ($loc: expr, $lit: literal) => { $loc.report($lit) }
+    ($loc: expr, $($arg:tt)*) => { $loc.report(&report_fmt!($loc, $($arg)*)) }
 }
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
@@ -547,7 +574,7 @@ impl Command {
         Ok((r, w))
     }
 
-    fn execute(self) -> io::Result::<Output> {
+    fn execute(self) -> io::Result::<CommandOutput> {
         let Self { command, description } = self;
 
         let (mut stdout_reader, stdout_writer) = Self::create_pipe()?;
@@ -607,15 +634,20 @@ impl Command {
             libc::posix_spawnattr_destroy(&mut attr);
         }
 
-        Ok(Output {command, stdout, stderr, description})
+        Ok(CommandOutput {command, stdout, stderr, description})
     }
 }
 
-struct Output {
+struct CommandOutput {
     stdout: String,
     stderr: String,
     command: String,
     description: Option::<String>
+}
+
+enum Output {
+    Error(String),
+    CommandOutput(CommandOutput),
 }
 
 type Outputs = Mutex::<Vec::<Output>>;
@@ -659,7 +691,7 @@ impl<'a> CommandBuilder<'a> {
                     command: rule.command.compile(job, self.parsed),
                     description: rule.description.as_ref().map(|d| d.compile(job, self.parsed)),
                 };
-                let output = match command.execute() {
+                let command_output = match command.execute() {
                     Ok(ok) => ok,
                     Err(e) => {
                         eprintln!{
@@ -669,6 +701,7 @@ impl<'a> CommandBuilder<'a> {
                         return
                     }
                 };
+                let output = Output::CommandOutput(command_output);
                 outputs.lock().unwrap().push(output);
             } else {
                 rule.command.check(self.parsed);
@@ -676,18 +709,14 @@ impl<'a> CommandBuilder<'a> {
                 println!("{target} is already built", target = job.target);
             }
         } else {
-            /* TODO:
-                Data races will not let us just `println!` the error to the stdout,
-                instead, I think we should create an enum `CommandOutput`, with two variants:
-                `Output` and `Error`, which are going to be collected into a vector and printed after,
-                without any data races.
-            */
-            report!{
+            let err = report_fmt!{
                 job.loc,
                 "no rule named: {rule} found for job {target}",
                 rule = job.rule,
                 target = job.target
-            }
+            };
+            let output = Output::Error(err);
+            outputs.lock().unwrap().push(output);
         }
     }
 
@@ -704,7 +733,12 @@ impl<'a> CommandBuilder<'a> {
             level.into_par_iter().filter_map(|t| self.parsed.jobs.get(t)).for_each(|job| {
                 self._resolve_and_run(job, &outputs)
             });
-            for Output { stdout, stderr, command, description } in outputs.lock().unwrap().iter() {
+            outputs.lock().unwrap().iter().filter_map(|output| {
+                match output {
+                    Output::Error(err) => Loc::report_literal(err),
+                    Output::CommandOutput(output) => Some(output)
+                }
+            }).for_each(|CommandOutput { stdout, stderr, command, description }| {
                 if let Some(d) = description {
                     let d = d.trim();
                     println!("[{d}]")
@@ -713,7 +747,7 @@ impl<'a> CommandBuilder<'a> {
                 }
                 print!("{stdout}");
                 print!("{stderr}");
-            }
+            });
         });
     }
 }
