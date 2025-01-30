@@ -6,18 +6,21 @@ use std::path::Path;
 use std::str::Lines;
 use std::fs::{self, File};
 use std::time::SystemTime;
+use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
-use std::process::{ExitCode};
 use std::collections::VecDeque;
 use std::os::fd::{FromRawFd, IntoRawFd};
 
 use memmap2::Mmap;
 use rayon::prelude::*;
 use dashmap::{DashMap, DashSet};
-use fxhash::{FxHashMap, FxHashSet};
+use fxhash::{FxHashMap, FxHashSet, FxBuildHasher};
 
 type StrHashSet<'a> = FxHashSet::<&'a str>;
 type StrHashMap<'a, T> = FxHashMap::<&'a str, T>;
+
+type StrDashSet<'a> = DashSet::<&'a str, FxBuildHasher>;
+type StrDashMap<'a, T> = DashMap::<&'a str, T, FxBuildHasher>;
 
 type Graph<'a> = StrHashMap::<'a, Arc::<StrHashSet<'a>>>;
 type TransitiveDeps<'a> = StrHashMap::<'a, Arc::<StrHashSet<'a>>>;
@@ -481,13 +484,13 @@ struct Metadata {
 }
 
 struct MetadataCache<'a> {
-    files: DashMap::<&'a str, Metadata>
+    files: StrDashMap::<'a, Metadata>
 }
 
 impl<'a> MetadataCache<'a> {
     #[inline]
     fn new(files_count: usize) -> Self {
-        Self {files: DashMap::with_capacity(files_count)}
+        Self {files: DashMap::with_capacity_and_hasher(files_count, FxBuildHasher::default())}
     }
 
     #[inline]
@@ -609,7 +612,7 @@ type Outputs = Mutex::<Vec::<Output>>;
 
 struct CommandBuilder<'a> {
     parsed: &'a Parsed<'a>,
-    compiled: DashSet::<&'a str>,
+    compiled: StrDashSet::<'a>,
     metadata_cache: MetadataCache<'a>,    
     transitive_deps: &'a TransitiveDeps<'a>
 }
@@ -620,7 +623,7 @@ impl<'a> CommandBuilder<'a> {
         let n = parsed.jobs.len();
         Self {
             parsed,
-            compiled: DashSet::with_capacity(n),
+            compiled: DashSet::with_capacity_and_hasher(n, FxBuildHasher::default()),
             metadata_cache: MetadataCache::new(n),
             transitive_deps
         }
