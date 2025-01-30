@@ -50,7 +50,7 @@ fn read_rush() -> Option::<Mmap> {
 }
 
 #[repr(transparent)]
-#[derive(Copy, Clone, Default, PartialEq)]
+#[derive(Copy, Clone, Default)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 struct Loc(usize);
 
@@ -73,18 +73,16 @@ macro_rules! report {
     ($loc: expr, $lit: literal) => { $loc.report($lit) }
 }
 
-#[derive(PartialEq)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 enum TemplateChunk<'a> {
     Static(&'a str),
     Placeholder(&'a str),
 }
 
-#[derive(Default, PartialEq)]
+#[derive(Default)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 struct Template<'a> {
     loc: Loc,
-    statics_len: usize,
     chunks: Vec::<TemplateChunk<'a>>,
 }
 
@@ -111,10 +109,11 @@ impl Template<'_> {
                 TemplateChunk::Placeholder(placeholder) => match *placeholder {
                     "in" => job.inputs_wo_rule_str,
                     "out" => job.target,
-                    _ => if let Some(def) = context.defs.get(placeholder) {
-                        def.value
-                    } else {
-                        report!(self.loc, "undefined variable: {placeholder}")
+                    _ => {
+                        job.shadows.as_ref()
+                            .and_then(|shadows| shadows.get(placeholder).map(|shadow| shadow.value))
+                            .or_else(|| context.defs.get(placeholder).map(|def| def.value))
+                            .unwrap_or_else(|| report!(self.loc, "undefined variable: {placeholder}"))
                     }
                 }
             };
@@ -123,11 +122,10 @@ impl Template<'_> {
     }
 }
 
-#[derive(Default, PartialEq)]
+#[derive(Default)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 struct Rule<'a> {
     loc: Loc,
-    command: &'a str,
     template: Template<'a>,
     description: Option::<Template<'a>>,
 }
@@ -137,7 +135,6 @@ impl<'a> Rule<'a> {
     fn new(loc: Loc, command: &'a str, description: Option::<&'a str>) -> Self {
         Self {
             loc,
-            command,
             description: description.map(|d| Self::template(d, loc)),
             template: Self::template(command, loc)
         }
@@ -145,7 +142,6 @@ impl<'a> Rule<'a> {
 
     fn template(s: &str, loc: Loc) -> Template {
         let mut start = 0;
-        let mut statics_len = 0;
         let mut chunks = Vec::new();
 
         while let Some(i) = s[start..].find('$') {
@@ -154,7 +150,6 @@ impl<'a> Rule<'a> {
             if i > start && !s[start..i].trim().is_empty() {
                 let trimmed_static = s[start..i].trim();
                 if !trimmed_static.is_empty() {
-                    statics_len += trimmed_static.len();
                     chunks.push(TemplateChunk::Static(trimmed_static))
                 }
             }
@@ -177,50 +172,56 @@ impl<'a> Rule<'a> {
         if start < s.len() {
             let trimmed_static = s[start..].trim();
             if !trimmed_static.is_empty() {
-                statics_len += trimmed_static.len();
                 chunks.push(TemplateChunk::Static(trimmed_static));
             }
         }
 
-        Template { loc, chunks, statics_len }
+        Template { loc, chunks }
     }
 }
 
-#[derive(Default, PartialEq)]
+#[derive(Default)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 struct Job<'a> {
     target: &'a str,
     rule: &'a str,
     inputs: Vec::<&'a str>,
+    shadows: Option::<Defs<'a>>,
     inputs_wo_rule_str: &'a str,
     deps: Vec::<&'a str>
 }
 
+#[derive(Default)]
 #[repr(transparent)]
-#[derive(Default, PartialEq)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 struct Def<'a> {
     value: &'a str
 }
 
+type Defs<'a> = StrHashMap::<'a, Def<'a>>;
+
 #[derive(Default)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 struct Parsed<'a> {
+    defs: Defs<'a>,
     jobs: StrHashMap::<'a, Job<'a>>,
-    defs: StrHashMap::<'a, Def<'a>>,
     rules: StrHashMap::<'a, Rule<'a>>,
 }
 
-#[derive(Default, PartialEq)]
+#[derive(Default)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 enum Context<'a> {
     #[default]
     Global,
+    Job {
+        target: &'a str,
+        shadows: Option::<Defs<'a>>,
+    },
     Rule {
         name: &'a str,
         already_inserted: bool,
         description: Option::<&'a str>,
-    },
+    }
 }
 
 #[derive(Default)]
@@ -232,25 +233,64 @@ struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
+    fn finish_shadows(&mut self) {
+        match &mut self.context {
+            Context::Job { target, shadows } => {
+                let job = unsafe { self.parsed.jobs.get_mut(target).unwrap_unchecked() };
+                if let Some(shadows) = shadows.take() {
+                    job.shadows.replace(shadows);
+                }
+            },
+            _ => {}
+        };
+    }
+
     fn parse_line(&mut self, line: &'a str) {
-        if line.is_empty() && matches!(self.context, Context::Rule {..}) {
-            self.context = Context::Global;
-            return
+        let first = line.chars().position(|c| c.is_ascii_whitespace()).map(|first_space| {
+            (first_space, &line[..first_space])
+        });
+
+        if matches!(self.context, Context::Job {..} | Context::Rule {..}) {
+            match (line.is_empty(), first.as_ref()) {
+                (true, ..) => {
+                    self.finish_shadows();
+                    self.context = Context::Global;
+                    return
+                }
+                (false, Some((.., first_token))) if *first_token == "build" => {
+                    self.finish_shadows();
+                    self.context = Context::Global;
+                }
+                _ => {}
+            }
         }
 
-        let Some(first_space) = line.chars().position(|c| c.is_ascii_whitespace()) else {
-            return
-        };
-
+        let Some((first_space, first_token)) = first else { return };
         let Some(second_space) = line[first_space..].chars()
             .position(|c| !c.is_ascii_whitespace())
             .map(|p| p + first_space) else {
                 return
             };
 
-        let ref first_token = line[..first_space];
+        let parse_def = |line: &'a str| -> (&'a str, Def<'a>) {
+            let name = first_token;
+            let value = line[second_space + 1..].trim();
+            let def = Def { value };
+            (name, def)
+        };
 
-        match &self.context {
+        match &mut self.context {
+            Context::Job { shadows, .. } => {
+                let (name, def) = parse_def(line);
+                match shadows.as_mut() {
+                    Some(shadows) => { shadows.insert(name, def); },
+                    None => {
+                        let mut _shadows = StrHashMap::with_capacity(1);
+                        _shadows.insert(name, def);
+                        shadows.replace(_shadows);
+                    },
+                }
+            },
             Context::Rule { name, already_inserted, description } => {
                 match first_token {
                     "command" => {
@@ -308,13 +348,12 @@ impl<'a> Parser<'a> {
                         let Some(rule) = input_tokens.next() else { return };
                         let inputs = input_tokens.collect();
                         let inputs_wo_rule_str = inputs_str[rule.len() + 1..].trim_end();
-                        let job = Job {target, rule, inputs, inputs_wo_rule_str, deps};
+                        let job = Job {target, shadows: None, rule, inputs, inputs_wo_rule_str, deps};
                         self.parsed.jobs.insert(target, job);
+                        self.context = Context::Job {target, shadows: None}
                     },
                     _ => {
-                        let name = first_token;
-                        let value = line[second_space + 1..].trim();
-                        let def = Def { value };
+                        let (name, def) = parse_def(line);
                         self.parsed.defs.insert(name, def);
                     }
                 };
