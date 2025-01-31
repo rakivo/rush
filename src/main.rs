@@ -294,17 +294,15 @@ impl<'a> Parser<'a> {
         });
 
         if matches!(self.context, Context::Job {..} | Context::Rule {..}) {
-            match (line.is_empty(), first.as_ref()) {
-                (true, ..) => {
-                    self.finish_shadows();
-                    self.context = Context::Global;
-                    return
-                }
-                (false, Some((.., first_token))) if *first_token == "build" => {
-                    self.finish_shadows();
-                    self.context = Context::Global;
-                }
-                _ => {}
+            if line.is_empty() {
+                self.finish_shadows();
+                self.context = Context::Global;
+                return
+            }
+
+            if matches!(first, Some((.., "build" | "rule"))) {
+                self.finish_shadows();
+                self.context = Context::Global
             }
         }
 
