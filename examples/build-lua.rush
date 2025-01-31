@@ -1,0 +1,46 @@
+cflags = -std=gnu99 -lm -O2 -Wall -Wextra -DLUA_COMPAT_5_3
+rule cc
+  command = gcc $cflags -o $out -c $in
+
+rule link
+  command = gcc $cflags -o $out $in
+
+build src/lapi.o: cc src/lapi.c
+build src/lauxlib.o: cc src/lauxlib.c
+build src/lbaselib.o: cc src/lbaselib.c
+build src/lcode.o: cc src/lcode.c
+build src/lcorolib.o: cc src/lcorolib.c
+build src/lctype.o: cc src/lctype.c
+build src/ldblib.o: cc src/ldblib.c
+build src/ldebug.o: cc src/ldebug.c
+build src/ldo.o: cc src/ldo.c
+build src/ldump.o: cc src/ldump.c
+build src/lfunc.o: cc src/lfunc.c
+build src/lgc.o: cc src/lgc.c
+build src/linit.o: cc src/linit.c
+build src/liolib.o: cc src/liolib.c
+build src/llex.o: cc src/llex.c
+build src/lmathlib.o: cc src/lmathlib.c
+build src/lmem.o: cc src/lmem.c
+build src/loadlib.o: cc src/loadlib.c
+build src/lobject.o: cc src/lobject.c
+build src/lopcodes.o: cc src/lopcodes.c
+build src/loslib.o: cc src/loslib.c
+build src/lparser.o: cc src/lparser.c
+build src/lstate.o: cc src/lstate.c
+build src/lstring.o: cc src/lstring.c
+build src/lstrlib.o: cc src/lstrlib.c
+build src/ltable.o: cc src/ltable.c
+build src/ltablib.o: cc src/ltablib.c
+build src/ltm.o: cc src/ltm.c
+build src/lua.o: cc src/lua.c
+build src/lundump.o: cc src/lundump.c
+build src/lutf8lib.o: cc src/lutf8lib.c
+build src/lvm.o: cc src/lvm.c
+build src/lzio.o: cc src/lzio.c
+build lua: link src/lapi.o src/lauxlib.o src/lbaselib.o src/lcode.o $
+  src/lcorolib.o src/lctype.o src/ldblib.o src/ldebug.o src/ldo.o src/ldump.o $
+  src/lfunc.o src/lgc.o src/linit.o src/liolib.o src/llex.o src/lmathlib.o $
+  src/lmem.o src/loadlib.o src/lobject.o src/lopcodes.o src/loslib.o src/lparser.o $
+  src/lstate.o src/lstring.o src/lstrlib.o src/ltable.o src/ltablib.o src/ltm.o $
+  src/lua.o src/lundump.o src/lutf8lib.o src/lvm.o src/lzio.o
