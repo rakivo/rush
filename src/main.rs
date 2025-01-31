@@ -287,9 +287,14 @@ impl<'a> Parser<'a> {
                 self.finish_shadows();
                 self.context = Context::Global
             }
+        } else if line.is_empty() {
+            return
         }
 
-        let Some((first_space, first_token)) = first else { return };
+        let Some((first_space, first_token)) = first else {
+            report!(Loc(self.cursor), "undefined token: {line}")
+        };
+
         let Some(second_space) = line[first_space..].chars()
             .position(|c| !c.is_ascii_whitespace())
             .map(|p| p + first_space) else {
@@ -297,6 +302,11 @@ impl<'a> Parser<'a> {
             };
         
         let parse_def = |line: &'a str| -> Def<'a> {
+            let check_start = first_space;
+            let check_end = (second_space + 1 + 1).min(line.len());
+            if !line[check_start..check_end].contains('=') {
+                report!(Loc(self.cursor), "expected `=` in variable definition")
+            }
             let value = line[second_space + 1..].trim();
             Def { value }
         };
@@ -366,7 +376,9 @@ impl<'a> Parser<'a> {
                         }
                     },
                     "build" => {
-                        let colon_idx = line.chars().position(|c| c == ':').unwrap();
+                        let Some(colon_idx) = line.chars().position(|c| c == ':') else {
+                            report!(Loc(self.cursor), "expected colon after build target")
+                        };
                         let post_colon = line[colon_idx + 1..].trim();
                         let target = line[first_space..colon_idx].trim();
                         let or_idx = post_colon.chars().position(|c| c == '|');
