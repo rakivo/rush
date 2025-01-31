@@ -1,9 +1,9 @@
 use std::io;
 use std::mem;
 use std::ptr;
-use std::ffi::CStr;
 use std::path::Path;
 use std::str::Lines;
+use std::ffi::CString;
 use std::fs::{self, File};
 use std::time::SystemTime;
 use std::process::ExitCode;
@@ -597,7 +597,7 @@ impl Command {
         let (mut stdout_reader, stdout_writer) = Self::create_pipe()?;
         let (mut stderr_reader, stderr_writer) = Self::create_pipe()?;
 
-        let cmd = unsafe { CStr::from_ptr(command.as_ptr() as *const _) };
+        let cmd = CString::new(command.as_bytes())?;
         let args = [c"/bin/sh".as_ptr(), c"-c".as_ptr(), cmd.as_ptr(), ptr::null()];
 
         let stdout_writer_fd = stdout_writer.into_raw_fd();
