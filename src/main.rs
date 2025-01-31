@@ -27,10 +27,6 @@ type TransitiveDeps<'a> = StrHashMap::<'a, Arc::<StrHashSet<'a>>>;
 
 const RUSH_FILE_NAME: &str = "build.rush";
 
-const ARG_C_CSTR: &CStr = &unsafe { CStr::from_bytes_with_nul_unchecked(b"-c\0") };
-const SHELL_CSTR: &CStr = &unsafe { CStr::from_bytes_with_nul_unchecked(b"/bin/sh\0") };
-const ENV_PATH_CSTR: &CStr = &unsafe { CStr::from_bytes_with_nul_unchecked(b"PATH=/usr/bin:/bin\0") };
-
 #[inline(always)]
 fn to_str(bytes: &[u8]) -> &str {
     unsafe { std::str::from_utf8_unchecked(bytes) }
@@ -589,7 +585,7 @@ impl Command {
         let (mut stderr_reader, stderr_writer) = Self::create_pipe()?;
 
         let cmd = unsafe { CStr::from_ptr(command.as_ptr() as *const _) };
-        let args = [SHELL_CSTR.as_ptr(), ARG_C_CSTR.as_ptr(), cmd.as_ptr(), ptr::null()];
+        let args = [c"/bin/sh".as_ptr(), c"-c".as_ptr(), cmd.as_ptr(), ptr::null()];
 
         let stdout_writer_fd = stdout_writer.into_raw_fd();
         let stderr_writer_fd = stderr_writer.into_raw_fd();
@@ -606,13 +602,13 @@ impl Command {
             libc::posix_spawnattr_init(&mut attr);
         }
 
-        let env = [ENV_PATH_CSTR.as_ptr(), ptr::null()];
+        let env = [c"PATH=/usr/bin:/bin".as_ptr(), ptr::null()];
 
         let mut pid = 0;
         let ret = unsafe {
             libc::posix_spawn(
                 &mut pid,
-                SHELL_CSTR.as_ptr(),
+                c"/bin/sh".as_ptr(),
                 &file_actions,
                 &attr,
                 args.as_ptr() as *const *mut _,
