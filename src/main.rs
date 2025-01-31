@@ -763,7 +763,7 @@ impl<'a> CommandBuilder<'a> {
         });
 
         levels.into_iter().for_each(|level| {
-            let outputs = Mutex::new(Vec::new());
+            let outputs = Mutex::new(Vec::with_capacity(level.len()));
             level.into_par_iter().filter_map(|t| self.parsed.jobs.get(t)).for_each(|job| {
                 self._resolve_and_run(job, &outputs)
             });
