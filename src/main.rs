@@ -237,6 +237,19 @@ struct Parsed<'a> {
     rules: StrHashMap::<'a, Rule<'a>>,
 }
 
+impl<'a> Parsed<'a> {
+    #[inline(always)]
+    fn job_mut(&mut self, target: &str) -> &mut Job<'a> {
+        unsafe { self.jobs.get_mut(target).unwrap_unchecked() }
+    }
+
+    #[inline(always)]
+    fn rule_mut(&mut self, name: &str) -> &mut Rule<'a> {
+        unsafe { self.rules.get_mut(name).unwrap_unchecked() }
+    }
+}
+
+
 #[derive(Default)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 enum Context<'a> {
@@ -266,7 +279,7 @@ impl<'a> Parser<'a> {
     fn finish_shadows(&mut self) {
         match &mut self.context {
             Context::Job { target, shadows } => {
-                let job = unsafe { self.parsed.jobs.get_mut(target).unwrap_unchecked() };
+                let job = self.parsed.job_mut(target);
                 if let Some(shadows) = shadows.take() {
                     job.shadows.replace(shadows);
                 }
@@ -301,17 +314,16 @@ impl<'a> Parser<'a> {
             .map(|p| p + first_space) else {
                 return
             };
-
-        let parse_def = |line: &'a str| -> (&'a str, Def<'a>) {
-            let name = first_token;
+        
+        let parse_def = |line: &'a str| -> Def<'a> {
             let value = line[second_space + 1..].trim();
-            let def = Def { value };
-            (name, def)
+            Def { value }
         };
 
         match &mut self.context {
             Context::Job { shadows, .. } => {
-                let (name, def) = parse_def(line);
+                let name = first_token;
+                let def = parse_def(line);
                 match shadows.as_mut() {
                     Some(shadows) => { shadows.insert(name, def); },
                     None => {
@@ -344,7 +356,7 @@ impl<'a> Parser<'a> {
                         let description_loc = Loc(self.cursor);
                         let description_str = line[second_space + 1 + 1..].trim();
                         if *already_inserted {
-                            let rule = unsafe { self.parsed.rules.get_mut(name).unwrap_unchecked() };
+                            let rule = self.parsed.rule_mut(name);
                             rule.description = Some(Rule::template(description_str, description_loc));
                         } else {
                             let description = Some(description_str);
@@ -394,7 +406,8 @@ impl<'a> Parser<'a> {
                         self.context = Context::Job {target, shadows: None}
                     },
                     _ => {
-                        let (name, def) = parse_def(line);
+                        let name = first_token;
+                        let def = parse_def(line);
                         self.parsed.defs.insert(name, def);
                     }
                 };
@@ -766,10 +779,7 @@ impl<'a> CommandBuilder<'a> {
             outputs.lock().unwrap().iter().filter_map(|output| {
                 match output {
                     Output::Error(err) => Loc::report(err),
-                    Output::RushMessage(msg) => {
-                        println!("{msg}");
-                        None
-                    },
+                    Output::RushMessage(msg) => { println!("{msg}"); None },
                     Output::CommandOutput(output) => Some(output)
                 }
             }).for_each(|CommandOutput { stdout, stderr, command, description }| {
