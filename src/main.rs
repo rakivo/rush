@@ -131,6 +131,7 @@ impl Template<'_> {
                 },
             }.map(|s| [s, " "].into_iter())
         }).flatten().collect::<String>();
+        _ = ret.pop();
         Ok(ret)
     }
 }
@@ -691,6 +692,7 @@ impl<'a> CommandBuilder<'a> {
     }
 
     fn _resolve_and_run(&self, job: &Job<'a>) {
+        // TODO: reserve total amount of jobs here
         let mut stack = vec![job];
         while let Some(current_job) = stack.pop() {
             if self.compiled.contains(current_job.target) { continue }
