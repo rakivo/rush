@@ -1,4 +1,3 @@
-use std::io;
 use std::mem;
 use std::ptr;
 use std::path::Path;
@@ -9,6 +8,7 @@ use std::time::SystemTime;
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 use std::collections::VecDeque;
+use std::io::{self, Write, Stdout};
 use std::os::fd::{FromRawFd, IntoRawFd};
 
 use memmap2::Mmap;
@@ -643,16 +643,9 @@ struct CommandOutput {
     description: Option::<String>
 }
 
-enum Output {
-    Error(String),
-    RushMessage(String),
-    CommandOutput(CommandOutput),
-}
-
-type Outputs = Mutex::<Vec::<Output>>;
-
 struct CommandBuilder<'a> {
     parsed: &'a Parsed<'a>,
+    stdout: Mutex::<Stdout>,
     compiled: StrDashSet::<'a>,
     metadata_cache: MetadataCache<'a>,    
     transitive_deps: &'a TransitiveDeps<'a>
@@ -664,22 +657,37 @@ impl<'a> CommandBuilder<'a> {
         let n = parsed.jobs.len();
         Self {
             parsed,
+            stdout: Mutex::new(io::stdout()),
             compiled: DashSet::with_capacity_and_hasher(n, FxBuildHasher::default()),
             metadata_cache: MetadataCache::new(n),
             transitive_deps
         }
     }
 
-    fn _resolve_and_run(&self, job: &Job<'a>, outputs: &Outputs) {
+    #[inline(always)]
+    fn print(&self, s: &str) -> io::Result::<()> {
+        self.print_bytes(s.as_bytes())
+    }
+
+    #[inline(always)]
+    fn print_bytes(&self, bytes: &[u8]) -> io::Result::<()> {
+        #[cfg(feature = "dbg")] {
+            self.stdout.lock().unwrap().write_all(bytes)
+        } #[cfg(not(feature = "dbg"))] unsafe {
+            self.stdout.lock().unwrap_unchecked().write_all(bytes)
+        }
+    }
+
+    fn _resolve_and_run(&self, job: &Job<'a>) {
         if self.compiled.contains(job.target) { return }
 
         for input in job.inputs.iter() {
             if let Some(dep_job) = self.parsed.jobs.get(input) {
-                self._resolve_and_run(dep_job, outputs)
+                self._resolve_and_run(dep_job)
             } 
             #[cfg(feature = "dbg")]
             if !self.compiled.contains(input) {
-                println!("dependency {input} is assumed to exist")
+                self.print("dependency {input} is assumed to exist\n")
             }
         }
 
@@ -687,60 +695,69 @@ impl<'a> CommandBuilder<'a> {
             self.compiled.insert(job.target);
             if self.metadata_cache.needs_rebuild(job, &self.transitive_deps) {
                 let Some(command) = rule.command.compile(job, self.parsed).map_err(|e| {
-                    outputs.lock().unwrap().push(Output::Error(e));
+                    _ = self.print(&e);
                     rule.description.as_ref().and_then(|d| d.check(self.parsed).err()).map(|err| {
-                        outputs.lock().unwrap().push(Output::Error(err))
+                        _ = self.print(&err);
                     });
                 }).ok() else {
                     return
                 };
 
                 let description = rule.description.as_ref().and_then(|d| d.compile(job, self.parsed).map_err(|e| {
-                    outputs.lock().unwrap().push(Output::Error(e))
+                    _ = self.print(&e);
                 }).ok());
 
                 let command = Command {command, description};
-                let command_output = match command.execute() {
+                let CommandOutput {
+                    stdout,
+                    stderr,
+                    command,
+                    description
+                } = match command.execute() {
                     Ok(ok) => ok,
                     Err(e) => {
-                        eprintln!{
-                            "could not execute job: {target}: {e}",
+                        let err = format!{
+                            "could not execute job: {target}: {e}\n",
                             target = job.target
                         };
+                        _ = self.print(&err);
                         return
                     }
                 };
-                let output = Output::CommandOutput(command_output);
-                outputs.lock().unwrap().push(output);
+
+                let cap = stdout.len() + stderr.len() + description.as_ref().map_or(command.len(), |d| d.len()) + 1;
+                let mut output = Vec::with_capacity(cap);
+                let command = description.unwrap_or(command);
+                output.extend(command.as_bytes());
+                output.push(b'\n');
+                output.extend(stdout.as_bytes());
+                output.extend(stderr.as_bytes());
+                _ = self.print_bytes(&output);
             } else {
                 let mut any_err = false;
                 if let Err(err) = rule.command.check(self.parsed) {
-                    let output = Output::Error(err);
-                    outputs.lock().unwrap().push(output);
+                    _ = self.print(&err);
                     any_err = true
                 }
 
                 if let Some(Err(err)) = rule.description.as_ref().map(|d| d.check(self.parsed)) {
-                    let output = Output::Error(err);
-                    outputs.lock().unwrap().push(output);
+                    _ = self.print(&err);
                     any_err = true
                 }
 
                 if !any_err {
-                    let msg = format!("{target} is already built", target = job.target);
-                    let output = Output::RushMessage(msg);
-                    outputs.lock().unwrap().push(output)
+                    let msg = format!("{target} is already built\n", target = job.target);
+                    _ = self.print(&msg)
                 }
             }
         } else {
             let err = report_fmt!{
                 job.loc,
-                "no rule named: {rule} found for job {target}",
+                "no rule named: {rule} found for job {target}\n",
                 rule = job.rule,
                 target = job.target
             };
-            let output = Output::Error(err);
-            outputs.lock().unwrap().push(output);
+            _ = self.print(&err)
         }
     }
 
@@ -753,24 +770,8 @@ impl<'a> CommandBuilder<'a> {
         });
 
         levels.into_iter().for_each(|level| {
-            let outputs = Mutex::new(Vec::with_capacity(level.len()));
             level.into_par_iter().filter_map(|t| self.parsed.jobs.get(t)).for_each(|job| {
-                self._resolve_and_run(job, &outputs)
-            });
-            outputs.lock().unwrap().iter().filter_map(|output| {
-                match output {
-                    Output::Error(err) => Loc::report(err),
-                    Output::RushMessage(msg) => { println!("{msg}"); None },
-                    Output::CommandOutput(output) => Some(output)
-                }
-            }).for_each(|CommandOutput { stdout, stderr, command, description }| {
-                if let Some(d) = description {
-                    println!("[{d}]")
-                } else {
-                    println!("{command}")
-                }
-                print!("{stdout}");
-                print!("{stderr}");
+                self._resolve_and_run(job)
             });
         });
     }
