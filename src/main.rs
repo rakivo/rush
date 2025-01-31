@@ -691,85 +691,98 @@ impl<'a> CommandBuilder<'a> {
     }
 
     fn _resolve_and_run(&self, job: &Job<'a>) {
-        if self.compiled.contains(job.target) { return }
+        let mut stack = vec![job];
+        while let Some(current_job) = stack.pop() {
+            if self.compiled.contains(current_job.target) { continue }
 
-        for input in job.inputs.iter() {
-            if let Some(dep_job) = self.parsed.jobs.get(input) {
-                self._resolve_and_run(dep_job)
-            } 
-            #[cfg(feature = "dbg")]
-            if !self.compiled.contains(input) {
-                self.print("dependency {input} is assumed to exist\n")
-            }
-        }
-
-        if let Some(rule) = self.parsed.rules.get(job.rule) {
-            self.compiled.insert(job.target);
-            if self.metadata_cache.needs_rebuild(job, &self.transitive_deps) {
-                let Some(command) = rule.command.compile(job, self.parsed).map_err(|e| {
-                    _ = self.print(&e);
-                    rule.description.as_ref().and_then(|d| d.check(self.parsed).err()).map(|err| {
-                        _ = self.print(&err);
-                    });
-                }).ok() else {
-                    return
-                };
-
-                let description = rule.description.as_ref().and_then(|d| d.compile(job, self.parsed).map_err(|e| {
-                    _ = self.print(&e);
-                }).ok());
-
-                let command = Command {command, description};
-                let CommandOutput {
-                    stdout,
-                    stderr,
-                    command,
-                    description
-                } = match command.execute() {
-                    Ok(ok) => ok,
-                    Err(e) => {
-                        let err = format!{
-                            "could not execute job: {target}: {e}\n",
-                            target = job.target
-                        };
-                        _ = self.print(&err);
-                        return
+            let mut all_deps_resolved = true;
+            for input in current_job.inputs.iter() {
+                if !self.compiled.contains(input) {
+                    if let Some(dep_job) = self.parsed.jobs.get(input) {
+                        stack.push(current_job);
+                        stack.push(dep_job);
+                        all_deps_resolved = false;
+                        break
+                    } else {
+                        #[cfg(feature = "dbg")] {
+                            let msg = format!("dependency {input} is assumed to exist\n");
+                            _ = self.print(&msg);
+                        }
                     }
-                };
-
-                let cap = stdout.len() + stderr.len() + description.as_ref().map_or(command.len(), |d| d.len()) + 1;
-                let mut output = Vec::with_capacity(cap);
-                let command = description.unwrap_or(command);
-                output.extend(command.as_bytes());
-                output.push(b'\n');
-                output.extend(stdout.as_bytes());
-                output.extend(stderr.as_bytes());
-                _ = self.print_bytes(&output);
-            } else {
-                let mut any_err = false;
-                if let Err(err) = rule.command.check(self.parsed) {
-                    _ = self.print(&err);
-                    any_err = true
-                }
-
-                if let Some(Err(err)) = rule.description.as_ref().map(|d| d.check(self.parsed)) {
-                    _ = self.print(&err);
-                    any_err = true
-                }
-
-                if !any_err {
-                    let msg = format!("{target} is already built\n", target = job.target);
-                    _ = self.print(&msg)
                 }
             }
-        } else {
-            let err = report_fmt!{
-                job.loc,
-                "no rule named: {rule} found for job {target}\n",
-                rule = job.rule,
-                target = job.target
-            };
-            _ = self.print(&err)
+
+            if !all_deps_resolved { continue }
+
+            if let Some(rule) = self.parsed.rules.get(current_job.rule) {
+                self.compiled.insert(current_job.target);
+
+                if self.metadata_cache.needs_rebuild(current_job, &self.transitive_deps) {
+                    let Some(command) = rule.command.compile(current_job, self.parsed).map_err(|e| {
+                        _ = self.print(&e);
+                        rule.description.as_ref().and_then(|d| d.check(self.parsed).err()).map(|err| {
+                            _ = self.print(&err)
+                        });
+                    }).ok() else {
+                        continue
+                    };
+
+                    let description = rule.description.as_ref().and_then(|d| d.compile(current_job, self.parsed).map_err(|e| {
+                        _ = self.print(&e)
+                    }).ok());
+
+                    let command = Command { command, description };
+                    let CommandOutput {
+                        stdout,
+                        stderr,
+                        command,
+                        description,
+                    } = match command.execute() {
+                        Ok(ok) => ok,
+                        Err(e) => {
+                            let err = format!(
+                                "could not execute job: {target}: {e}\n",
+                                target = current_job.target
+                            );
+                            _ = self.print(&err);
+                            continue;
+                        }
+                    };
+
+                    let cap = stdout.len() + stderr.len() + description.as_ref().map_or(command.len(), |d| d.len()) + 1;
+                    let mut output = Vec::with_capacity(cap);
+                    let command = description.unwrap_or(command);
+                    output.extend(command.as_bytes());
+                    output.push(b'\n');
+                    output.extend(stdout.as_bytes());
+                    output.extend(stderr.as_bytes());
+                    _ = self.print_bytes(&output);
+                } else {
+                    let mut any_err = false;
+                    if let Err(err) = rule.command.check(self.parsed) {
+                        _ = self.print(&err);
+                        any_err = true
+                    }
+
+                    if let Some(Err(err)) = rule.description.as_ref().map(|d| d.check(self.parsed)) {
+                        _ = self.print(&err);
+                        any_err = true
+                    }
+
+                    if !any_err {
+                        let msg = format!("{target} is already built\n", target = current_job.target);
+                        _ = self.print(&msg)
+                    }
+                }
+            } else {
+                let err = report_fmt!{
+                    current_job.loc,
+                    "no rule named: {rule} found for job {target}\n",
+                    rule = current_job.rule,
+                    target = current_job.target
+                };
+                _ = self.print(&err);
+            }
         }
     }
 
