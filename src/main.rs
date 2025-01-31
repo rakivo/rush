@@ -101,10 +101,12 @@ enum TemplateChunk<'a> {
 #[cfg_attr(feature = "dbg", derive(Debug))]
 struct Template<'a> {
     loc: Loc,
+    statics_len: usize,
     chunks: Vec::<TemplateChunk<'a>>,
 }
 
 impl Template<'_> {
+    const AVERAGE_VARIABLE_VALUE_LEN: usize = 25;
     const CONSTANT_PLACEHOLDERS: &'static [&'static str] = &["in", "out"];
 
     fn check(&self, context: &Parsed) -> Result::<(), String> {
@@ -120,23 +122,34 @@ impl Template<'_> {
         } Ok(())
     }
 
-    fn compile(&self, job: &Job, context: &Parsed) -> String {
-        self.chunks.iter().flat_map(|c| {
+    fn compile<'a>(&'a self, job: &Job<'a>, context: &Parsed<'a>) -> Result::<String, String> {
+        let mut first = true;
+        let n = self.statics_len + self.chunks.len() + Self::AVERAGE_VARIABLE_VALUE_LEN;
+        let mut ret = String::with_capacity(n);
+
+        for c in self.chunks.iter() {
             let s = match c {
-                TemplateChunk::Static(s) => s,
+                TemplateChunk::Static(s) => Ok(*s),
                 TemplateChunk::Placeholder(placeholder) => match *placeholder {
-                    "in" => job.inputs_wo_rule_str,
-                    "out" => job.target,
-                    _ => {
-                        job.shadows.as_ref()
-                            .and_then(|shadows| shadows.get(placeholder).map(|shadow| shadow.value))
-                            .or_else(|| context.defs.get(placeholder).map(|def| def.value))
-                            .unwrap_or_else(|| report!(self.loc, "undefined variable: {placeholder}"))
-                    }
-                }
-            };
-            [s, " "]
-        }).collect()
+                    "in" => Ok(job.inputs_wo_rule_str),
+                    "out" => Ok(job.target),
+                    _ => job.shadows
+                        .as_ref()
+                        .and_then(|shadows| shadows.get(placeholder).map(|shadow| shadow.value))
+                        .or_else(|| context.defs.get(placeholder).map(|def| def.value))
+                        .ok_or(report_fmt!(self.loc, "undefined variable: {placeholder}")),
+                },
+            }?;
+
+            if !first {
+                ret.push(' ')
+            } else {
+                first = false
+            }
+            ret.push_str(s);
+        }
+
+        Ok(ret)
     }
 }
 
@@ -158,6 +171,7 @@ impl<'a> Rule<'a> {
 
     fn template(s: &str, loc: Loc) -> Template {
         let mut start = 0;
+        let mut statics_len = 0;
         let mut chunks = Vec::new();
 
         while let Some(i) = s[start..].find('$') {
@@ -166,6 +180,7 @@ impl<'a> Rule<'a> {
             if i > start && !s[start..i].trim().is_empty() {
                 let trimmed_static = s[start..i].trim();
                 if !trimmed_static.is_empty() {
+                    statics_len += trimmed_static.len();
                     chunks.push(TemplateChunk::Static(trimmed_static))
                 }
             }
@@ -188,11 +203,12 @@ impl<'a> Rule<'a> {
         if start < s.len() {
             let trimmed_static = s[start..].trim();
             if !trimmed_static.is_empty() {
+                statics_len += trimmed_static.len();
                 chunks.push(TemplateChunk::Static(trimmed_static));
             }
         }
 
-        Template { loc, chunks }
+        Template { loc, chunks, statics_len }
     }
 }
 
@@ -548,6 +564,7 @@ impl<'a> MetadataCache<'a> {
     }
 }
 
+#[cfg_attr(feature = "dbg", derive(Debug))]
 struct Command {
     command: String,
     description: Option::<String>
@@ -679,10 +696,20 @@ impl<'a> CommandBuilder<'a> {
         if let Some(rule) = self.parsed.rules.get(job.rule) {
             self.compiled.insert(job.target);
             if self.metadata_cache.needs_rebuild(job, &self.transitive_deps) {
-                let command = Command {
-                    command: rule.command.compile(job, self.parsed),
-                    description: rule.description.as_ref().map(|d| d.compile(job, self.parsed)),
+                let Some(command) = rule.command.compile(job, self.parsed).map_err(|e| {
+                    outputs.lock().unwrap().push(Output::Error(e));
+                    rule.description.as_ref().and_then(|d| d.check(self.parsed).err()).map(|err| {
+                        outputs.lock().unwrap().push(Output::Error(err))
+                    });
+                }).ok() else {
+                    return
                 };
+
+                let description = rule.description.as_ref().and_then(|d| d.compile(job, self.parsed).map_err(|e| {
+                    outputs.lock().unwrap().push(Output::Error(e))
+                }).ok());
+
+                let command = Command {command, description};
                 let command_output = match command.execute() {
                     Ok(ok) => ok,
                     Err(e) => {
@@ -736,7 +763,7 @@ impl<'a> CommandBuilder<'a> {
         });
 
         levels.into_iter().for_each(|level| {
-            let outputs = Mutex::new(Vec::with_capacity(level.len()));
+            let outputs = Mutex::new(Vec::new());
             level.into_par_iter().filter_map(|t| self.parsed.jobs.get(t)).for_each(|job| {
                 self._resolve_and_run(job, &outputs)
             });
@@ -751,7 +778,6 @@ impl<'a> CommandBuilder<'a> {
                 }
             }).for_each(|CommandOutput { stdout, stderr, command, description }| {
                 if let Some(d) = description {
-                    let d = d.trim();
                     println!("[{d}]")
                 } else {
                     println!("{command}")
