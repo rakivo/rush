@@ -27,22 +27,9 @@ type TransitiveDeps<'a> = StrHashMap::<'a, Arc::<StrHashSet<'a>>>;
 
 const RUSH_FILE_NAME: &str = "build.rush";
 
-#[inline(always)]
-fn to_str(bytes: &[u8]) -> &str {
-    unsafe { str::from_utf8_unchecked(bytes) }
-}
-
-#[inline(always)]
-fn read_file<P>(file_path: P) -> io::Result::<Mmap>
-where
-    P: AsRef::<Path>
-{
-    let file = File::open(file_path)?;
-    unsafe { Mmap::map(&file) }
-}
-
+#[inline]
 fn read_rush() -> Option::<Mmap> {
-    if let Some(f) = fs::read_dir(".")
+    if let Some(path) = fs::read_dir(".")
         .expect("could not read cwd")
         .filter_map(|res| res.map(|e| e.path()).ok())
         .find(|path| {
@@ -50,7 +37,8 @@ fn read_rush() -> Option::<Mmap> {
                 .map_or(false, |name| name.to_string_lossy() == RUSH_FILE_NAME)
         })
     {
-        Some(read_file(&f).ok()?)
+        let file = File::open(path).ok()?;
+        Some(unsafe { Mmap::map(&file) }.ok()?)
     } else {
         None
     }
@@ -518,11 +506,6 @@ fn build_dependency_graph<'a>(
 
         visited.insert(node);
 
-        #[inline(always)]
-        fn is_system_header(path: &str) -> bool {
-            path.starts_with("/usr/include/") || path.starts_with("/usr/lib/")
-        }
-
         let mut deps = parsed.jobs.get(node).map(|job| {
             job.inputs.iter()
                 .chain(job.deps.iter())
@@ -545,6 +528,11 @@ fn build_dependency_graph<'a>(
                     }
                 }
             }
+        }
+
+        #[inline(always)]
+        fn is_system_header(path: &str) -> bool {
+            path.starts_with("/usr/include/") || path.starts_with("/usr/lib/")
         }
 
         let transitive = deps.iter()
@@ -902,7 +890,7 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE
     };
 
-    let content = to_str(&rush[..]);
+    let content = unsafe { str::from_utf8_unchecked(&rush[..]) };
     let parsed = Parser::parse(content);
 
     let n = parsed.jobs.len();
