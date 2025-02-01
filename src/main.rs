@@ -240,8 +240,6 @@ type Defs<'a> = StrHashMap::<'a, Def<'a>>;
 #[derive(Default)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 struct Parsed<'a> {
-    depfiles_count: usize,
-
     defs: Defs<'a>,
     jobs: StrHashMap::<'a, Job<'a>>,
     rules: StrHashMap::<'a, Rule<'a>>,
@@ -375,7 +373,6 @@ impl<'a> Parser<'a> {
                         }
                     },
                     "depfile" => {
-                        self.parsed.depfiles_count += 1;
                         let Def {value: depfile_path} = parse_def();
                         if *already_inserted {
                             let rule = self.parsed.rule_mut(name);
