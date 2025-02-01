@@ -75,11 +75,7 @@ macro_rules! report_fmt {
         }
     };
     ($loc: expr, $lit: literal) => {
-        format!{
-            "{RUSH_FILE_NAME}:{row}: {msg}",
-            row = $loc.0,
-            msg = $lit
-        }
+        format!("{RUSH_FILE_NAME}:{row}: {msg}", row = $loc.0, msg = $lit)
     }
 }
 
@@ -117,7 +113,7 @@ impl Template<'_> {
     }
 
     fn compile(&self, job: &Job, context: &Parsed) -> Result::<String, String> {
-        let ret = self.chunks.iter().flat_map(|c| {
+        let mut ret = self.chunks.iter().flat_map(|c| {
             match c {
                 TemplateChunk::Static(s) => Ok(*s),
                 TemplateChunk::Placeholder(placeholder) => match *placeholder {
@@ -232,7 +228,6 @@ impl<'a> Parsed<'a> {
         unsafe { self.rules.get_mut(name).unwrap_unchecked() }
     }
 }
-
 
 #[derive(Default)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
