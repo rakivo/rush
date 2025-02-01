@@ -1,5 +1,7 @@
 cflags = -std=gnu99 -lm -O2 -Wall -Wextra -DLUA_COMPAT_5_3
+
 rule cc
+  depfile = $out.d
   command = gcc $cflags -o $out -c $in
 
 rule link
