@@ -1,11 +1,11 @@
 use std::mem;
 use std::ptr;
 use std::path::Path;
-use std::str::Lines;
 use std::ffi::CString;
 use std::fs::{self, File};
 use std::time::SystemTime;
 use std::process::ExitCode;
+use std::str::{self, Lines};
 use std::sync::{Arc, Mutex};
 use std::collections::VecDeque;
 use std::io::{self, Write, Stdout};
@@ -29,7 +29,7 @@ const RUSH_FILE_NAME: &str = "build.rush";
 
 #[inline(always)]
 fn to_str(bytes: &[u8]) -> &str {
-    unsafe { std::str::from_utf8_unchecked(bytes) }
+    unsafe { str::from_utf8_unchecked(bytes) }
 }
 
 #[inline(always)]
@@ -312,7 +312,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_line(&mut self, line: &'a str) {
-        let first = line.chars().position(|c| c.is_ascii_whitespace()).map(|first_space| {
+        let first = line.find(['\t', '\n', '\x0C', '\r', ' ']).map(|first_space| {
             (first_space, &line[..first_space])
         });
 
@@ -335,8 +335,7 @@ impl<'a> Parser<'a> {
             report!(Loc(self.cursor), "undefined token: {line}")
         };
 
-        let Some(second_space) = line[first_space..].chars()
-            .position(|c| !c.is_ascii_whitespace())
+        let Some(second_space) = line[first_space..].find(|c: char| !c.is_ascii_whitespace())
             .map(|p| p + first_space) else {
                 return
             };
@@ -442,12 +441,12 @@ impl<'a> Parser<'a> {
                         }
                     },
                     "build" => {
-                        let Some(colon_idx) = line.chars().position(|c| c == ':') else {
+                        let Some(colon_idx) = line.find(':') else {
                             report!(Loc(self.cursor), "expected colon after build target")
                         };
                         let post_colon = line[colon_idx + 1..].trim();
                         let target = line[first_space..colon_idx].trim();
-                        let or_idx = post_colon.chars().position(|c| c == '|');
+                        let or_idx = post_colon.find('|');
                         let (inputs_str, deps) = if let Some(or_idx) = or_idx {
                             let inputs_str = post_colon[..or_idx].trim_end();
                             let deps = post_colon[or_idx + 1..].split_ascii_whitespace().collect();
@@ -519,6 +518,11 @@ fn build_dependency_graph<'a>(
 
         visited.insert(node);
 
+        #[inline(always)]
+        fn is_system_header(path: &str) -> bool {
+            path.starts_with("/usr/include/") || path.starts_with("/usr/lib/")
+        }
+
         let mut deps = parsed.jobs.get(node).map(|job| {
             job.inputs.iter()
                 .chain(job.deps.iter())
@@ -526,9 +530,29 @@ fn build_dependency_graph<'a>(
                 .collect::<StrHashSet>()
         }).unwrap_or_default();
 
-        let transitive = deps.iter().fold(Vec::with_capacity(deps.len()), |mut transitive, dep| {
-            let deps = collect_deps(dep, parsed, graph, visited, transitive_deps);
-            transitive.extend(deps.iter().cloned());
+        if let Some(job) = parsed.jobs.get(node) {
+            if let Some(rule) = parsed.rules.get(job.rule) {
+                if let Some(ref depfile_template) = rule.depfile {
+                    if let Ok(depfile_path) = depfile_template.compile(job, parsed) {
+                        if let Ok(depfile) = fs::read_to_string(&depfile_path) {
+                            let depfile = Box::leak(depfile.into_boxed_str());
+                            let colon_idx = depfile.find(':').unwrap();
+                            let depfile_deps = depfile[colon_idx + 1..]
+                                .split_ascii_whitespace()
+                                .filter(|f| *f != "\\");
+                            deps.extend(depfile_deps);
+                        }
+                    }
+                }
+            }
+        }
+
+        let transitive = deps.iter()
+            .filter(|dep| !is_system_header(dep))
+            .fold(Vec::with_capacity(deps.len()), |mut transitive, dep|
+        {
+            let deps = collect_deps(*dep, parsed, graph, visited, transitive_deps);
+            transitive.extend(deps.iter().map(|h| *h));
             transitive
         });
 
@@ -554,7 +578,7 @@ fn topological_sort_levels<'a>(graph: &Graph<'a>) -> Vec::<Vec::<&'a str>> {
     for (node, deps) in graph.iter() {
         in_degree.entry(node).or_insert(0);
         for dep in deps.iter() {
-            *in_degree.entry(dep).or_insert(0) += 1
+            *in_degree.entry(*dep).or_insert(0) += 1
         }
     }
 
@@ -572,7 +596,7 @@ fn topological_sort_levels<'a>(graph: &Graph<'a>) -> Vec::<Vec::<&'a str>> {
 
             let Some(deps) = graph.get(node) else { continue };
             for dep in deps.iter() {
-                let e = unsafe { in_degree.get_mut(dep).unwrap_unchecked() };
+                let e = unsafe { in_degree.get_mut(&*dep).unwrap_unchecked() };
                 *e -= 1;
                 if *e == 0 {
                     queue.push_back(*dep)
@@ -623,8 +647,8 @@ impl<'a> MetadataCache<'a> {
         // TODO: do something here if dependent file does not exist
         let mtimes = unsafe {
             transitive_deps.get(job.target).unwrap_unchecked()
-        }.par_iter().filter_map(|dep| {
-            self.mtime(dep).ok()
+        }.iter().filter_map(|dep| {
+            self.mtime(*dep).ok()
         }).collect::<Vec::<_>>();
 
         let Ok(target_mtime) = self.mtime(job.target) else {
@@ -724,28 +748,17 @@ struct CommandOutput {
     description: Option::<String>
 }
 
-struct CompiledDepfiles<'a> {
-    paths: Vec::<(&'a str, String)>
-}
-
-impl CompiledDepfiles<'_> {
-    #[inline(always)]
-    fn new(depfiles_count: usize) -> Self {
-        Self {paths: Vec::with_capacity(depfiles_count)}
-    }
-}
-
 struct CommandBuilder<'a> {
     parsed: &'a Parsed<'a>,
     stdout: Mutex::<Stdout>,
     compiled: StrDashSet::<'a>,
     metadata_cache: MetadataCache<'a>,    
-    transitive_deps: &'a TransitiveDeps<'a>
+    transitive_deps: TransitiveDeps<'a>
 }
 
 impl<'a> CommandBuilder<'a> {
     #[inline]
-    fn new(parsed: &'a Parsed, transitive_deps: &'a TransitiveDeps) -> Self {
+    fn new(parsed: &'a Parsed, transitive_deps: TransitiveDeps<'a>) -> Self {
         let n = parsed.jobs.len();
         Self {
             parsed,
@@ -770,7 +783,7 @@ impl<'a> CommandBuilder<'a> {
         }
     }
 
-    fn _resolve_and_run(&self, job: &Job<'a>, depfiles: &Mutex::<CompiledDepfiles<'a>>) {
+    fn _resolve_and_run(&self, job: &Job<'a>) {
         // TODO: reserve total amount of jobs here
         let mut stack = vec![job];
         while let Some(job) = stack.pop() {
@@ -855,14 +868,6 @@ impl<'a> CommandBuilder<'a> {
                         _ = self.print(&msg)
                     }
                 }
-
-                if let Some(ref depfile) = rule.depfile {
-                    if let Ok(depfile) = depfile.compile(job, self.parsed).map_err(|e| {
-                        _ = self.print(&e)
-                    }) {
-                        depfiles.lock().unwrap().paths.push((job.target, depfile));
-                    }
-                }
             } else {
                 let err = report_fmt!{
                     job.loc,
@@ -875,7 +880,7 @@ impl<'a> CommandBuilder<'a> {
         }
     }
 
-    fn resolve_and_run(self, graph: &Graph) -> Mutex::<CompiledDepfiles<'a>> {
+    fn resolve_and_run(self, graph: &Graph) {
         let levels = topological_sort_levels(graph);
 
         #[cfg(feature = "dbg")]
@@ -883,12 +888,11 @@ impl<'a> CommandBuilder<'a> {
             println!("{i}: {level:?}")
         });
 
-        let depfiles = Mutex::new(CompiledDepfiles::new(self.parsed.depfiles_count));
         levels.into_iter().for_each(|level| {
             level.into_par_iter().filter_map(|t| self.parsed.jobs.get(t)).for_each(|job| {
-                self._resolve_and_run(job, &depfiles)
+                self._resolve_and_run(job)
             });
-        }); depfiles
+        });
     }
 }
 
@@ -909,7 +913,7 @@ fn main() -> ExitCode {
         &mut transitive_deps
     );
 
-    let cmd_builder = CommandBuilder::new(&parsed, &transitive_deps);
+    let cmd_builder = CommandBuilder::new(&parsed, transitive_deps);
     cmd_builder.resolve_and_run(&graph);
 
     ExitCode::SUCCESS
