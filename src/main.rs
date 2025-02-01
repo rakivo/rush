@@ -65,13 +65,13 @@ impl Loc {
 macro_rules! report_fmt {
     ($loc: expr, $($arg:tt)*) => {
         format!{
-            "{RUSH_FILE_NAME}:{row}: {msg}",
+            "{RUSH_FILE_NAME}:{row}: {msg}\n",
             row = $loc.0,
             msg = std::fmt::format(format_args!($($arg)*))
         }
     };
     ($loc: expr, $lit: literal) => {
-        format!("{RUSH_FILE_NAME}:{row}: {msg}", row = $loc.0, msg = $lit)
+        format!("{RUSH_FILE_NAME}:{row}: {msg}\n", row = $loc.0, msg = $lit)
     }
 }
 
@@ -164,6 +164,31 @@ impl Template<'_> {
         } Ok(())
     }
 
+    fn compile_(&self, job: &Job, compiled_target: &str, inputs: &str, context: &Parsed) -> Result::<String, String> {
+        let mut ret = String::new();
+        for (i, c) in self.chunks.iter().enumerate() {
+            let s = match c {
+                TemplateChunk::Static(s) |
+                TemplateChunk::JoinedStatic(s) => Ok(*s),
+                TemplateChunk::Placeholder(placeholder) => match *placeholder {
+                    "in" => Ok(inputs),
+                    "out" => Ok(compiled_target),
+                    _ => job.shadows
+                        .as_ref()
+                        .and_then(|shadows| shadows.get(placeholder).map(|shadow| shadow.value))
+                        .or_else(|| context.defs.get(placeholder).map(|def| def.value))
+                        .ok_or(report_fmt!(self.loc, "undefined variable: {placeholder}"))
+                },
+            }?;
+            ret.push_str(s);
+            if !matches!(self.chunks.get(i + 1), Some(TemplateChunk::JoinedStatic(..))) {
+                ret.push(' ')
+            }
+        }
+        _ = ret.pop();
+        Ok(ret)
+    }
+
     fn compile(&self, job: &Job, context: &Parsed) -> Result::<String, String> {
         let mut ret = String::new();
         for (i, c) in self.chunks.iter().enumerate() {
@@ -222,13 +247,14 @@ struct Job<'a> {
     loc: Loc,
     target: &'a str,
     rule: &'a str,
+    target_template: Template<'a>,
     inputs: Vec::<&'a str>,
+    inputs_templates: Vec::<Template<'a>>,
     shadows: Option::<Defs<'a>>,
     inputs_wo_rule_str: &'a str,
     deps: Vec::<&'a str>
 }
 
-#[derive(Default)]
 #[repr(transparent)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 struct Def<'a> {
@@ -237,7 +263,6 @@ struct Def<'a> {
 
 type Defs<'a> = StrHashMap::<'a, Def<'a>>;
 
-#[derive(Default)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 struct Parsed<'a> {
     defs: Defs<'a>,
@@ -276,7 +301,6 @@ enum Context<'a> {
     }
 }
 
-#[derive(Default)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 struct Parser<'a> {
     cursor: usize,
@@ -441,10 +465,12 @@ impl<'a> Parser<'a> {
                         };
                         let mut input_tokens = inputs_str.split_ascii_whitespace();
                         let Some(rule) = input_tokens.next() else { return };
-                        let inputs = input_tokens.collect();
+                        let inputs = input_tokens.collect::<Vec::<_>>();
                         let inputs_wo_rule_str = inputs_str[rule.len() + 1..].trim_end();
                         let loc = Loc(self.cursor);
-                        let job = Job {loc, target, shadows: None, rule, inputs, inputs_wo_rule_str, deps};
+                        let target_template = Template::new(target, loc);
+                        let inputs_templates = inputs.iter().map(|input| Template::new(input, loc)).collect();
+                        let job = Job {loc, target, inputs_templates, target_template, rule, inputs, inputs_wo_rule_str, deps, ..Default::default()};
                         self.parsed.jobs.insert(target, job);
                         self.context = Context::Job {target, shadows: None}
                     },
@@ -471,7 +497,15 @@ impl<'a> Parser<'a> {
 
     #[inline]
     fn parse(content: &'a str) -> Parsed<'a> {
-        let mut parser = Self::default();
+        let mut parser = Self {
+            cursor: 0,
+            parsed: Parsed {
+                defs: Defs::with_capacity(32),
+                jobs: StrHashMap::with_capacity(32),
+                rules: StrHashMap::with_capacity(32)
+            },
+            context: Context::default()
+        };
         let mut lines = content.lines();
         while let Some(line) = lines.next() {
             parser.cursor += 1;
@@ -487,7 +521,7 @@ impl<'a> Parser<'a> {
 
 fn build_dependency_graph<'a>(
     parsed: &'a Parsed,
-    visited: &mut StrHashSet<'a>,
+    precompiled: &Precompiled<'a>,
     transitive_deps: &mut TransitiveDeps<'a>
 ) -> Graph<'a> {
     fn collect_deps<'a>(
@@ -495,6 +529,7 @@ fn build_dependency_graph<'a>(
         parsed: &'a Parsed,
         graph: &mut Graph<'a>,
         visited: &mut StrHashSet<'a>,
+        precompiled: &Precompiled<'a>,
         transitive_deps: &mut TransitiveDeps<'a>
     ) -> Arc::<StrHashSet<'a>> {
         if visited.contains(node) {
@@ -536,7 +571,7 @@ fn build_dependency_graph<'a>(
             .filter(|dep| !is_system_header(dep))
             .fold(Vec::with_capacity(deps.len()), |mut transitive, dep|
         {
-            let deps = collect_deps(*dep, parsed, graph, visited, transitive_deps);
+            let deps = collect_deps(&dep, parsed, graph, visited, precompiled, transitive_deps);
             transitive.extend(deps.iter().map(|h| *h));
             transitive
         });
@@ -544,15 +579,21 @@ fn build_dependency_graph<'a>(
         deps.extend(transitive);
 
         let deps = Arc::new(deps);
-        graph.insert(node, Arc::clone(&deps));
-        transitive_deps.insert(node, Arc::clone(&deps));
+
+        {
+            graph.insert(node, Arc::clone(&deps));
+            transitive_deps.insert(node, Arc::clone(&deps));
+        }
+
         deps
     }
 
-    let mut graph = StrHashMap::with_capacity(parsed.jobs.len());
+    let n = parsed.jobs.len();
+    let mut graph = StrHashMap::with_capacity(n);
+    let mut visited = StrHashSet::with_capacity(n);
 
     for target in parsed.jobs.keys() {
-        collect_deps(target, parsed, &mut graph, visited, transitive_deps);
+        collect_deps(target, parsed, &mut graph, &mut visited, precompiled, transitive_deps);
     } graph
 }
 
@@ -600,11 +641,13 @@ fn topological_sort_levels<'a>(graph: &Graph<'a>) -> Vec::<Vec::<&'a str>> {
     levels
 }
 
+#[cfg_attr(feature = "dbg", derive(Debug))]
 #[derive(Copy, Clone, PartialEq, PartialOrd)]
 struct Metadata {
     mtime: SystemTime
 }
 
+#[cfg_attr(feature = "dbg", derive(Debug))]
 struct MetadataCache<'a> {
     files: StrDashMap::<'a, Metadata>
 }
@@ -733,22 +776,66 @@ struct CommandOutput {
     description: Option::<String>
 }
 
+#[cfg_attr(feature = "dbg", derive(Debug))]
+struct Precompiled<'a> {
+    compiled_targets: StrDashMap::<'a, Arc::<str>>,
+    compiled_inputs: StrDashMap::<'a, Arc::<str>>,
+}
+
+impl<'a> Precompiled<'a> {
+    fn precompile(parsed: &Parsed<'a>) -> Self {
+        let precompiled = Precompiled {
+            compiled_inputs: StrDashMap::with_capacity_and_hasher(parsed.jobs.len(), FxBuildHasher::default()),
+            compiled_targets: StrDashMap::with_capacity_and_hasher(parsed.jobs.len(), FxBuildHasher::default())
+        };
+
+        parsed.jobs.par_iter().filter(|(.., j)| parsed.rules.contains_key(j.rule)).for_each(|(target, job)| {
+            match job.target_template.compile(job, &parsed) {
+                Ok(ok) => _ = precompiled.compiled_targets.insert(target, Arc::from(ok)),
+                Err(e) => report!(job.loc, "{e}")
+            }
+
+            let mut inputs = job.inputs_templates.par_iter().zip(job.inputs.par_iter()).flat_map(|(template, ..)| {
+                match template.compile(job, &parsed) {
+                    Ok(ok) => [ok.leak(), " "],
+                    Err(e) => report!(job.loc, "{e}")
+                }
+            }).collect::<String>();
+
+            if !inputs.is_empty() {
+                _ = inputs.pop()
+            }
+
+            precompiled.compiled_inputs.insert(target, Arc::from(inputs));
+        });
+
+        precompiled
+    }
+}
+
+#[cfg_attr(feature = "dbg", derive(Debug))]
 struct CommandBuilder<'a> {
-    parsed: &'a Parsed<'a>,
+    context: &'a Parsed<'a>,
     stdout: Mutex::<Stdout>,
-    compiled: StrDashSet::<'a>,
-    metadata_cache: MetadataCache<'a>,    
+    processed: StrDashSet::<'a>,
+    metadata_cache: MetadataCache<'a>,
+    precompiled: Precompiled<'a>,
     transitive_deps: TransitiveDeps<'a>
 }
 
 impl<'a> CommandBuilder<'a> {
     #[inline]
-    fn new(parsed: &'a Parsed, transitive_deps: TransitiveDeps<'a>) -> Self {
-        let n = parsed.jobs.len();
+    fn new(
+        context: &'a Parsed,
+        transitive_deps: TransitiveDeps<'a>,
+        precompiled: Precompiled<'a>
+    ) -> Self {
+        let n = context.jobs.len();
         Self {
-            parsed,
+            context,
+            precompiled,
             stdout: Mutex::new(io::stdout()),
-            compiled: DashSet::with_capacity_and_hasher(n, FxBuildHasher::default()),
+            processed: DashSet::with_capacity_and_hasher(n, FxBuildHasher::default()),
             metadata_cache: MetadataCache::new(n),
             transitive_deps
         }
@@ -772,12 +859,12 @@ impl<'a> CommandBuilder<'a> {
         // TODO: reserve total amount of jobs here
         let mut stack = vec![job];
         while let Some(job) = stack.pop() {
-            if self.compiled.contains(job.target) { continue }
+            if self.processed.contains(job.target) { continue }
 
             let mut all_deps_resolved = true;
             for input in job.inputs.iter() {
-                if !self.compiled.contains(input) {
-                    if let Some(dep_job) = self.parsed.jobs.get(input) {
+                if !self.processed.contains(input) {
+                    if let Some(dep_job) = self.context.jobs.get(input) {
                         stack.push(job);
                         stack.push(dep_job);
                         all_deps_resolved = false;
@@ -793,20 +880,36 @@ impl<'a> CommandBuilder<'a> {
 
             if !all_deps_resolved { continue }
 
-            if let Some(rule) = self.parsed.rules.get(job.rule) {
-                self.compiled.insert(job.target);
+            if let Some(rule) = self.context.rules.get(job.rule) {
+                self.processed.insert(job.target);
 
                 if self.metadata_cache.needs_rebuild(job, &self.transitive_deps) {
-                    let Some(command) = rule.command.compile(job, self.parsed).map_err(|e| {
+                    let target = match self.precompiled.compiled_targets.get(job.target) {
+                        Some(target) => target,
+                        None => {
+                            eprintln!("Target template not precompiled for {}", job.target);
+                            continue;
+                        }
+                    };
+
+                    let inputs = match self.precompiled.compiled_inputs.get(job.target) {
+                        Some(inputs) => inputs,
+                        None => {
+                            eprintln!("Input templates not precompiled for {}", job.target);
+                            continue;
+                        }
+                    };
+
+                    let Some(command) = rule.command.compile_(job, &target, &inputs, self.context).map_err(|e| {
                         _ = self.print(&e);
-                        rule.description.as_ref().and_then(|d| d.check(self.parsed).err()).map(|err| {
+                        rule.description.as_ref().and_then(|d| d.check(self.context).err()).map(|err| {
                             _ = self.print(&err)
                         });
                     }).ok() else {
                         continue
                     };
 
-                    let description = rule.description.as_ref().and_then(|d| d.compile(job, self.parsed).map_err(|e| {
+                    let description = rule.description.as_ref().and_then(|d| d.compile_(job, &target, &inputs, self.context).map_err(|e| {
                         _ = self.print(&e)
                     }).ok());
 
@@ -819,12 +922,12 @@ impl<'a> CommandBuilder<'a> {
                     } = match command.execute() {
                         Ok(ok) => ok,
                         Err(e) => {
-                            let err = format!(
+                            let err = format!{
                                 "could not execute job: {target}: {e}\n",
                                 target = job.target
-                            );
+                            };
                             _ = self.print(&err);
-                            continue;
+                            continue
                         }
                     };
 
@@ -838,12 +941,12 @@ impl<'a> CommandBuilder<'a> {
                     _ = self.print_bytes(&output);
                 } else {
                     let mut any_err = false;
-                    if let Err(err) = rule.command.check(self.parsed) {
+                    if let Err(err) = rule.command.check(self.context) {
                         _ = self.print(&err);
                         any_err = true
                     }
 
-                    if let Some(Err(err)) = rule.description.as_ref().map(|d| d.check(self.parsed)) {
+                    if let Some(Err(err)) = rule.description.as_ref().map(|d| d.check(self.context)) {
                         _ = self.print(&err);
                         any_err = true
                     }
@@ -874,7 +977,7 @@ impl<'a> CommandBuilder<'a> {
         });
 
         levels.into_iter().for_each(|level| {
-            level.into_par_iter().filter_map(|t| self.parsed.jobs.get(t)).for_each(|job| {
+            level.into_par_iter().filter_map(|t| self.context.jobs.get(t)).for_each(|job| {
                 self._resolve_and_run(job)
             });
         });
@@ -890,16 +993,21 @@ fn main() -> ExitCode {
     let content = unsafe { str::from_utf8_unchecked(&rush[..]) };
     let parsed = Parser::parse(content);
 
+    let precompiled = Precompiled::precompile(&parsed);
+
     let n = parsed.jobs.len();
     let mut transitive_deps = StrHashMap::with_capacity(n);
     let graph = build_dependency_graph(
         &parsed,
-        &mut StrHashSet::with_capacity(n),
+        &precompiled,
         &mut transitive_deps
     );
 
-    let cmd_builder = CommandBuilder::new(&parsed, transitive_deps);
-    cmd_builder.resolve_and_run(&graph);
+    CommandBuilder::new(
+        &parsed,
+        transitive_deps,
+        precompiled
+    ).resolve_and_run(&graph);
 
     ExitCode::SUCCESS
 }
