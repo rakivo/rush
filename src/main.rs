@@ -32,6 +32,15 @@ fn to_str(bytes: &[u8]) -> &str {
     unsafe { std::str::from_utf8_unchecked(bytes) }
 }
 
+#[inline(always)]
+fn read_file<P>(file_path: P) -> io::Result::<Mmap>
+where
+    P: AsRef::<Path>
+{
+    let file = File::open(file_path)?;
+    unsafe { Mmap::map(&file) }
+}
+
 fn read_rush() -> Option::<Mmap> {
     if let Some(f) = fs::read_dir(".")
         .expect("could not read cwd")
@@ -41,8 +50,7 @@ fn read_rush() -> Option::<Mmap> {
                 .map_or(false, |name| name.to_string_lossy() == RUSH_FILE_NAME)
         })
     {
-        let file = File::open(f).ok()?;
-        Some(unsafe { Mmap::map(&file) }.ok()?)
+        Some(read_file(&f).ok()?)
     } else {
         None
     }
@@ -86,6 +94,7 @@ macro_rules! report {
 #[cfg_attr(feature = "dbg", derive(Debug))]
 enum TemplateChunk<'a> {
     Static(&'a str),
+    JoinedStatic(&'a str),
     Placeholder(&'a str),
 }
 
@@ -98,6 +107,61 @@ struct Template<'a> {
 
 impl Template<'_> {
     const CONSTANT_PLACEHOLDERS: &'static [&'static str] = &["in", "out"];
+
+    fn new(s: &str, loc: Loc) -> Template {
+        let mut start = 0;
+        let mut chunks = Vec::new();
+
+        while let Some(i) = s[start..].find('$') {
+            let i = start + i;
+            if i > start && !s[start..i].trim().is_empty() {
+                let trimmed_static = s[start..i].trim();
+                if !trimmed_static.is_empty() {
+                    chunks.push(TemplateChunk::Static(trimmed_static))
+                }
+            }
+
+            let placeholder_start = i + 1;
+            let placeholder_end = s[placeholder_start..]
+                .find(|c: char| c != '_' && !c.is_alphanumeric())
+                .map(|end| placeholder_start + end)
+                .unwrap_or_else(|| s.len());
+
+            if placeholder_start < placeholder_end {
+                chunks.push(TemplateChunk::Placeholder(&s[placeholder_start..placeholder_end]))
+            } else {
+                report!(loc, "empty placeholder")
+            }
+
+            let suffix_start = placeholder_end;
+            let suffix_end = s[suffix_start..]
+                .find(|c: char| c.is_whitespace())
+                .map(|end| suffix_start + end)
+                .unwrap_or_else(|| s.len());
+
+            if suffix_start < suffix_end {
+                let suffix = &s[suffix_start..suffix_end];
+                if !suffix.trim().is_empty() {
+                    if s[placeholder_end..suffix_start].trim().is_empty() {
+                        chunks.push(TemplateChunk::JoinedStatic(suffix));
+                    } else {
+                        chunks.push(TemplateChunk::Static(suffix));
+                    }
+                }
+            }
+
+            start = suffix_end;
+        }
+
+        if start < s.len() {
+            let trimmed_static = s[start..].trim();
+            if !trimmed_static.is_empty() {
+                chunks.push(TemplateChunk::Static(trimmed_static))
+            }
+        }
+
+        Template { loc, chunks }
+    }
 
     fn check(&self, context: &Parsed) -> Result::<(), String> {
         for placeholder in self.chunks.iter().filter_map(|c| {
@@ -113,9 +177,11 @@ impl Template<'_> {
     }
 
     fn compile(&self, job: &Job, context: &Parsed) -> Result::<String, String> {
-        let mut ret = self.chunks.iter().flat_map(|c| {
-            match c {
-                TemplateChunk::Static(s) => Ok(*s),
+        let mut ret = String::new();
+        for (i, c) in self.chunks.iter().enumerate() {
+            let s = match c {
+                TemplateChunk::Static(s) |
+                TemplateChunk::JoinedStatic(s) => Ok(*s),
                 TemplateChunk::Placeholder(placeholder) => match *placeholder {
                     "in" => Ok(job.inputs_wo_rule_str),
                     "out" => Ok(job.target),
@@ -125,8 +191,12 @@ impl Template<'_> {
                         .or_else(|| context.defs.get(placeholder).map(|def| def.value))
                         .ok_or(report_fmt!(self.loc, "undefined variable: {placeholder}"))
                 },
-            }.map(|s| [s, " "].into_iter())
-        }).flatten().collect::<String>();
+            }?;
+            ret.push_str(s);
+            if !matches!(self.chunks.get(i + 1), Some(TemplateChunk::JoinedStatic(..))) {
+                ret.push(' ')
+            }
+        }
         _ = ret.pop();
         Ok(ret)
     }
@@ -136,55 +206,25 @@ impl Template<'_> {
 #[cfg_attr(feature = "dbg", derive(Debug))]
 struct Rule<'a> {
     command: Template<'a>,
+    depfile: Option::<Template<'a>>,
     description: Option::<Template<'a>>,
 }
 
 impl<'a> Rule<'a> {
     #[inline]
-    fn new(command_loc: Loc, description_loc: Loc, command: &'a str, description: Option::<&'a str>) -> Self {
+    fn new(
+        command: &'a str,
+        description: Option::<&'a str>,
+        depfile_path: Option::<&'a str>,
+        command_loc: Loc,
+        description_loc: Loc,
+        depfile_path_loc: Loc,
+    ) -> Self {
         Self {
-            command: Self::template(command, command_loc),
-            description: description.map(|d| Self::template(d, description_loc)),
+            depfile: depfile_path.map(|dp| Template::new(dp, depfile_path_loc)),
+            command: Template::new(command, command_loc),
+            description: description.map(|d| Template::new(d, description_loc)),
         }
-    }
-
-    fn template(s: &str, loc: Loc) -> Template {
-        let mut start = 0;
-        let mut chunks = Vec::new();
-
-        while let Some(i) = s[start..].find('$') {
-            let i = start + i;
-
-            if i > start && !s[start..i].trim().is_empty() {
-                let trimmed_static = s[start..i].trim();
-                if !trimmed_static.is_empty() {
-                    chunks.push(TemplateChunk::Static(trimmed_static))
-                }
-            }
-
-            let placeholder_start = i + 1;
-            let placeholder_end = s[placeholder_start..]
-                .find(|c: char| c != '_' && !c.is_alphanumeric())
-                .map(|end| placeholder_start + end)
-                .unwrap_or_else(|| s.len());
-
-            if placeholder_start < placeholder_end {
-                chunks.push(TemplateChunk::Placeholder(&s[placeholder_start..placeholder_end]));
-            } else {
-                report!(loc, "empty placeholder")
-            }
-
-            start = placeholder_end
-        }
-
-        if start < s.len() {
-            let trimmed_static = s[start..].trim();
-            if !trimmed_static.is_empty() {
-                chunks.push(TemplateChunk::Static(trimmed_static));
-            }
-        }
-
-        Template { loc, chunks }
     }
 }
 
@@ -212,6 +252,8 @@ type Defs<'a> = StrHashMap::<'a, Def<'a>>;
 #[derive(Default)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 struct Parsed<'a> {
+    depfiles_count: usize,
+
     defs: Defs<'a>,
     jobs: StrHashMap::<'a, Job<'a>>,
     rules: StrHashMap::<'a, Rule<'a>>,
@@ -241,8 +283,10 @@ enum Context<'a> {
     Rule {
         name: &'a str,
         already_inserted: bool,
-        description_loc: Option::<Loc>,
+        depfile_path: Option::<&'a str>,
+        depfile_path_loc: Option::<Loc>,
         description: Option::<&'a str>,
+        description_loc: Option::<Loc>,
     }
 }
 
@@ -297,7 +341,7 @@ impl<'a> Parser<'a> {
                 return
             };
         
-        let parse_def = |line: &'a str| -> Def<'a> {
+        let parse_def = || -> Def<'a> {
             let check_start = first_space;
             let check_end = (second_space + 1 + 1).min(line.len());
             if !line[check_start..check_end].contains('=') {
@@ -310,7 +354,7 @@ impl<'a> Parser<'a> {
         match &mut self.context {
             Context::Job { shadows, .. } => {
                 let name = first_token;
-                let def = parse_def(line);
+                let def = parse_def();
                 match shadows.as_mut() {
                     Some(shadows) => { shadows.insert(name, def); },
                     None => {
@@ -320,23 +364,45 @@ impl<'a> Parser<'a> {
                     },
                 }
             },
-            Context::Rule { name, already_inserted, description_loc, description } => {
+            Context::Rule { name, depfile_path, depfile_path_loc, already_inserted, description_loc, description } => {
                 match first_token {
                     "command" => {
                         let command = line[second_space + 1 + 1..].trim();
                         let command_loc = self.cursor;
                         let rule = Rule::new(
-                            Loc(command_loc),
-                            description_loc.unwrap_or(Loc(command_loc + 1)),
                             command,
-                            *description
+                            *description,
+                            *depfile_path,
+                            Loc(command_loc),
+                            description_loc.unwrap_or(Loc(command_loc)),
+                            depfile_path_loc.unwrap_or(Loc(command_loc))
                         );
                         self.parsed.rules.insert(name, rule);
                         self.context = Context::Rule {
                             name,
+                            depfile_path: *depfile_path,
                             already_inserted: true,
                             description: *description,
-                            description_loc: *description_loc
+                            description_loc: *description_loc,
+                            depfile_path_loc: *depfile_path_loc
+                        }
+                    },
+                    "depfile" => {
+                        self.parsed.depfiles_count += 1;
+                        let Def {value: depfile_path} = parse_def();
+                        if *already_inserted {
+                            let rule = self.parsed.rule_mut(name);
+                            let depfile = Template::new(depfile_path, Loc(self.cursor));
+                            rule.depfile = Some(depfile)
+                        } else {
+                            self.context = Context::Rule {
+                                name,
+                                already_inserted: true,
+                                depfile_path_loc: Some(Loc(self.cursor)),
+                                description: *description,
+                                depfile_path: Some(depfile_path),
+                                description_loc: *description_loc
+                            }
                         }
                     },
                     "description" => {
@@ -344,20 +410,22 @@ impl<'a> Parser<'a> {
                         let description_str = line[second_space + 1 + 1..].trim();
                         if *already_inserted {
                             let rule = self.parsed.rule_mut(name);
-                            rule.description = Some(Rule::template(description_str, description_loc));
+                            rule.description = Some(Template::new(description_str, description_loc));
                         } else {
                             let description = Some(description_str);
                             self.context = Context::Rule {
                                 name,
+                                depfile_path: *depfile_path,
+                                depfile_path_loc: *depfile_path_loc,
                                 already_inserted: *already_inserted,
                                 description_loc: Some(description_loc),
                                 description
                             }
                         }
                     },
-                    _ => if line.is_empty() || line == "\n" {
-                        self.context = Context::Global;
-                        return
+                    _ => report!{
+                        Loc(self.cursor),
+                        "undefined property: `{first_token}`, existing properties are: `command`, `description`"
                     }
                 }
             },
@@ -365,6 +433,8 @@ impl<'a> Parser<'a> {
                 match first_token {
                     "rule" => {
                         self.context = Context::Rule {
+                            depfile_path: None,
+                            depfile_path_loc: None,
                             name: line[second_space..].trim_end(),
                             already_inserted: false,
                             description: None,
@@ -396,7 +466,7 @@ impl<'a> Parser<'a> {
                     },
                     _ => {
                         let name = first_token;
-                        let def = parse_def(line);
+                        let def = parse_def();
                         self.parsed.defs.insert(name, def);
                     }
                 };
@@ -424,6 +494,9 @@ impl<'a> Parser<'a> {
             if line.as_bytes().first() == Some(&b'#') { continue }
             let line = parser.handle_newline_escape(line, &mut lines);
             parser.parse_line(line)
+        }
+        #[cfg(feature = "dbg")] {
+            println!("{:#?}", parser.parsed)
         } parser.parsed
     }
 }
@@ -651,6 +724,17 @@ struct CommandOutput {
     description: Option::<String>
 }
 
+struct CompiledDepfiles<'a> {
+    paths: Vec::<(&'a str, String)>
+}
+
+impl CompiledDepfiles<'_> {
+    #[inline(always)]
+    fn new(depfiles_count: usize) -> Self {
+        Self {paths: Vec::with_capacity(depfiles_count)}
+    }
+}
+
 struct CommandBuilder<'a> {
     parsed: &'a Parsed<'a>,
     stdout: Mutex::<Stdout>,
@@ -686,17 +770,17 @@ impl<'a> CommandBuilder<'a> {
         }
     }
 
-    fn _resolve_and_run(&self, job: &Job<'a>) {
+    fn _resolve_and_run(&self, job: &Job<'a>, depfiles: &Mutex::<CompiledDepfiles<'a>>) {
         // TODO: reserve total amount of jobs here
         let mut stack = vec![job];
-        while let Some(current_job) = stack.pop() {
-            if self.compiled.contains(current_job.target) { continue }
+        while let Some(job) = stack.pop() {
+            if self.compiled.contains(job.target) { continue }
 
             let mut all_deps_resolved = true;
-            for input in current_job.inputs.iter() {
+            for input in job.inputs.iter() {
                 if !self.compiled.contains(input) {
                     if let Some(dep_job) = self.parsed.jobs.get(input) {
-                        stack.push(current_job);
+                        stack.push(job);
                         stack.push(dep_job);
                         all_deps_resolved = false;
                         break
@@ -711,11 +795,11 @@ impl<'a> CommandBuilder<'a> {
 
             if !all_deps_resolved { continue }
 
-            if let Some(rule) = self.parsed.rules.get(current_job.rule) {
-                self.compiled.insert(current_job.target);
+            if let Some(rule) = self.parsed.rules.get(job.rule) {
+                self.compiled.insert(job.target);
 
-                if self.metadata_cache.needs_rebuild(current_job, &self.transitive_deps) {
-                    let Some(command) = rule.command.compile(current_job, self.parsed).map_err(|e| {
+                if self.metadata_cache.needs_rebuild(job, &self.transitive_deps) {
+                    let Some(command) = rule.command.compile(job, self.parsed).map_err(|e| {
                         _ = self.print(&e);
                         rule.description.as_ref().and_then(|d| d.check(self.parsed).err()).map(|err| {
                             _ = self.print(&err)
@@ -724,7 +808,7 @@ impl<'a> CommandBuilder<'a> {
                         continue
                     };
 
-                    let description = rule.description.as_ref().and_then(|d| d.compile(current_job, self.parsed).map_err(|e| {
+                    let description = rule.description.as_ref().and_then(|d| d.compile(job, self.parsed).map_err(|e| {
                         _ = self.print(&e)
                     }).ok());
 
@@ -739,7 +823,7 @@ impl<'a> CommandBuilder<'a> {
                         Err(e) => {
                             let err = format!(
                                 "could not execute job: {target}: {e}\n",
-                                target = current_job.target
+                                target = job.target
                             );
                             _ = self.print(&err);
                             continue;
@@ -767,23 +851,31 @@ impl<'a> CommandBuilder<'a> {
                     }
 
                     if !any_err {
-                        let msg = format!("{target} is already built\n", target = current_job.target);
+                        let msg = format!("{target} is already built\n", target = job.target);
                         _ = self.print(&msg)
+                    }
+                }
+
+                if let Some(ref depfile) = rule.depfile {
+                    if let Ok(depfile) = depfile.compile(job, self.parsed).map_err(|e| {
+                        _ = self.print(&e)
+                    }) {
+                        depfiles.lock().unwrap().paths.push((job.target, depfile));
                     }
                 }
             } else {
                 let err = report_fmt!{
-                    current_job.loc,
+                    job.loc,
                     "no rule named: {rule} found for job {target}\n",
-                    rule = current_job.rule,
-                    target = current_job.target
+                    rule = job.rule,
+                    target = job.target
                 };
                 _ = self.print(&err);
             }
         }
     }
 
-    fn resolve_and_run(self, graph: &Graph) {
+    fn resolve_and_run(self, graph: &Graph) -> Mutex::<CompiledDepfiles<'a>> {
         let levels = topological_sort_levels(graph);
 
         #[cfg(feature = "dbg")]
@@ -791,11 +883,12 @@ impl<'a> CommandBuilder<'a> {
             println!("{i}: {level:?}")
         });
 
+        let depfiles = Mutex::new(CompiledDepfiles::new(self.parsed.depfiles_count));
         levels.into_iter().for_each(|level| {
             level.into_par_iter().filter_map(|t| self.parsed.jobs.get(t)).for_each(|job| {
-                self._resolve_and_run(job)
+                self._resolve_and_run(job, &depfiles)
             });
-        });
+        }); depfiles
     }
 }
 
