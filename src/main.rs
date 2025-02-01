@@ -65,13 +65,13 @@ impl Loc {
 macro_rules! report_fmt {
     ($loc: expr, $($arg:tt)*) => {
         format!{
-            "{RUSH_FILE_NAME}:{row}: {msg}",
+            "{RUSH_FILE_NAME}:{row}: {msg}\n",
             row = $loc.0,
             msg = std::fmt::format(format_args!($($arg)*))
         }
     };
     ($loc: expr, $lit: literal) => {
-        format!("{RUSH_FILE_NAME}:{row}: {msg}", row = $loc.0, msg = $lit)
+        format!("{RUSH_FILE_NAME}:{row}: {msg}\n", row = $loc.0, msg = $lit)
     }
 }
 
@@ -79,6 +79,7 @@ macro_rules! report {
     ($loc: expr, $($arg:tt)*) => { Loc::report(&report_fmt!($loc, $($arg)*)) }
 }
 
+#[derive(Clone)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 enum TemplateChunk<'a> {
     Static(&'a str),
@@ -86,7 +87,7 @@ enum TemplateChunk<'a> {
     Placeholder(&'a str),
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 struct Template<'a> {
     loc: Loc,
@@ -105,7 +106,7 @@ impl Template<'_> {
             if i > start && !s[start..i].trim().is_empty() {
                 let trimmed_static = s[start..i].trim();
                 if !trimmed_static.is_empty() {
-                    chunks.push(TemplateChunk::Static(trimmed_static))
+                    chunks.push(TemplateChunk::Static(trimmed_static));
                 }
             }
 
@@ -116,24 +117,29 @@ impl Template<'_> {
                 .unwrap_or_else(|| s.len());
 
             if placeholder_start < placeholder_end {
-                chunks.push(TemplateChunk::Placeholder(&s[placeholder_start..placeholder_end]))
+                chunks.push(TemplateChunk::Placeholder(&s[placeholder_start..placeholder_end]));
             } else {
                 report!(loc, "empty placeholder")
             }
 
             let suffix_start = placeholder_end;
             let suffix_end = s[suffix_start..]
-                .find(|c: char| c.is_whitespace())
+                .find(|c: char| c == '$' || c.is_whitespace())
                 .map(|end| suffix_start + end)
                 .unwrap_or_else(|| s.len());
 
             if suffix_start < suffix_end {
                 let suffix = &s[suffix_start..suffix_end];
                 if !suffix.trim().is_empty() {
-                    if s[placeholder_end..suffix_start].trim().is_empty() {
-                        chunks.push(TemplateChunk::JoinedStatic(suffix));
-                    } else {
-                        chunks.push(TemplateChunk::Static(suffix));
+                    let mut suffix_iter = suffix.splitn(2, |c: char| c == '$');
+                    if let Some(static_part) = suffix_iter.next() {
+                        if !static_part.is_empty() {
+                            chunks.push(TemplateChunk::JoinedStatic(static_part))
+                        }
+                    }
+                    if let Some(remaining_suffix) = suffix_iter.next() {
+                        start = suffix_end - remaining_suffix.len();
+                        continue
                     }
                 }
             }
@@ -151,20 +157,45 @@ impl Template<'_> {
         Template { loc, chunks }
     }
 
-    fn check(&self, context: &Parsed) -> Result::<(), String> {
+    fn check(&self, defs: &Defs) -> Result::<(), String> {
         for placeholder in self.chunks.iter().filter_map(|c| {
             match c {
                 TemplateChunk::Placeholder(p) if !Self::CONSTANT_PLACEHOLDERS.contains(p) => Some(p),
                 _ => None
             }
         }) {
-            if !context.defs.contains_key(placeholder) {
+            if !defs.contains_key(placeholder) {
                 return Err(report_fmt!(self.loc, "undefined variable: {placeholder}"))
             }
         } Ok(())
     }
 
-    fn compile(&self, job: &Job, context: &Parsed) -> Result::<String, String> {
+    fn compile_(&self, job: &CompiledJob, defs: &Defs) -> Result::<String, String> {
+        let mut ret = String::new();
+        for (i, c) in self.chunks.iter().enumerate() {
+            let s = match c {
+                TemplateChunk::Static(s) |
+                TemplateChunk::JoinedStatic(s) => Ok(*s),
+                TemplateChunk::Placeholder(placeholder) => match *placeholder {
+                    "in" => Ok(job.inputs_str),
+                    "out" => Ok(job.target),
+                    _ => job.shadows
+                        .as_ref()
+                        .and_then(|shadows| shadows.get(placeholder).map(|shadow| shadow.value))
+                        .or_else(|| defs.get(placeholder).map(|def| def.value))
+                        .ok_or(report_fmt!(self.loc, "undefined variable: {placeholder}"))
+                },
+            }?;
+            ret.push_str(s);
+            if !matches!(self.chunks.get(i + 1), Some(TemplateChunk::JoinedStatic(..))) {
+                ret.push(' ')
+            }
+        }
+        _ = ret.pop();
+        Ok(ret)
+    }
+
+    fn compile(&self, job: &Job, defs: &Defs) -> Result::<String, String> {
         let mut ret = String::new();
         for (i, c) in self.chunks.iter().enumerate() {
             let s = match c {
@@ -176,7 +207,7 @@ impl Template<'_> {
                     _ => job.shadows
                         .as_ref()
                         .and_then(|shadows| shadows.get(placeholder).map(|shadow| shadow.value))
-                        .or_else(|| context.defs.get(placeholder).map(|def| def.value))
+                        .or_else(|| defs.get(placeholder).map(|def| def.value))
                         .ok_or(report_fmt!(self.loc, "undefined variable: {placeholder}"))
                 },
             }?;
@@ -216,20 +247,35 @@ impl<'a> Rule<'a> {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 struct Job<'a> {
     loc: Loc,
     target: &'a str,
     rule: &'a str,
+    target_template: Template<'a>,
     inputs: Vec::<&'a str>,
-    shadows: Option::<Defs<'a>>,
+    inputs_templates: Vec::<Template<'a>>,
+    shadows: Option::<Arc::<Defs<'a>>>,
     inputs_wo_rule_str: &'a str,
-    deps: Vec::<&'a str>
+    deps: Vec::<&'a str>,
+    deps_templates: Vec::<Template<'a>>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
+#[cfg_attr(feature = "dbg", derive(Debug))]
+struct CompiledJob<'a> {
+    loc: Loc,
+    rule: &'a str,
+    target: &'a str,
+    shadows: Option::<Arc::<Defs<'a>>>,
+    inputs_str: &'a str,
+    inputs: Vec::<&'a str>,
+    deps: Vec::<&'a str>,
+}
+
 #[repr(transparent)]
+#[derive(Clone, Default)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 struct Def<'a> {
     value: &'a str
@@ -237,15 +283,14 @@ struct Def<'a> {
 
 type Defs<'a> = StrHashMap::<'a, Def<'a>>;
 
-#[derive(Default)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
-struct Parsed<'a> {
+struct Preprocessed<'a> {
     defs: Defs<'a>,
     jobs: StrHashMap::<'a, Job<'a>>,
     rules: StrHashMap::<'a, Rule<'a>>,
 }
 
-impl<'a> Parsed<'a> {
+impl<'a> Preprocessed<'a> {
     #[inline(always)]
     fn job_mut(&mut self, target: &str) -> &mut Job<'a> {
         unsafe { self.jobs.get_mut(target).unwrap_unchecked() }
@@ -255,6 +300,68 @@ impl<'a> Parsed<'a> {
     fn rule_mut(&mut self, name: &str) -> &mut Rule<'a> {
         unsafe { self.rules.get_mut(name).unwrap_unchecked() }
     }
+
+    fn into_processed(self) -> Processed<'a> {
+        let Preprocessed { defs, jobs, rules } = self;
+        let jobs = jobs.iter().filter_map(|(.., job)| {
+            if rules.contains_key(job.rule) {
+                let target = match job.target_template.compile(&job, &defs) {
+                    Ok(ok) => ok.leak() as &_,
+                    Err(e) => report!(job.loc, "{e}")
+                };
+
+                let mut inputs_str = String::with_capacity(job.inputs_wo_rule_str.len() + 10);
+                let inputs = job.inputs_templates.iter()
+                    .zip(job.inputs.iter())
+                    .map(|(template, ..)| {
+                        match template.compile(&job, &defs) {
+                            Ok(ok) => {
+                                let compiled = ok.leak() as &_;
+                                inputs_str.push_str(compiled);
+                                inputs_str.push(' ');
+                                compiled
+                            },
+                            Err(e) => report!(job.loc, "{e}")
+                        }
+                    }).collect::<Vec::<_>>();
+
+                if !inputs_str.is_empty() { _ = inputs_str.pop() }
+                let inputs_str = inputs_str.leak();
+
+                let deps = job.deps_templates.iter()
+                    .zip(job.deps.iter())
+                    .map(|(template, ..)| {
+                        match template.compile(&job, &defs) {
+                            Ok(ok) => ok.leak() as &_,
+                            Err(e) => report!(job.loc, "{e}")
+                        }
+                    }).collect::<Vec::<_>>();
+
+                let job = CompiledJob {
+                    deps,
+                    target,
+                    inputs,
+                    inputs_str,
+
+                    loc: job.loc,
+                    rule: job.rule,
+                    shadows: job.shadows.as_ref().map(Arc::clone)
+                };
+                Some((target, job))
+            } else {
+                None
+            }
+        }).collect::<StrHashMap::<_>>();
+
+        Processed {jobs, rules, defs}
+    }
+}
+
+#[cfg_attr(feature = "dbg", derive(Debug))]
+struct Processed<'a> {
+    defs: Defs<'a>,
+    jobs: StrHashMap::<'a, CompiledJob<'a>>,
+    rules: StrHashMap::<'a, Rule<'a>>,
 }
 
 #[derive(Default)]
@@ -276,11 +383,10 @@ enum Context<'a> {
     }
 }
 
-#[derive(Default)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 struct Parser<'a> {
     cursor: usize,
-    parsed: Parsed<'a>,
+    parsed: Preprocessed<'a>,
     context: Context<'a>
 }
 
@@ -290,7 +396,7 @@ impl<'a> Parser<'a> {
             Context::Job { target, shadows } => {
                 let job = self.parsed.job_mut(target);
                 if let Some(shadows) = shadows.take() {
-                    job.shadows.replace(shadows);
+                    job.shadows.replace(Arc::new(shadows));
                 }
             },
             _ => {}
@@ -343,7 +449,7 @@ impl<'a> Parser<'a> {
                 match shadows.as_mut() {
                     Some(shadows) => { shadows.insert(name, def); },
                     None => {
-                        let mut _shadows = StrHashMap::with_capacity(1);
+                        let mut _shadows = StrHashMap::with_capacity(4);
                         _shadows.insert(name, def);
                         shadows.replace(_shadows);
                     },
@@ -407,9 +513,11 @@ impl<'a> Parser<'a> {
                             }
                         }
                     },
-                    _ => report!{
-                        Loc(self.cursor),
-                        "undefined property: `{first_token}`, existing properties are: `command`, `description`"
+                    _ => if line.chars().next() != Some('#') {
+                        report!{
+                            Loc(self.cursor),
+                            "undefined property: `{first_token}`, existing properties are: `command`, `description`"
+                        }
                     }
                 }
             },
@@ -441,10 +549,13 @@ impl<'a> Parser<'a> {
                         };
                         let mut input_tokens = inputs_str.split_ascii_whitespace();
                         let Some(rule) = input_tokens.next() else { return };
-                        let inputs = input_tokens.collect();
+                        let inputs = input_tokens.collect::<Vec::<_>>();
                         let inputs_wo_rule_str = inputs_str[rule.len() + 1..].trim_end();
                         let loc = Loc(self.cursor);
-                        let job = Job {loc, target, shadows: None, rule, inputs, inputs_wo_rule_str, deps};
+                        let target_template = Template::new(target, loc);
+                        let inputs_templates = inputs.iter().map(|input| Template::new(input, loc)).collect();
+                        let deps_templates = deps.iter().map(|input| Template::new(input, loc)).collect();
+                        let job = Job {loc, target, deps_templates, inputs_templates, target_template, rule, inputs, inputs_wo_rule_str, deps, shadows: None};
                         self.parsed.jobs.insert(target, job);
                         self.context = Context::Job {target, shadows: None}
                     },
@@ -470,8 +581,16 @@ impl<'a> Parser<'a> {
     }
 
     #[inline]
-    fn parse(content: &'a str) -> Parsed<'a> {
-        let mut parser = Self::default();
+    fn parse(content: &'a str) -> Preprocessed<'a> {
+        let mut parser = Self {
+            cursor: 0,
+            parsed: Preprocessed {
+                defs: Defs::with_capacity(32),
+                jobs: StrHashMap::with_capacity(32),
+                rules: StrHashMap::with_capacity(32)
+            },
+            context: Context::default()
+        };
         let mut lines = content.lines();
         while let Some(line) = lines.next() {
             parser.cursor += 1;
@@ -486,13 +605,12 @@ impl<'a> Parser<'a> {
 }
 
 fn build_dependency_graph<'a>(
-    parsed: &'a Parsed,
-    visited: &mut StrHashSet<'a>,
+    parsed: &'a Processed,
     transitive_deps: &mut TransitiveDeps<'a>
 ) -> Graph<'a> {
     fn collect_deps<'a>(
         node: &'a str,
-        parsed: &'a Parsed,
+        parsed: &'a Processed,
         graph: &mut Graph<'a>,
         visited: &mut StrHashSet<'a>,
         transitive_deps: &mut TransitiveDeps<'a>
@@ -513,7 +631,7 @@ fn build_dependency_graph<'a>(
         if let Some(job) = parsed.jobs.get(node) {
             if let Some(rule) = parsed.rules.get(job.rule) {
                 if let Some(ref depfile_template) = rule.depfile {
-                    if let Ok(depfile_path) = depfile_template.compile(job, parsed) {
+                    if let Ok(depfile_path) = depfile_template.compile_(job, &parsed.defs) {
                         if let Ok(depfile) = fs::read_to_string(&depfile_path) {
                             let depfile = Box::leak(depfile.into_boxed_str());
                             let colon_idx = depfile.find(':').unwrap();
@@ -536,7 +654,7 @@ fn build_dependency_graph<'a>(
             .filter(|dep| !is_system_header(dep))
             .fold(Vec::with_capacity(deps.len()), |mut transitive, dep|
         {
-            let deps = collect_deps(*dep, parsed, graph, visited, transitive_deps);
+            let deps = collect_deps(&dep, parsed, graph, visited, transitive_deps);
             transitive.extend(deps.iter().map(|h| *h));
             transitive
         });
@@ -544,15 +662,21 @@ fn build_dependency_graph<'a>(
         deps.extend(transitive);
 
         let deps = Arc::new(deps);
-        graph.insert(node, Arc::clone(&deps));
-        transitive_deps.insert(node, Arc::clone(&deps));
+
+        {
+            graph.insert(node, Arc::clone(&deps));
+            transitive_deps.insert(node, Arc::clone(&deps));
+        }
+
         deps
     }
 
-    let mut graph = StrHashMap::with_capacity(parsed.jobs.len());
+    let n = parsed.jobs.len();
+    let mut graph = StrHashMap::with_capacity(n);
+    let mut visited = StrHashSet::with_capacity(n);
 
     for target in parsed.jobs.keys() {
-        collect_deps(target, parsed, &mut graph, visited, transitive_deps);
+        collect_deps(target, parsed, &mut graph, &mut visited, transitive_deps);
     } graph
 }
 
@@ -600,11 +724,13 @@ fn topological_sort_levels<'a>(graph: &Graph<'a>) -> Vec::<Vec::<&'a str>> {
     levels
 }
 
+#[cfg_attr(feature = "dbg", derive(Debug))]
 #[derive(Copy, Clone, PartialEq, PartialOrd)]
 struct Metadata {
     mtime: SystemTime
 }
 
+#[cfg_attr(feature = "dbg", derive(Debug))]
 struct MetadataCache<'a> {
     files: StrDashMap::<'a, Metadata>
 }
@@ -628,7 +754,7 @@ impl<'a> MetadataCache<'a> {
     }
 
     #[inline]
-    fn needs_rebuild(&self, job: &Job<'a>, transitive_deps: &TransitiveDeps<'a>) -> bool {
+    fn needs_rebuild(&self, job: &CompiledJob<'a>, transitive_deps: &TransitiveDeps<'a>) -> bool {
         // TODO: do something here if dependent file does not exist
         let mtimes = unsafe {
             transitive_deps.get(job.target).unwrap_unchecked()
@@ -733,22 +859,26 @@ struct CommandOutput {
     description: Option::<String>
 }
 
+#[cfg_attr(feature = "dbg", derive(Debug))]
 struct CommandBuilder<'a> {
-    parsed: &'a Parsed<'a>,
+    context: &'a Processed<'a>,
     stdout: Mutex::<Stdout>,
-    compiled: StrDashSet::<'a>,
-    metadata_cache: MetadataCache<'a>,    
+    processed: StrDashSet::<'a>,
+    metadata_cache: MetadataCache<'a>,
     transitive_deps: TransitiveDeps<'a>
 }
 
 impl<'a> CommandBuilder<'a> {
     #[inline]
-    fn new(parsed: &'a Parsed, transitive_deps: TransitiveDeps<'a>) -> Self {
-        let n = parsed.jobs.len();
+    fn new(
+        context: &'a Processed,
+        transitive_deps: TransitiveDeps<'a>,
+    ) -> Self {
+        let n = context.jobs.len();
         Self {
-            parsed,
+            context,
             stdout: Mutex::new(io::stdout()),
-            compiled: DashSet::with_capacity_and_hasher(n, FxBuildHasher::default()),
+            processed: DashSet::with_capacity_and_hasher(n, FxBuildHasher::default()),
             metadata_cache: MetadataCache::new(n),
             transitive_deps
         }
@@ -768,16 +898,16 @@ impl<'a> CommandBuilder<'a> {
         }
     }
 
-    fn _resolve_and_run(&self, job: &Job<'a>) {
+    fn _resolve_and_run(&self, job: &CompiledJob<'a>) {
         // TODO: reserve total amount of jobs here
         let mut stack = vec![job];
         while let Some(job) = stack.pop() {
-            if self.compiled.contains(job.target) { continue }
+            if self.processed.contains(job.target) { continue }
 
             let mut all_deps_resolved = true;
             for input in job.inputs.iter() {
-                if !self.compiled.contains(input) {
-                    if let Some(dep_job) = self.parsed.jobs.get(input) {
+                if !self.processed.contains(input) {
+                    if let Some(dep_job) = self.context.jobs.get(input) {
                         stack.push(job);
                         stack.push(dep_job);
                         all_deps_resolved = false;
@@ -793,20 +923,20 @@ impl<'a> CommandBuilder<'a> {
 
             if !all_deps_resolved { continue }
 
-            if let Some(rule) = self.parsed.rules.get(job.rule) {
-                self.compiled.insert(job.target);
+            if let Some(rule) = self.context.rules.get(job.rule) {
+                self.processed.insert(job.target);
 
                 if self.metadata_cache.needs_rebuild(job, &self.transitive_deps) {
-                    let Some(command) = rule.command.compile(job, self.parsed).map_err(|e| {
+                    let Some(command) = rule.command.compile_(job, &self.context.defs).map_err(|e| {
                         _ = self.print(&e);
-                        rule.description.as_ref().and_then(|d| d.check(self.parsed).err()).map(|err| {
+                        rule.description.as_ref().and_then(|d| d.check(&self.context.defs).err()).map(|err| {
                             _ = self.print(&err)
                         });
                     }).ok() else {
                         continue
                     };
 
-                    let description = rule.description.as_ref().and_then(|d| d.compile(job, self.parsed).map_err(|e| {
+                    let description = rule.description.as_ref().and_then(|d| d.compile_(&job, &self.context.defs).map_err(|e| {
                         _ = self.print(&e)
                     }).ok());
 
@@ -819,12 +949,12 @@ impl<'a> CommandBuilder<'a> {
                     } = match command.execute() {
                         Ok(ok) => ok,
                         Err(e) => {
-                            let err = format!(
+                            let err = format!{
                                 "could not execute job: {target}: {e}\n",
                                 target = job.target
-                            );
+                            };
                             _ = self.print(&err);
-                            continue;
+                            continue
                         }
                     };
 
@@ -838,12 +968,12 @@ impl<'a> CommandBuilder<'a> {
                     _ = self.print_bytes(&output);
                 } else {
                     let mut any_err = false;
-                    if let Err(err) = rule.command.check(self.parsed) {
+                    if let Err(err) = rule.command.check(&self.context.defs) {
                         _ = self.print(&err);
                         any_err = true
                     }
 
-                    if let Some(Err(err)) = rule.description.as_ref().map(|d| d.check(self.parsed)) {
+                    if let Some(Err(err)) = rule.description.as_ref().map(|d| d.check(&self.context.defs)) {
                         _ = self.print(&err);
                         any_err = true
                     }
@@ -874,7 +1004,7 @@ impl<'a> CommandBuilder<'a> {
         });
 
         levels.into_iter().for_each(|level| {
-            level.into_par_iter().filter_map(|t| self.parsed.jobs.get(t)).for_each(|job| {
+            level.into_par_iter().filter_map(|t| self.context.jobs.get(t)).for_each(|job| {
                 self._resolve_and_run(job)
             });
         });
@@ -888,18 +1018,12 @@ fn main() -> ExitCode {
     };
 
     let content = unsafe { str::from_utf8_unchecked(&rush[..]) };
-    let parsed = Parser::parse(content);
+    let processed = Parser::parse(content).into_processed();
 
-    let n = parsed.jobs.len();
+    let n = processed.jobs.len();
     let mut transitive_deps = StrHashMap::with_capacity(n);
-    let graph = build_dependency_graph(
-        &parsed,
-        &mut StrHashSet::with_capacity(n),
-        &mut transitive_deps
-    );
-
-    let cmd_builder = CommandBuilder::new(&parsed, transitive_deps);
-    cmd_builder.resolve_and_run(&graph);
+    let graph = build_dependency_graph(&processed, &mut transitive_deps);
+    CommandBuilder::new(&processed, transitive_deps).resolve_and_run(&graph);
 
     ExitCode::SUCCESS
 }
