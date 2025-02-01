@@ -87,6 +87,7 @@ enum TemplateChunk<'a> {
     Static(&'a str),
     JoinedStatic(&'a str),
     Placeholder(&'a str),
+    JoinedPlaceholder(&'a str),
 }
 
 #[derive(Clone, Default)]
@@ -102,57 +103,53 @@ impl Template<'_> {
     fn new(s: &str, loc: Loc) -> Template {
         let mut start = 0;
         let mut chunks = Vec::new();
+        let mut last_was_placeholder = false;
 
         while let Some(i) = s[start..].find('$') {
             let i = start + i;
-            if i > start && !s[start..i].trim().is_empty() {
-                let trimmed_static = s[start..i].trim();
+            if i > start {
+                let trimmed_static = &s[start..i];
                 if !trimmed_static.is_empty() {
-                    chunks.push(TemplateChunk::Static(trimmed_static));
+                    let chunk = if last_was_placeholder {
+                        TemplateChunk::JoinedStatic(trimmed_static)
+                    } else {
+                        TemplateChunk::Static(trimmed_static)
+                    };
+                    chunks.push(chunk);
                 }
             }
 
             let placeholder_start = i + 1;
             let placeholder_end = s[placeholder_start..]
-                .find(|c: char| c != '_' && !c.is_alphanumeric())
+                .find(|c: char| !c.is_alphanumeric() && c != '_')
                 .map(|end| placeholder_start + end)
                 .unwrap_or_else(|| s.len());
 
             if placeholder_start < placeholder_end {
-                chunks.push(TemplateChunk::Placeholder(&s[placeholder_start..placeholder_end]));
+                let placeholder = &s[placeholder_start..placeholder_end];
+                let joined = placeholder_end < s.len() && s.chars().nth(placeholder_end) == Some('.');
+                if joined {
+                    chunks.push(TemplateChunk::JoinedPlaceholder(placeholder));
+                } else {
+                    chunks.push(TemplateChunk::Placeholder(placeholder));
+                }
+                last_was_placeholder = true;
             } else {
                 report!(loc, "empty placeholder")
             }
 
-            let suffix_start = placeholder_end;
-            let suffix_end = s[suffix_start..]
-                .find(|c: char| c == '$' || c.is_whitespace())
-                .map(|end| suffix_start + end)
-                .unwrap_or_else(|| s.len());
-
-            if suffix_start < suffix_end {
-                let suffix = &s[suffix_start..suffix_end];
-                if !suffix.trim().is_empty() {
-                    let mut suffix_iter = suffix.splitn(2, |c: char| c == '$');
-                    if let Some(static_part) = suffix_iter.next() {
-                        if !static_part.is_empty() {
-                            chunks.push(TemplateChunk::JoinedStatic(static_part))
-                        }
-                    }
-                    if let Some(remaining_suffix) = suffix_iter.next() {
-                        start = suffix_end - remaining_suffix.len();
-                        continue
-                    }
-                }
-            }
-
-            start = suffix_end;
+            start = placeholder_end;
         }
 
         if start < s.len() {
             let trimmed_static = s[start..].trim();
             if !trimmed_static.is_empty() {
-                chunks.push(TemplateChunk::Static(trimmed_static))
+                let chunk = if last_was_placeholder {
+                    TemplateChunk::JoinedStatic(trimmed_static)
+                } else {
+                    TemplateChunk::Static(trimmed_static)
+                };
+                chunks.push(chunk);
             }
         }
 
@@ -162,7 +159,8 @@ impl Template<'_> {
     fn check(&self, defs: &Defs) -> Result::<(), String> {
         for placeholder in self.chunks.iter().filter_map(|c| {
             match c {
-                TemplateChunk::Placeholder(p) if !Self::CONSTANT_PLACEHOLDERS.contains(p) => Some(p),
+                TemplateChunk::Placeholder(p) |
+                TemplateChunk::JoinedPlaceholder(p) if !Self::CONSTANT_PLACEHOLDERS.contains(p) => Some(p),
                 _ => None
             }
         }) {
@@ -174,11 +172,10 @@ impl Template<'_> {
 
     fn compile_(&self, job: &CompiledJob, defs: &Defs) -> Result::<String, String> {
         let mut ret = String::new();
-        for (i, c) in self.chunks.iter().enumerate() {
+        for c in self.chunks.iter() {
             let s = match c {
-                TemplateChunk::Static(s) |
-                TemplateChunk::JoinedStatic(s) => Ok(*s),
-                TemplateChunk::Placeholder(placeholder) => match *placeholder {
+                TemplateChunk::Static(s) | TemplateChunk::JoinedStatic(s) => Ok(*s),
+                TemplateChunk::Placeholder(placeholder) | TemplateChunk::JoinedPlaceholder(placeholder) => match *placeholder {
                     "in" => Ok(job.inputs_str),
                     "out" => Ok(job.target),
                     _ => job.shadows
@@ -189,21 +186,16 @@ impl Template<'_> {
                 },
             }?;
             ret.push_str(s);
-            if !matches!(self.chunks.get(i + 1), Some(TemplateChunk::JoinedStatic(..))) {
-                ret.push(' ')
-            }
         }
-        _ = ret.pop();
         Ok(ret)
     }
 
     fn compile(&self, job: &Job, defs: &Defs) -> Result::<String, String> {
         let mut ret = String::new();
-        for (i, c) in self.chunks.iter().enumerate() {
+        for c in self.chunks.iter() {
             let s = match c {
-                TemplateChunk::Static(s) |
-                TemplateChunk::JoinedStatic(s) => Ok(*s),
-                TemplateChunk::Placeholder(placeholder) => match *placeholder {
+                TemplateChunk::Static(s) | TemplateChunk::JoinedStatic(s) => Ok(*s),
+                TemplateChunk::Placeholder(placeholder) | TemplateChunk::JoinedPlaceholder(placeholder) => match *placeholder {
                     "in" => Ok(job.inputs_wo_rule_str),
                     "out" => Ok(job.target),
                     _ => job.shadows
@@ -214,11 +206,7 @@ impl Template<'_> {
                 },
             }?;
             ret.push_str(s);
-            if !matches!(self.chunks.get(i + 1), Some(TemplateChunk::JoinedStatic(..))) {
-                ret.push(' ')
-            }
         }
-        _ = ret.pop();
         Ok(ret)
     }
 }
@@ -599,9 +587,6 @@ impl<'a> Parser<'a> {
             if line.as_bytes().first() == Some(&b'#') { continue }
             let line = parser.handle_newline_escape(line, &mut lines);
             parser.parse_line(line)
-        }
-        #[cfg(feature = "dbg")] {
-            println!("{:#?}", parser.parsed)
         } parser.parsed
     }
 }
@@ -633,15 +618,18 @@ fn build_dependency_graph<'a>(
         if let Some(job) = parsed.jobs.get(node) {
             if let Some(rule) = parsed.rules.get(job.rule) {
                 if let Some(ref depfile_template) = rule.depfile {
-                    if let Ok(depfile_path) = depfile_template.compile_(job, &parsed.defs) {
-                        if let Ok(depfile) = fs::read_to_string(&depfile_path) {
-                            let depfile = Box::leak(depfile.into_boxed_str());
-                            let colon_idx = depfile.find(':').unwrap();
-                            let depfile_deps = depfile[colon_idx + 1..]
-                                .split_ascii_whitespace()
-                                .filter(|f| *f != "\\");
-                            deps.extend(depfile_deps);
-                        }
+                    let depfile_path = match depfile_template.compile_(job, &parsed.defs) {
+                        Ok(ok) => ok,
+                        Err(e) => report!(job.loc, "{e}")
+                    };
+                    if let Ok(depfile) = fs::read_to_string(&depfile_path) {
+                        let depfile = Box::leak(depfile.into_boxed_str());
+                        let colon_idx = depfile.find(':').unwrap();
+                        let depfile_deps = depfile[colon_idx + 1..]
+                            .split_ascii_whitespace()
+                            .filter(|f| *f != "\\");
+
+                        deps.extend(depfile_deps);
                     }
                 }
             }
