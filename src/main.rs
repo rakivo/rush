@@ -1,19 +1,21 @@
 use std::mem;
 use std::ptr;
+use std::thread;
+use std::sync::Arc;
 use std::path::Path;
 use std::ffi::CString;
 use std::fs::{self, File};
 use std::time::SystemTime;
+use std::io::{self, Write};
 use std::process::ExitCode;
 use std::str::{self, Lines};
-use std::sync::{Arc, Mutex};
 use std::collections::VecDeque;
-use std::io::{self, Write, Stdout};
 use std::os::fd::{FromRawFd, IntoRawFd};
 
 use memmap2::Mmap;
 use rayon::prelude::*;
 use dashmap::{DashMap, DashSet};
+use crossbeam_channel::{unbounded, Sender};
 use fxhash::{FxHashMap, FxHashSet, FxBuildHasher};
 
 type StrHashSet<'a> = FxHashSet::<&'a str>;
@@ -862,7 +864,7 @@ struct CommandOutput {
 #[cfg_attr(feature = "dbg", derive(Debug))]
 struct CommandBuilder<'a> {
     context: &'a Processed<'a>,
-    stdout: Mutex::<Stdout>,
+    stdout: Sender::<Vec::<u8>>,
     processed: StrDashSet::<'a>,
     metadata_cache: MetadataCache<'a>,
     transitive_deps: TransitiveDeps<'a>
@@ -870,14 +872,21 @@ struct CommandBuilder<'a> {
 
 impl<'a> CommandBuilder<'a> {
     #[inline]
-    fn new(
-        context: &'a Processed,
-        transitive_deps: TransitiveDeps<'a>,
-    ) -> Self {
+    fn new(context: &'a Processed, transitive_deps: TransitiveDeps<'a>) -> Self {
+        let (stdout, stdout_recv) = unbounded::<Vec::<u8>>();
+        let _writer_thread = thread::spawn({
+            move || {
+                let mut handle = io::stdout().lock();
+                for bytes in stdout_recv {
+                    _ = handle.write_all(&bytes)
+                }
+            }
+        });
+
         let n = context.jobs.len();
         Self {
+            stdout,
             context,
-            stdout: Mutex::new(io::stdout()),
             processed: DashSet::with_capacity_and_hasher(n, FxBuildHasher::default()),
             metadata_cache: MetadataCache::new(n),
             transitive_deps
@@ -885,16 +894,16 @@ impl<'a> CommandBuilder<'a> {
     }
 
     #[inline(always)]
-    fn print(&self, s: &str) -> io::Result::<()> {
+    fn print(&self, s: &str) {
         self.print_bytes(s.as_bytes())
     }
 
     #[inline(always)]
-    fn print_bytes(&self, bytes: &[u8]) -> io::Result::<()> {
+    fn print_bytes(&self, bytes: &[u8]) {
         #[cfg(feature = "dbg")] {
-            self.stdout.lock().unwrap().write_all(bytes)
+            self.stdout.send(bytes.to_vec()).unwrap()
         } #[cfg(not(feature = "dbg"))] unsafe {
-            self.stdout.lock().unwrap_unchecked().write_all(bytes)
+            self.stdout.send(bytes.to_vec()).unwrap_unchecked()
         }
     }
 

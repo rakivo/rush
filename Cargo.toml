@@ -11,5 +11,6 @@ dbg = []
 libc = "0.2.169"
 rayon = "1.10.0"
 memmap2 = "0.9.5"
+crossbeam-channel = "0.5.14"
 dashmap = { version = "6.1.0", features = ["inline"] }
 fxhash = { git = "https://github.com/rakivo/fxhash", rev = "2b61551" }
