@@ -2,24 +2,22 @@
 
 # Currently Supported Functionality
 ```ninja
-# declare cflags to then shadow it in different jobs
-cflags =
+cflags = -std=gnu99 -Wall -Wextra -O3
+builddir = build
 
 rule cc
-  command = cc $cflags -o $out -c $in
-  description = compile $in to $out
+  depfile = $out.d
+  command = gcc -MD -MF $out.d $cflags -o $out -c $in
 
 rule link
   command = cc $cflags -o $out $in
-  description = link $in into $out
 
-build foo.o: cc foo.c | foo.h
-build bar.o: cc bar.c | bar.h
-build main.o: cc main.c
-  cflags = -Wall -Wextra -O3
+build $builddir/foo.o: cc foo.c
+build $builddir/bar.o: cc bar.c
+build $builddir/main.o: cc main.c
 
-build main: link foo.o $
-  bar.o $
-  main.o
-  cflags = -O3
+build $builddir/main: link $builddir/foo.o $
+                           $builddir/bar.o $
+                           $builddir/main.o
+  cflags = -O2
 ```

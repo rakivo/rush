@@ -1,4 +1,4 @@
-cflags = -Wall -Wextra -O3
+cflags = -std=gnu99 -Wall -Wextra -O3
 builddir = build
 
 rule cc
@@ -15,4 +15,4 @@ build $builddir/main.o: cc main.c
 build $builddir/main: link $builddir/foo.o $
                            $builddir/bar.o $
                            $builddir/main.o
-  cflags = -std=gnu99 -Ofast
+  cflags = -O2
