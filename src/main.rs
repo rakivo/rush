@@ -1,14 +1,14 @@
 #[macro_use]
 mod loc;
 
-mod cb;
+mod cr;
 mod types;
 mod graph;
 mod parser;
 mod command;
 mod template;
 
-use cb::CommandBuilder;
+use cr::CommandRunner;
 use parser::{Parser, read_rush};
 use graph::build_dependency_graph;
 
@@ -24,7 +24,7 @@ fn main() -> ExitCode {
     let processed = Parser::parse(content).into_processed();
 
     let (graph, transitive_deps) = build_dependency_graph(&processed);
-    CommandBuilder::run(&processed, &graph, transitive_deps);
+    CommandRunner::run(&processed, &graph, transitive_deps);
 
     ExitCode::SUCCESS
 }

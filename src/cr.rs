@@ -12,7 +12,7 @@ use fxhash::FxBuildHasher;
 use crossbeam_channel::{unbounded, Sender};
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
-pub struct CommandBuilder<'a> {
+pub struct CommandRunner<'a> {
     context: &'a Processed<'a>,
     stdout: Sender::<String>,
     processed: StrDashSet::<'a>,
@@ -20,7 +20,7 @@ pub struct CommandBuilder<'a> {
     transitive_deps: TransitiveDeps<'a>
 }
 
-impl<'a> CommandBuilder<'a> {
+impl<'a> CommandRunner<'a> {
     #[inline]
     pub fn run(context: &'a Processed, graph: &Graph, transitive_deps: TransitiveDeps<'a>) {
         let levels = topological_sort_levels(graph);
