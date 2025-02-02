@@ -4,6 +4,7 @@ use crate::command::{Command, MetadataCache, CommandOutput};
 use crate::graph::{Graph, TransitiveDeps, topological_sort_levels};
 
 use std::thread;
+use std::path::Path;
 use std::io::{self, Write};
 
 use dashmap::DashSet;
@@ -21,7 +22,6 @@ pub struct CommandRunner<'a> {
 }
 
 impl<'a> CommandRunner<'a> {
-    #[inline]
     pub fn run(context: &'a Processed, graph: &Graph, transitive_deps: TransitiveDeps<'a>) {
         let levels = topological_sort_levels(graph);
 
@@ -56,6 +56,15 @@ impl<'a> CommandRunner<'a> {
 
         drop(cb);
         _ = writer.join()
+    }
+
+    #[inline]
+    fn create_dirs_if_needed(&self, path: &str) -> io::Result::<()> {
+        let path: &Path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            if parent.exists() { return Ok(()) }
+            std::fs::create_dir_all(parent)?
+        } Ok(())
     }
 
     #[inline(always)]
@@ -96,6 +105,15 @@ impl<'a> CommandRunner<'a> {
                 self.processed.insert(job.target);
 
                 if self.metadata_cache.needs_rebuild(job, &self.transitive_deps) {
+                    if let Err(e) = self.create_dirs_if_needed(job.target) {
+                        let msg = format!{
+                            "could not create build directory for target: {target}: {e}",
+                            target = job.target
+                        };
+                        _ = self.print(msg);
+                        return
+                    }
+
                     let Some(command) = rule.command.compile_(job, &self.context.defs).map_err(|e| {
                         _ = self.print(e);
                         rule.description.as_ref().and_then(|d| d.check(&self.context.defs).err()).map(|err| {
