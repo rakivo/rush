@@ -591,10 +591,7 @@ impl<'a> Parser<'a> {
     }
 }
 
-fn build_dependency_graph<'a>(
-    parsed: &'a Processed,
-    transitive_deps: &mut TransitiveDeps<'a>
-) -> Graph<'a> {
+fn build_dependency_graph<'a>(parsed: &'a Processed) -> (Graph<'a>, TransitiveDeps<'a>) {
     fn collect_deps<'a>(
         node: &'a str,
         parsed: &'a Processed,
@@ -664,10 +661,11 @@ fn build_dependency_graph<'a>(
     let n = parsed.jobs.len();
     let mut graph = StrHashMap::with_capacity(n);
     let mut visited = StrHashSet::with_capacity(n);
+    let mut transitive_deps = StrHashMap::with_capacity(n);
 
     for target in parsed.jobs.keys() {
-        collect_deps(target, parsed, &mut graph, &mut visited, transitive_deps);
-    } graph
+        collect_deps(target, parsed, &mut graph, &mut visited, &mut transitive_deps);
+    } (graph, transitive_deps)
 }
 
 fn topological_sort_levels<'a>(graph: &Graph<'a>) -> Vec::<Vec::<&'a str>> {
@@ -852,7 +850,7 @@ struct CommandOutput {
 #[cfg_attr(feature = "dbg", derive(Debug))]
 struct CommandBuilder<'a> {
     context: &'a Processed<'a>,
-    stdout: Sender::<Vec::<u8>>,
+    stdout: Sender::<String>,
     processed: StrDashSet::<'a>,
     metadata_cache: MetadataCache<'a>,
     transitive_deps: TransitiveDeps<'a>
@@ -860,38 +858,48 @@ struct CommandBuilder<'a> {
 
 impl<'a> CommandBuilder<'a> {
     #[inline]
-    fn new(context: &'a Processed, transitive_deps: TransitiveDeps<'a>) -> Self {
-        let (stdout, stdout_recv) = unbounded::<Vec::<u8>>();
-        let _writer_thread = thread::spawn({
-            move || {
-                let mut handle = io::stdout().lock();
-                for bytes in stdout_recv {
-                    _ = handle.write_all(&bytes)
-                }
+    fn run(context: &'a Processed, graph: &Graph, transitive_deps: TransitiveDeps<'a>) {
+        let levels = topological_sort_levels(graph);
+
+        #[cfg(feature = "dbg")]
+        levels.iter().enumerate().for_each(|(i, level)| {
+            println!("{i}: {level:?}")
+        });
+
+        let (stdout, stdout_recv) = unbounded::<String>();
+        let n = context.jobs.len();
+        let writer = thread::spawn(move || {
+            let mut stdout_handle = io::stdout().lock();
+            for s in stdout_recv {
+                _ = stdout_handle.write_all(s.as_bytes());
+                _ = stdout_handle.flush();
             }
         });
 
-        let n = context.jobs.len();
-        Self {
+        let cb = Self {
             stdout,
             context,
             processed: DashSet::with_capacity_and_hasher(n, FxBuildHasher::default()),
             metadata_cache: MetadataCache::new(n),
             transitive_deps
-        }
+        };
+
+        levels.into_iter().for_each(|level| {
+            level.into_par_iter().filter_map(|t| context.jobs.get(t)).for_each(|job| {
+                cb._resolve_and_run(job)
+            });
+        });
+
+        drop(cb);
+        _ = writer.join()
     }
 
     #[inline(always)]
-    fn print(&self, s: &str) {
-        self.print_bytes(s.as_bytes())
-    }
-
-    #[inline(always)]
-    fn print_bytes(&self, bytes: &[u8]) {
+    fn print(&self, s: String) {
         #[cfg(feature = "dbg")] {
-            self.stdout.send(bytes.to_vec()).unwrap()
+            self.stdout.send(s).unwrap()
         } #[cfg(not(feature = "dbg"))] unsafe {
-            self.stdout.send(bytes.to_vec()).unwrap_unchecked()
+            self.stdout.send(s).unwrap_unchecked()
         }
     }
 
@@ -912,7 +920,7 @@ impl<'a> CommandBuilder<'a> {
                     } else {
                         #[cfg(feature = "dbg")] {
                             let msg = format!("dependency {input} is assumed to exist\n");
-                            _ = self.print(&msg);
+                            _ = self.print(msg)
                         }
                     }
                 }
@@ -925,16 +933,16 @@ impl<'a> CommandBuilder<'a> {
 
                 if self.metadata_cache.needs_rebuild(job, &self.transitive_deps) {
                     let Some(command) = rule.command.compile_(job, &self.context.defs).map_err(|e| {
-                        _ = self.print(&e);
+                        _ = self.print(e);
                         rule.description.as_ref().and_then(|d| d.check(&self.context.defs).err()).map(|err| {
-                            _ = self.print(&err)
+                            _ = self.print(err)
                         });
                     }).ok() else {
                         continue
                     };
 
                     let description = rule.description.as_ref().and_then(|d| d.compile_(&job, &self.context.defs).map_err(|e| {
-                        _ = self.print(&e)
+                        _ = self.print(e)
                     }).ok());
 
                     let command = Command { command, description };
@@ -950,34 +958,29 @@ impl<'a> CommandBuilder<'a> {
                                 "could not execute job: {target}: {e}\n",
                                 target = job.target
                             };
-                            _ = self.print(&err);
+                            _ = self.print(err);
                             continue
                         }
                     };
 
-                    let cap = stdout.len() + stderr.len() + description.as_ref().map_or(command.len(), |d| d.len()) + 1;
-                    let mut output = Vec::with_capacity(cap);
                     let command = description.unwrap_or(command);
-                    output.extend(command.as_bytes());
-                    output.push(b'\n');
-                    output.extend(stdout.as_bytes());
-                    output.extend(stderr.as_bytes());
-                    _ = self.print_bytes(&output);
+                    let output = format!("{command}\n{stdout}{stderr}");
+                    _ = self.print(output);
                 } else {
                     let mut any_err = false;
                     if let Err(err) = rule.command.check(&self.context.defs) {
-                        _ = self.print(&err);
+                        _ = self.print(err);
                         any_err = true
                     }
 
                     if let Some(Err(err)) = rule.description.as_ref().map(|d| d.check(&self.context.defs)) {
-                        _ = self.print(&err);
+                        _ = self.print(err);
                         any_err = true
                     }
 
                     if !any_err {
                         let msg = format!("{target} is already built\n", target = job.target);
-                        _ = self.print(&msg)
+                        _ = self.print(msg)
                     }
                 }
             } else {
@@ -987,40 +990,23 @@ impl<'a> CommandBuilder<'a> {
                     rule = job.rule,
                     target = job.target
                 };
-                _ = self.print(&err);
+                _ = self.print(err)
             }
         }
-    }
-
-    fn resolve_and_run(self, graph: &Graph) {
-        let levels = topological_sort_levels(graph);
-
-        #[cfg(feature = "dbg")]
-        levels.iter().enumerate().for_each(|(i, level)| {
-            println!("{i}: {level:?}")
-        });
-
-        levels.into_iter().for_each(|level| {
-            level.into_par_iter().filter_map(|t| self.context.jobs.get(t)).for_each(|job| {
-                self._resolve_and_run(job)
-            });
-        });
     }
 }
 
 fn main() -> ExitCode {
-    let Some(rush) = read_rush() else {
+    let Some(mmap) = read_rush() else {
         eprintln!("no rush file found in cwd");
         return ExitCode::FAILURE
     };
 
-    let content = unsafe { str::from_utf8_unchecked(&rush[..]) };
+    let content = unsafe { str::from_utf8_unchecked(&mmap[..]) };
     let processed = Parser::parse(content).into_processed();
 
-    let n = processed.jobs.len();
-    let mut transitive_deps = StrHashMap::with_capacity(n);
-    let graph = build_dependency_graph(&processed, &mut transitive_deps);
-    CommandBuilder::new(&processed, transitive_deps).resolve_and_run(&graph);
+    let (graph, transitive_deps) = build_dependency_graph(&processed);
+    CommandBuilder::run(&processed, &graph, transitive_deps);
 
     ExitCode::SUCCESS
 }
