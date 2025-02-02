@@ -1,5 +1,6 @@
-use crate::types::*;
 use crate::parser::Processed;
+use crate::cr::DefaultTarget;
+use crate::types::{StrHashMap, StrHashSet};
 
 use std::fs;
 use std::sync::Arc;
@@ -8,7 +9,7 @@ use std::collections::VecDeque;
 pub type Graph<'a> = StrHashMap::<'a, Arc::<StrHashSet<'a>>>;
 pub type TransitiveDeps<'a> = StrHashMap::<'a, Arc::<StrHashSet<'a>>>;
 
-pub fn build_dependency_graph<'a>(parsed: &'a Processed) -> (Graph<'a>, TransitiveDeps<'a>) {
+pub fn build_dependency_graph<'a>(parsed: &'a Processed) -> (Graph<'a>, DefaultTarget<'a>, TransitiveDeps<'a>) {
     fn collect_deps<'a>(
         node: &'a str,
         parsed: &'a Processed,
@@ -89,7 +90,20 @@ pub fn build_dependency_graph<'a>(parsed: &'a Processed) -> (Graph<'a>, Transiti
 
     for target in parsed.jobs.keys() {
         collect_deps(target, parsed, &mut graph, &mut visited, &mut transitive_deps);
-    } (graph, transitive_deps)
+    }
+
+    let mut reverse_graph = StrHashMap::with_capacity(n);
+    for (node, deps) in graph.iter() {
+        for dep in deps.iter() {
+            reverse_graph.entry(*dep).or_insert_with(StrHashSet::default).insert(node);
+        }
+    }
+
+    let default_target = parsed.jobs.keys()
+        .find(|job| !reverse_graph.contains_key(*job))
+        .cloned();
+
+    (graph, default_target, transitive_deps)
 }
 
 pub fn topological_sort_levels<'a>(graph: &Graph<'a>) -> Vec::<Vec::<&'a str>> {

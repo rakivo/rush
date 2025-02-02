@@ -55,7 +55,7 @@ impl<'a> Rule<'a> {
 
 #[derive(Clone, Default)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
-pub struct Job<'a> {
+pub struct PreprocessedJob<'a> {
     pub loc: Loc,
 
     pub rule: &'a str,
@@ -75,7 +75,7 @@ pub struct Job<'a> {
 
 #[derive(Clone, Default)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
-pub struct CompiledJob<'a> {
+pub struct Job<'a> {
     pub loc: Loc,
 
     pub rule: &'a str,
@@ -100,13 +100,13 @@ pub type Defs<'a> = StrHashMap::<'a, Def<'a>>;
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct Parsed<'a> {
     defs: Defs<'a>,
-    jobs: StrHashMap::<'a, Job<'a>>,
+    jobs: StrHashMap::<'a, PreprocessedJob<'a>>,
     rules: StrHashMap::<'a, Rule<'a>>,
 }
 
 impl<'a> Parsed<'a> {
     #[inline(always)]
-    fn job_mut(&mut self, target: &str) -> &mut Job<'a> {
+    fn job_mut(&mut self, target: &str) -> &mut PreprocessedJob<'a> {
         unsafe { self.jobs.get_mut(target).unwrap_unchecked() }
     }
 
@@ -152,7 +152,7 @@ impl<'a> Parsed<'a> {
                     }
                 }).collect::<Vec::<_>>();
 
-            Some((target, CompiledJob {
+            Some((target, Job {
                 deps,
                 target,
                 inputs,
@@ -171,7 +171,7 @@ impl<'a> Parsed<'a> {
 pub struct Processed<'a> {
     pub defs: Defs<'a>,
     pub rules: StrHashMap::<'a, Rule<'a>>,
-    pub jobs: StrHashMap::<'a, CompiledJob<'a>>,
+    pub jobs: StrHashMap::<'a, Job<'a>>,
 }
 
 #[derive(Default)]
@@ -375,7 +375,7 @@ impl<'a> Parser<'a> {
                         let inputs_templates = inputs.iter().map(|input| Template::new(input, loc)).collect();
 
                         let deps_templates = deps.iter().map(|input| Template::new(input, loc)).collect();
-                        let job = Job {loc, target, deps_templates, inputs_templates, target_template, rule, inputs, inputs_wo_rule_str, deps, shadows: None};
+                        let job = PreprocessedJob {loc, target, deps_templates, inputs_templates, target_template, rule, inputs, inputs_wo_rule_str, deps, shadows: None};
 
                         self.parsed.jobs.insert(target, job);
                         self.context = Context::Job {target, shadows: None}

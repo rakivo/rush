@@ -1,5 +1,5 @@
 use crate::loc::Loc;
-use crate::parser::{Job, Defs, CompiledJob};
+use crate::parser::{PreprocessedJob, Defs, Job};
 
 #[derive(Clone)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
@@ -90,7 +90,7 @@ impl Template<'_> {
         } Ok(())
     }
 
-    pub fn compile_(&self, job: &CompiledJob, defs: &Defs) -> Result::<String, String> {
+    pub fn compile_(&self, job: &Job, defs: &Defs) -> Result::<String, String> {
         let mut ret = String::new();
         for c in self.chunks.iter() {
             let s = match c {
@@ -110,7 +110,7 @@ impl Template<'_> {
         Ok(ret)
     }
 
-    pub fn compile(&self, job: &Job, defs: &Defs) -> Result::<String, String> {
+    pub fn compile(&self, job: &PreprocessedJob, defs: &Defs) -> Result::<String, String> {
         let mut ret = String::new();
         for c in self.chunks.iter() {
             let s = match c {

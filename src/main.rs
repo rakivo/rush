@@ -5,6 +5,7 @@ mod cr;
 mod types;
 mod graph;
 mod parser;
+mod consts;
 mod command;
 mod template;
 
@@ -23,8 +24,8 @@ fn main() -> ExitCode {
     let content = unsafe { std::str::from_utf8_unchecked(&mmap[..]) };
     let processed = Parser::parse(content).into_processed();
 
-    let (graph, transitive_deps) = build_dependency_graph(&processed);
-    CommandRunner::run(&processed, &graph, transitive_deps);
+    let (graph, default_target, transitive_deps) = build_dependency_graph(&processed);
+    CommandRunner::run(&processed, graph, default_target, transitive_deps);
 
     ExitCode::SUCCESS
 }

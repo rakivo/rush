@@ -1,5 +1,5 @@
 use crate::types::StrDashMap;
-use crate::parser::CompiledJob;
+use crate::parser::Job;
 use crate::graph::TransitiveDeps;
 
 use std::io;
@@ -52,7 +52,7 @@ impl<'a> MetadataCache<'a> {
     }
 
     #[inline]
-    pub fn needs_rebuild(&self, job: &CompiledJob<'a>, transitive_deps: &TransitiveDeps<'a>) -> bool {
+    pub fn needs_rebuild(&self, job: &Job<'a>, transitive_deps: &TransitiveDeps<'a>) -> bool {
         // TODO: do something here if dependent file does not exist
         let mtimes = unsafe {
             transitive_deps.get(job.target).unwrap_unchecked()
