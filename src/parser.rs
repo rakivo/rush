@@ -395,6 +395,7 @@ impl<'a> Parser<'a> {
         while full_line.as_bytes().last() == Some(&b'$') {
             let trimmed = full_line[..full_line.len() - 1].trim_end();
             let Some(next_line) = lines.next() else { break };
+            self.cursor += 1;
             let next_trimmed = next_line.trim();
             full_line = format!("{trimmed} {next_trimmed}").leak()
         } full_line.trim_start()
