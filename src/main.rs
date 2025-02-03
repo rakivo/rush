@@ -25,7 +25,7 @@ fn main() -> ExitCode {
     let processed = Parser::parse(content).into_processed();
 
     let (graph, default_target, transitive_deps) = build_dependency_graph(&processed);
-    CommandRunner::run(&processed, graph, default_target, transitive_deps);
+    CommandRunner::run(&processed, graph, default_target, &transitive_deps);
 
     ExitCode::SUCCESS
 }

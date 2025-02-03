@@ -100,8 +100,9 @@ pub fn build_dependency_graph<'a>(parsed: &'a Processed) -> (Graph<'a>, DefaultT
     }
 
     let default_target = parsed.jobs.keys()
-        .find(|job| !reverse_graph.contains_key(*job))
-        .cloned();
+        .filter(|job| !reverse_graph.contains_key(*job))
+        .map(|t| unsafe { parsed.jobs.get(t).unwrap_unchecked() })
+        .min_by(|x, y| x.loc.0.cmp(&y.loc.0));
 
     (graph, default_target, transitive_deps)
 }

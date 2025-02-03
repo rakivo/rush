@@ -1,37 +1,157 @@
+use crate::types::StrDashSet;
 use crate::consts::PHONY_TARGETS;
 use crate::parser::{Job, Rule, Processed};
-use crate::types::{StrDashSet, StrHashMap};
 use crate::command::{Command, MetadataCache, CommandOutput};
 use crate::graph::{Graph, TransitiveDeps, topological_sort_levels};
 
-use std::thread;
 use std::sync::Arc;
 use std::path::Path;
 use std::io::{self, Write};
+use std::thread::{self, JoinHandle};
 
 use dashmap::DashSet;
 use rayon::prelude::*;
 use fxhash::FxBuildHasher;
 use crossbeam_channel::{unbounded, Sender};
 
-pub type DefaultTarget<'a> = Option::<&'a str>;
+pub type DefaultTarget<'a> = Option::<&'a Job<'a>>;
+
+type Stdout = Sender::<String>;
+type StdoutThread = JoinHandle::<()>;
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct CommandRunner<'a> {
+    stdout: Stdout,
     context: &'a Processed<'a>,
-    stdout: Sender::<String>,
     processed: StrDashSet::<'a>,
     metadata_cache: MetadataCache<'a>,
-    transitive_deps: TransitiveDeps<'a>
+    transitive_deps: &'a TransitiveDeps<'a>
 }
 
 impl<'a> CommandRunner<'a> {
     #[inline]
-    fn run_phony(&self, target: &str) {
-        if let Some(job) = self.context.jobs.get(target) {
-            if let Some(rule) = self.context.rules.get(job.rule) {
-                self.run_job(job, rule);
+    fn new(
+        stdout: Stdout,
+        context: &'a Processed<'a>,
+        transitive_deps: &'a TransitiveDeps<'a>
+    ) -> Self {
+        let n = context.jobs.len();
+        Self {
+            stdout,
+            context,
+            processed: DashSet::with_capacity_and_hasher(n, FxBuildHasher::default()),
+            metadata_cache: MetadataCache::new(n),
+            transitive_deps
+        }
+    }
+
+    #[inline]
+    fn drop(self, writer: StdoutThread) {
+        drop(self);
+        _ = writer.join()
+    }
+
+    #[inline(always)]
+    fn run_phony(&self, job: &Job<'a>) {
+        if let Some(rule) = self.context.rules.get(job.rule) {
+            self.run_job(job, rule);
+        }
+    }
+
+    fn build_subgraph(graph: &Graph<'a>, target: &'a str, transitive_deps: &TransitiveDeps<'a>) -> Graph<'a> {
+        let deps = transitive_deps.get(target).cloned().unwrap_or_default();
+        let mut subgraph = Graph::with_capacity(deps.len() + 1);
+
+        subgraph.insert(target, Arc::clone(&deps));
+        for dep in deps.iter() {
+            if let Some(deps_of_dep) = graph.get(dep) {
+                subgraph.insert(*dep, Arc::clone(deps_of_dep));
             }
+        } subgraph
+    }
+
+    fn stdout_thread() -> (Stdout, StdoutThread) {
+        let (stdout, stdout_recv) = unbounded::<String>();
+        let writer = thread::spawn(move || {
+            let mut stdout_handle = io::stdout().lock();
+            for s in stdout_recv {
+                _ = stdout_handle.write_all(s.as_bytes());
+                _ = stdout_handle.flush();
+            }
+        });
+
+        (stdout, writer)
+    }
+
+    pub fn run_target(
+        context: &'a Processed,
+        graph: Graph<'a>,
+        transitive_deps: &'a TransitiveDeps<'a>,
+        job: &Job<'a>
+    ) {
+        let (stdout, writer) = Self::stdout_thread();
+        let cb = Self::new(stdout, context, transitive_deps);
+
+        if PHONY_TARGETS.contains(&job.target) {
+            cb.run_phony(job);
+            cb.drop(writer);
+            return
+        }
+
+        let levels = {
+            let subgraph = Self::build_subgraph(&graph, job.target, &transitive_deps);
+            topological_sort_levels(&subgraph)
+        };
+
+        levels.into_iter().for_each(|level| {
+            level.into_par_iter().filter_map(|t| context.jobs.get(t)).for_each(|job| {
+                cb._resolve_and_run(job);
+            });
+        });
+
+        cb.drop(writer);
+    }
+
+    pub fn run(
+        context: &'a Processed,
+        graph: Graph<'a>,
+        default_target: DefaultTarget<'a>,
+        transitive_deps: &'a TransitiveDeps<'a>
+    ) {
+        let levels = if let Some(job) = default_target {
+            Self::run_target(context, graph, transitive_deps, job);
+            return
+        } else {
+            topological_sort_levels(&graph)
+        };
+
+        let (stdout, writer) = Self::stdout_thread();
+        let cb = Self::new(stdout, context, transitive_deps);
+
+        levels.into_iter().for_each(|level| {
+            level.into_par_iter().filter_map(|t| context.jobs.get(t)).for_each(|job| {
+                cb._resolve_and_run(job)
+            });
+        });
+
+        cb.drop(writer);
+    }
+
+    #[inline]
+    fn create_dirs_if_needed(&self, path: &str) -> io::Result::<()> {
+        let path: &Path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            if parent.exists() { return Ok(()) }
+            std::fs::create_dir_all(parent)?
+        } Ok(())
+    }
+
+    #[inline(always)]
+    fn print(&self, s: String) {
+        #[cfg(feature = "dbg")] {
+            self.stdout.send(s).unwrap()
+        } #[cfg(not(feature = "dbg"))] unsafe {
+            self.stdout.send(s).unwrap_unchecked()
         }
     }
 
@@ -97,110 +217,6 @@ impl<'a> CommandRunner<'a> {
                 _ = self.print(msg)
             }
         } false
-    }
-
-    pub fn run_target(context: &'a Processed, graph: Graph<'a>, transitive_deps: TransitiveDeps<'a>, target: &'a str) {
-        let (stdout, stdout_recv) = unbounded::<String>();
-        let writer = thread::spawn(move || {
-            let mut stdout_handle = io::stdout().lock();
-            for s in stdout_recv {
-                _ = stdout_handle.write_all(s.as_bytes());
-                _ = stdout_handle.flush()
-            }
-        });
-
-        let n = context.jobs.len();
-        let cb = Self {
-            stdout,
-            context,
-            processed: DashSet::with_capacity_and_hasher(n, FxBuildHasher::default()),
-            metadata_cache: MetadataCache::new(n),
-            transitive_deps: transitive_deps.clone(),
-        };
-
-        if PHONY_TARGETS.contains(&target) {
-            cb.run_phony(target);
-            drop(cb);
-            _ = writer.join();
-            return
-        }
-
-        let levels = {
-            let deps = transitive_deps.get(target).cloned().unwrap_or_default();
-            let mut subgraph = StrHashMap::with_capacity(deps.len() + 1);
-
-            subgraph.insert(target, Arc::clone(&deps));
-            for dep in deps.iter() {
-                if let Some(deps_of_dep) = graph.get(dep) {
-                    subgraph.insert(*dep, Arc::clone(deps_of_dep));
-                }
-            }
-
-            topological_sort_levels(&subgraph)
-        };
-
-        levels.into_iter().for_each(|level| {
-            level.into_par_iter().filter_map(|t| context.jobs.get(t)).for_each(|job| {
-                cb._resolve_and_run(job);
-            });
-        });
-
-        drop(cb);
-        _ = writer.join();
-    }
-
-    pub fn run(context: &'a Processed, graph: Graph, default_target: DefaultTarget, transitive_deps: TransitiveDeps<'a>) {
-        let levels = topological_sort_levels(&graph);
-
-        #[cfg(feature = "dbg")]
-        levels.iter().enumerate().for_each(|(i, level)| {
-            println!("{i}: {level:?}")
-        });
-
-        let (stdout, stdout_recv) = unbounded::<String>();
-        let writer = thread::spawn(move || {
-            let mut stdout_handle = io::stdout().lock();
-            for s in stdout_recv {
-                _ = stdout_handle.write_all(s.as_bytes());
-                _ = stdout_handle.flush();
-            }
-        });
-
-        let n = context.jobs.len();
-        let cb = Self {
-            stdout,
-            context,
-            processed: DashSet::with_capacity_and_hasher(n, FxBuildHasher::default()),
-            metadata_cache: MetadataCache::new(n),
-            transitive_deps
-        };
-
-        levels.into_iter().for_each(|level| {
-            level.into_par_iter().filter_map(|t| context.jobs.get(t)).for_each(|job| {
-                cb._resolve_and_run(job)
-            });
-        });
-
-        drop(cb);
-        _ = writer.join()
-    }
-
-    #[inline]
-    fn create_dirs_if_needed(&self, path: &str) -> io::Result::<()> {
-        let path: &Path = path.as_ref();
-        if let Some(parent) = path.parent() {
-            if parent.exists() { return Ok(()) }
-            std::fs::create_dir_all(parent)?
-        } Ok(())
-    }
-
-    #[inline(always)]
-    fn print(&self, s: String) {
-        #[cfg(feature = "dbg")] {
-            self.stdout.send(s).unwrap()
-        } #[cfg(not(feature = "dbg"))] unsafe {
-            self.stdout.send(s).unwrap_unchecked()
-        }
     }
 
     fn _resolve_and_run(&self, job: &Job<'a>) {
