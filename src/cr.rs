@@ -54,7 +54,7 @@ impl<'a> CommandRunner<'a> {
     #[inline(always)]
     fn run_phony(&self, job: &Job<'a>) {
         if let Some(rule) = self.context.rules.get(job.rule) {
-            self.run_job(job, rule);
+            self.execute_job(job, rule);
         }
     }
 
@@ -155,7 +155,7 @@ impl<'a> CommandRunner<'a> {
         }
     }
 
-    fn run_job(&self, job: &Job<'a>, rule: &Rule) -> bool {
+    fn execute_job(&self, job: &Job<'a>, rule: &Rule) -> bool {
         if self.metadata_cache.needs_rebuild(job, &self.transitive_deps) {
             if let Err(e) = self.create_dirs_if_needed(job.target) {
                 let msg = format!{
@@ -246,7 +246,7 @@ impl<'a> CommandRunner<'a> {
 
             if let Some(rule) = self.context.rules.get(job.rule) {
                 self.processed.insert(job.target);
-                if self.run_job(job, rule) { continue }
+                if self.execute_job(job, rule) { continue }
             } else {
                 let err = report_fmt!{
                     job.loc,
