@@ -51,10 +51,26 @@ impl<'a> CommandRunner<'a> {
         _ = writer.join()
     }
 
-    #[inline(always)]
+    #[inline]
+    fn execute_command(&self, command: Command, target: &str) -> io::Result::<CommandOutput> {
+         command.execute().map_err(|e| {
+             let err = format!("could not execute job: {target}: {e}\n");
+             _ = self.print(err);
+             e
+         })
+    }
+
+    #[inline]
     fn run_phony(&self, job: &Job<'a>) {
-        if let Some(rule) = self.context.rules.get(job.rule) {
+        if let Some(Some(rule)) = job.rule.as_ref().map(|rule| self.context.rules.get(rule)) {
             self.execute_job(job, rule);
+        }
+
+        if let Some(Ok(command_output)) = job.command.to_owned().map(|command| {
+            let command = Command { command, description: None };
+            self.execute_command(command, job.target)
+        }) {
+            _ = self.print(command_output.to_string());
         }
     }
 
@@ -180,26 +196,11 @@ impl<'a> CommandRunner<'a> {
             }).ok());
 
             let command = Command { command, description };
-            let CommandOutput {
-                stdout,
-                stderr,
-                command,
-                description,
-            } = match command.execute() {
-                Ok(ok) => ok,
-                Err(e) => {
-                    let err = format!{
-                        "could not execute job: {target}: {e}\n",
-                        target = job.target
-                    };
-                    _ = self.print(err);
-                    return true
-                }
+            let Ok(command_output) = self.execute_command(command, job.target) else {
+                return true
             };
 
-            let command = description.unwrap_or(command);
-            let output = format!("{command}\n{stdout}{stderr}");
-            _ = self.print(output);
+            _ = self.print(command_output.to_string());
         } else {
             let mut any_err = false;
             if let Err(err) = rule.command.check(&self.context.defs) {
@@ -244,17 +245,19 @@ impl<'a> CommandRunner<'a> {
 
             if !all_deps_resolved { continue }
 
-            if let Some(rule) = self.context.rules.get(job.rule) {
-                self.processed.insert(job.target);
-                if self.execute_job(job, rule) { continue }
-            } else {
-                let err = report_fmt!{
-                    job.loc,
-                    "no rule named: {rule} found for job {target}\n",
-                    rule = job.rule,
-                    target = job.target
-                };
-                _ = self.print(err)
+            if let Some(ref job_rule) = job.rule {
+                if let Some(rule) = self.context.rules.get(job_rule) {
+                    self.processed.insert(job.target);
+                    if self.execute_job(job, rule) { continue }
+                } else {
+                    let err = report_fmt!{
+                        job.loc,
+                        "no rule named: {rule} found for job {target}\n",
+                        rule = job_rule,
+                        target = job.target
+                    };
+                    _ = self.print(err)
+                }
             }
         }
     }

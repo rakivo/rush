@@ -5,6 +5,7 @@ use crate::graph::TransitiveDeps;
 use std::io;
 use std::ptr;
 use std::mem;
+use std::fmt;
 use std::fs::File;
 use std::path::Path;
 use std::ffi::CString;
@@ -20,6 +21,17 @@ pub struct CommandOutput {
     pub stderr: String,
     pub command: String,
     pub description: Option::<String>
+}
+
+impl fmt::Display for CommandOutput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let CommandOutput { stdout, stderr, command, description } = self;
+        write!{
+            f,
+            "{command}\n{stdout}{stderr}",
+            command = description.as_ref().unwrap_or(command),
+        }
+    }
 }
 
 #[cfg_attr(feature = "dbg", derive(Debug))]

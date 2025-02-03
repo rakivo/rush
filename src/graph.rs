@@ -31,7 +31,7 @@ pub fn build_dependency_graph<'a>(parsed: &'a Processed) -> (Graph<'a>, DefaultT
         }).unwrap_or_default();
 
         if let Some(job) = parsed.jobs.get(node) {
-            if let Some(rule) = parsed.rules.get(job.rule) {
+            if let Some(Some(rule)) = job.rule.as_ref().map(|rule| parsed.rules.get(rule)) {
                 if let Some(ref depfile_template) = rule.depfile {
                     let depfile_path = match depfile_template.compile_(job, &parsed.defs) {
                         Ok(ok) => ok,
@@ -92,17 +92,21 @@ pub fn build_dependency_graph<'a>(parsed: &'a Processed) -> (Graph<'a>, DefaultT
         collect_deps(target, parsed, &mut graph, &mut visited, &mut transitive_deps);
     }
 
-    let mut reverse_graph = StrHashMap::with_capacity(n);
-    for (node, deps) in graph.iter() {
-        for dep in deps.iter() {
-            reverse_graph.entry(*dep).or_insert_with(StrHashSet::default).insert(node);
+    let default_target = if graph.is_empty() {
+        parsed.jobs.values().next()
+    } else {
+        let mut reverse_graph = StrHashMap::with_capacity(n);
+        for (node, deps) in graph.iter() {
+            for dep in deps.iter() {
+                reverse_graph.entry(*dep).or_insert_with(StrHashSet::default).insert(node);
+            }
         }
-    }
 
-    let default_target = parsed.jobs.keys()
-        .filter(|job| !reverse_graph.contains_key(*job))
-        .map(|t| unsafe { parsed.jobs.get(t).unwrap_unchecked() })
-        .min_by(|x, y| x.loc.0.cmp(&y.loc.0));
+        parsed.jobs.keys()
+            .filter(|job| !reverse_graph.contains_key(*job))
+            .map(|t| unsafe { parsed.jobs.get(t).unwrap_unchecked() })
+            .min_by(|x, y| x.loc.0.cmp(&y.loc.0))
+    };
 
     (graph, default_target, transitive_deps)
 }

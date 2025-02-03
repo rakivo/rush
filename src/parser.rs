@@ -1,6 +1,6 @@
 use crate::loc::Loc;
-use crate::types::StrHashMap;
 use crate::template::Template;
+use crate::types::{StrHashMap, StrHashSet};
 
 use std::sync::Arc;
 use std::str::Lines;
@@ -58,7 +58,7 @@ impl<'a> Rule<'a> {
 pub struct PreprocessedJob<'a> {
     pub loc: Loc,
 
-    pub rule: &'a str,
+    pub rule: Option::<&'a str>,
 
     pub shadows: Option::<Arc::<Defs<'a>>>,
 
@@ -69,16 +69,17 @@ pub struct PreprocessedJob<'a> {
     pub inputs_templates: Vec::<Template<'a>>,
     pub inputs_wo_rule_str: &'a str,
 
+    pub command: Option::<Template<'a>>,
+
     pub deps: Vec::<&'a str>,
     pub deps_templates: Vec::<Template<'a>>
 }
 
-#[derive(Clone, Default)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct Job<'a> {
     pub loc: Loc,
 
-    pub rule: &'a str,
+    pub rule: Option::<&'a str>,
 
     pub target: &'a str,
 
@@ -86,6 +87,8 @@ pub struct Job<'a> {
 
     pub inputs: Vec::<&'a str>,
     pub inputs_str: &'a str,
+
+    pub command: Option::<String>,
 
     pub deps: Vec::<&'a str>
 }
@@ -100,6 +103,7 @@ pub type Defs<'a> = StrHashMap::<'a, Def<'a>>;
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct Parsed<'a> {
     defs: Defs<'a>,
+    phonys: StrHashSet<'a>,
     jobs: StrHashMap::<'a, PreprocessedJob<'a>>,
     rules: StrHashMap::<'a, Rule<'a>>,
 }
@@ -116,9 +120,9 @@ impl<'a> Parsed<'a> {
     }
 
     pub fn into_processed(self) -> Processed<'a> {
-        let Parsed { defs, jobs, rules } = self;
+        let Parsed { defs, jobs, rules, phonys } = self;
         let jobs = jobs.iter().filter_map(|(.., job)| {
-            if !rules.contains_key(job.rule) { return None }
+            if job.rule.as_ref().map_or(false, |rule| !rules.contains_key(rule)) { return None }
 
             let target = match job.target_template.compile(&job, &defs) {
                 Ok(ok) => ok.leak() as &_,
@@ -152,10 +156,25 @@ impl<'a> Parsed<'a> {
                     }
                 }).collect::<Vec::<_>>();
 
+            let command = job.command.as_ref().map(|c| {
+                if !phonys.contains(job.target) {
+                    report!{
+                        job.loc,
+                        "mark {target} as phony for it to have a command",
+                        target = job.target
+                    }
+                }
+                match c.compile(job, &defs) {
+                    Ok(ok) => ok,
+                    Err(e) => report!(job.loc, "{e}")
+                }
+            });
+
             Some((target, Job {
                 deps,
                 target,
                 inputs,
+                command,
                 inputs_str,
                 loc: job.loc,
                 rule: job.rule,
@@ -204,7 +223,7 @@ pub struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    fn finish_shadows(&mut self) {
+    fn finish_job(&mut self) {
         match &mut self.context {
             Context::Job { target, shadows } => {
                 let job = self.parsed.job_mut(target);
@@ -223,13 +242,13 @@ impl<'a> Parser<'a> {
 
         if matches!(self.context, Context::Job {..} | Context::Rule {..}) {
             if line.is_empty() {
-                self.finish_shadows();
+                self.finish_job();
                 self.context = Context::Global;
                 return
             }
 
-            if matches!(first, Some((.., "build" | "rule"))) {
-                self.finish_shadows();
+            if matches!(first, Some((.., "build" | "phony" | "rule" ))) {
+                self.finish_job();
                 self.context = Context::Global
             }
         } else if line.is_empty() {
@@ -256,16 +275,24 @@ impl<'a> Parser<'a> {
         };
 
         match &mut self.context {
-            Context::Job { shadows, .. } => {
-                let name = first_token;
-                let def = parse_def();
-                match shadows.as_mut() {
-                    Some(shadows) => { shadows.insert(name, def); },
-                    None => {
-                        let mut _shadows = StrHashMap::with_capacity(4);
-                        _shadows.insert(name, def);
-                        shadows.replace(_shadows);
+            Context::Job { target, shadows, .. } => {
+                match first_token {
+                    "command" => {
+                        let command_ = line[second_space + 1 + 1..].trim();
+                        let command_loc = Loc(self.cursor);
+                        self.parsed.job_mut(target).command = Some(Template::new(command_, command_loc));
                     },
+                    name => {
+                        let def = parse_def();
+                        match shadows.as_mut() {
+                            Some(shadows) => { shadows.insert(name, def); },
+                            None => {
+                                let mut _shadows = StrHashMap::with_capacity(4);
+                                _shadows.insert(name, def);
+                                shadows.replace(_shadows);
+                            },
+                        }
+                    }
                 }
             },
             Context::Rule { name, depfile_path, depfile_path_loc, already_inserted, description_loc, description } => {
@@ -336,6 +363,10 @@ impl<'a> Parser<'a> {
             },
             Context::Global => {
                 match first_token {
+                    "phony" => {
+                        let phony = line[first_space..].trim();
+                        self.parsed.phonys.insert(phony);
+                    },
                     "rule" => {
                         self.context = Context::Rule {
                             depfile_path: None,
@@ -362,20 +393,36 @@ impl<'a> Parser<'a> {
                         };
 
                         let mut input_tokens = inputs_str.split_ascii_whitespace();
-                        let Some(rule) = input_tokens.next() else { return };
+                        let rule = input_tokens.next();
 
                         let target = line[first_space..colon_idx].trim();
 
-                        let inputs = input_tokens.collect::<Vec::<_>>();
-                        let inputs_wo_rule_str = inputs_str[rule.len() + 1..].trim_end();
-
                         let loc = Loc(self.cursor);
+                        let (inputs, inputs_templates, inputs_wo_rule_str) = if let Some(rule_len) = rule.map(|r| r.len()) {
+                            let inputs = input_tokens.collect::<Vec::<_>>();
+                            let inputs_templates = inputs.iter().map(|input| Template::new(input, loc)).collect();
+                            let inputs_wo_rule_str = inputs_str[rule_len + 1..].trim_end();
+                            (inputs, inputs_templates, inputs_wo_rule_str)
+                        } else {
+                            (Vec::new(), Vec::new(), "")
+                        };
 
                         let target_template = Template::new(target, loc);
-                        let inputs_templates = inputs.iter().map(|input| Template::new(input, loc)).collect();
 
                         let deps_templates = deps.iter().map(|input| Template::new(input, loc)).collect();
-                        let job = PreprocessedJob {loc, target, deps_templates, inputs_templates, target_template, rule, inputs, inputs_wo_rule_str, deps, shadows: None};
+                        let job = PreprocessedJob {
+                            loc,
+                            target,
+                            deps_templates,
+                            inputs_templates,
+                            target_template,
+                            rule,
+                            inputs,
+                            inputs_wo_rule_str,
+                            deps,
+                            shadows: None,
+                            command: None,
+                        };
 
                         self.parsed.jobs.insert(target, job);
                         self.context = Context::Job {target, shadows: None}
@@ -408,7 +455,8 @@ impl<'a> Parser<'a> {
             parsed: Parsed {
                 defs: Defs::with_capacity(32),
                 jobs: StrHashMap::with_capacity(32),
-                rules: StrHashMap::with_capacity(32)
+                rules: StrHashMap::with_capacity(32),
+                phonys: StrHashSet::with_capacity(32),
             },
             context: Context::default()
         };
