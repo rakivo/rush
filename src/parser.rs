@@ -53,7 +53,31 @@ impl<'a> Rule<'a> {
     }
 }
 
-#[derive(Clone, Default)]
+pub enum Phony<'a> {
+    Phony {
+        command: String,
+    },
+    NotPhony {
+        inputs: Vec::<&'a str>,
+        inputs_str: &'a str,
+        deps: Vec::<&'a str>,
+    }
+}
+
+pub enum PreprocessedPhony<'a> {
+    Phony {
+        command: Template<'a>,
+    },
+    NotPhony {
+        inputs: Vec::<&'a str>,
+        inputs_str: &'a str,
+        inputs_templates: Vec::<Template<'a>>,
+
+        deps: Vec::<&'a str>,
+        deps_templates: Vec::<Template<'a>>
+    }
+}
+
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct PreprocessedJob<'a> {
     pub loc: Loc,
@@ -65,14 +89,7 @@ pub struct PreprocessedJob<'a> {
     pub target: &'a str,
     pub target_template: Template<'a>,
 
-    pub inputs: Vec::<&'a str>,
-    pub inputs_templates: Vec::<Template<'a>>,
-    pub inputs_wo_rule_str: &'a str,
-
-    pub command: Option::<Template<'a>>,
-
-    pub deps: Vec::<&'a str>,
-    pub deps_templates: Vec::<Template<'a>>
+    pub phony: PreprocessedPhony<'a>
 }
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
@@ -85,12 +102,7 @@ pub struct Job<'a> {
 
     pub shadows: Option::<Arc::<Defs<'a>>>,
 
-    pub inputs: Vec::<&'a str>,
-    pub inputs_str: &'a str,
-
-    pub command: Option::<String>,
-
-    pub deps: Vec::<&'a str>
+    pub phony: Phony<'a>
 }
 
 #[repr(transparent)]
@@ -129,57 +141,79 @@ impl<'a> Parsed<'a> {
                 Err(e) => report!(job.loc, "{e}")
             };
 
-            let mut inputs_str = String::with_capacity(job.inputs_wo_rule_str.len() + 10);
-            let inputs = job.inputs_templates.iter()
-                .zip(job.inputs.iter())
-                .map(|(template, ..)| {
-                    match template.compile(&job, &defs) {
-                        Ok(ok) => {
-                            let compiled = ok.leak() as &_;
-                            inputs_str.push_str(compiled);
-                            inputs_str.push(' ');
-                            compiled
-                        },
-                        Err(e) => report!(job.loc, "{e}")
+            let job = match &job.phony {
+                PreprocessedPhony::Phony { command } => {
+                    if !phonys.contains(job.target) {
+                        report!{
+                            job.loc,
+                            "mark {target} as phony for it to have a command",
+                            target = job.target
+                        }
                     }
-                }).collect::<Vec::<_>>();
 
-            if !inputs_str.is_empty() { _ = inputs_str.pop() }
-            let inputs_str = inputs_str.leak();
-
-            let deps = job.deps_templates.iter()
-                .zip(job.deps.iter())
-                .map(|(template, ..)| {
-                    match template.compile(&job, &defs) {
-                        Ok(ok) => ok.leak() as &_,
+                    let command = match command.compile(job, &defs) {
+                        Ok(ok) => ok,
                         Err(e) => report!(job.loc, "{e}")
-                    }
-                }).collect::<Vec::<_>>();
+                    };
 
-            let command = job.command.as_ref().map(|c| {
-                if !phonys.contains(job.target) {
-                    report!{
-                        job.loc,
-                        "mark {target} as phony for it to have a command",
-                        target = job.target
+                    Job {
+                        target,
+                        loc: job.loc,
+                        rule: job.rule,
+                        shadows: job.shadows.as_ref().map(Arc::clone),
+                        phony: Phony::Phony { command }
                     }
                 }
-                match c.compile(job, &defs) {
-                    Ok(ok) => ok,
-                    Err(e) => report!(job.loc, "{e}")
-                }
-            });
+                PreprocessedPhony::NotPhony {
+                    inputs,
+                    inputs_templates,
+                    inputs_str: inputs_wo_rule_str,
+                    deps,
+                    deps_templates
+                } => {
+                    let mut inputs_str = String::with_capacity(inputs_wo_rule_str.len() + 10);
+                    let inputs = inputs_templates.iter()
+                        .zip(inputs.iter())
+                        .map(|(template, ..)| {
+                            match template.compile(&job, &defs) {
+                                Ok(ok) => {
+                                    let compiled = ok.leak() as &_;
+                                    inputs_str.push_str(compiled);
+                                    inputs_str.push(' ');
+                                    compiled
+                                },
+                                Err(e) => report!(job.loc, "{e}")
+                            }
+                        }).collect::<Vec::<_>>();
 
-            Some((target, Job {
-                deps,
-                target,
-                inputs,
-                command,
-                inputs_str,
-                loc: job.loc,
-                rule: job.rule,
-                shadows: job.shadows.as_ref().map(Arc::clone)
-            }))
+                    if !inputs_str.is_empty() { _ = inputs_str.pop() }
+                    let inputs_str = inputs_str.leak();
+
+                    let deps = deps_templates.iter()
+                        .zip(deps.iter())
+                        .map(|(template, ..)| {
+                            match template.compile(&job, &defs) {
+                                Ok(ok) => ok.leak() as &_,
+                                Err(e) => report!(job.loc, "{e}")
+                            }
+                        }).collect::<Vec::<_>>();
+
+                    Job {
+                        target,
+                        loc: job.loc,
+                        rule: job.rule,
+                        shadows: job.shadows.as_ref().map(Arc::clone),
+                        phony: Phony::NotPhony {
+                            deps,
+                            inputs,
+                            inputs_str
+                        }
+                    }
+                }
+            };
+
+
+            Some((target, job))
         }).collect::<StrHashMap::<_>>();
 
         Processed {jobs, rules, defs}
@@ -280,7 +314,9 @@ impl<'a> Parser<'a> {
                     "command" => {
                         let command_ = line[second_space + 1 + 1..].trim();
                         let command_loc = Loc(self.cursor);
-                        self.parsed.job_mut(target).command = Some(Template::new(command_, command_loc));
+                        let command = Template::new(command_, command_loc);
+                        let job = self.parsed.job_mut(target);
+                        job.phony = PreprocessedPhony::Phony { command };
                     },
                     name => {
                         let def = parse_def();
@@ -412,16 +448,17 @@ impl<'a> Parser<'a> {
                         let deps_templates = deps.iter().map(|input| Template::new(input, loc)).collect();
                         let job = PreprocessedJob {
                             loc,
-                            target,
-                            deps_templates,
-                            inputs_templates,
-                            target_template,
                             rule,
-                            inputs,
-                            inputs_wo_rule_str,
-                            deps,
+                            target,
+                            target_template,
+                            phony: PreprocessedPhony::NotPhony {
+                                inputs,
+                                inputs_templates,
+                                inputs_str: inputs_wo_rule_str,
+                                deps,
+                                deps_templates
+                            },
                             shadows: None,
-                            command: None,
                         };
 
                         self.parsed.jobs.insert(target, job);

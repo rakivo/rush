@@ -1,6 +1,6 @@
 use crate::types::StrDashSet;
 use crate::consts::PHONY_TARGETS;
-use crate::parser::{Job, Rule, Processed};
+use crate::parser::{Job, Rule, Phony, Processed};
 use crate::command::{Command, MetadataCache, CommandOutput};
 use crate::graph::{Graph, TransitiveDeps, topological_sort_levels};
 
@@ -62,15 +62,20 @@ impl<'a> CommandRunner<'a> {
 
     #[inline]
     fn run_phony(&self, job: &Job<'a>) {
-        if let Some(Some(rule)) = job.rule.as_ref().map(|rule| self.context.rules.get(rule)) {
-            self.execute_job(job, rule);
-        }
-
-        if let Some(Ok(command_output)) = job.command.to_owned().map(|command| {
-            let command = Command { command, description: None };
-            self.execute_command(command, job.target)
-        }) {
-            _ = self.print(command_output.to_string());
+        match &job.phony {
+            Phony::Phony { command } => {
+                if let Some(Some(rule)) = job.rule.as_ref().map(|rule| self.context.rules.get(rule)) {
+                    self.execute_job(job, rule);
+                }
+                
+                if let Ok(command_output) = {
+                    let command = Command { command: command.to_owned(), description: None };
+                    self.execute_command(command, job.target)
+                } {
+                    _ = self.print(command_output.to_string());
+                }
+            },
+            Phony::NotPhony { .. } => unreachable!()
         }
     }
 
@@ -226,24 +231,33 @@ impl<'a> CommandRunner<'a> {
         while let Some(job) = stack.pop() {
             if self.processed.contains(job.target) { continue }
 
-            let mut all_deps_resolved = true;
-            for input in job.inputs.iter() {
-                if !self.processed.contains(input) {
-                    if let Some(dep_job) = self.context.jobs.get(input) {
-                        stack.push(job);
-                        stack.push(dep_job);
-                        all_deps_resolved = false;
-                        break
-                    } else {
-                        #[cfg(feature = "dbg")] {
-                            let msg = format!("dependency {input} is assumed to exist\n");
-                            _ = self.print(msg)
+            match &job.phony {
+                Phony::Phony { .. } => {
+                    self.run_phony(job);
+                    return
+                },
+                Phony::NotPhony { inputs, .. } => {
+                    let mut all_deps_resolved = true;
+                    for input in inputs.iter() {
+                        if !self.processed.contains(input) {
+                            if let Some(dep_job) = self.context.jobs.get(input) {
+                                stack.push(job);
+                                stack.push(dep_job);
+                                all_deps_resolved = false;
+                                break
+                            } else {
+                                #[cfg(feature = "dbg")] {
+                                    let msg = format!("dependency {input} is assumed to exist\n");
+                                    _ = self.print(msg)
+                                }
+                            }
                         }
                     }
+
+                    if !all_deps_resolved { continue }
                 }
             }
 
-            if !all_deps_resolved { continue }
 
             if let Some(ref job_rule) = job.rule {
                 if let Some(rule) = self.context.rules.get(job_rule) {

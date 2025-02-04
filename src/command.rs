@@ -1,5 +1,5 @@
-use crate::types::StrDashMap;
 use crate::parser::Job;
+use crate::types::StrDashMap;
 use crate::graph::TransitiveDeps;
 
 use std::io;

@@ -1,5 +1,5 @@
-use crate::parser::Processed;
 use crate::cr::DefaultTarget;
+use crate::parser::{Phony, Processed};
 use crate::types::{StrHashMap, StrHashSet};
 
 use std::fs;
@@ -24,10 +24,15 @@ pub fn build_dependency_graph<'a>(parsed: &'a Processed) -> (Graph<'a>, DefaultT
         visited.insert(node);
 
         let mut deps = parsed.jobs.get(node).map(|job| {
-            job.inputs.iter()
-                .chain(job.deps.iter())
-                .cloned()
-                .collect::<StrHashSet>()
+            match &job.phony {
+                Phony::Phony { .. } => { StrHashSet::default() },
+                Phony::NotPhony { deps, inputs, .. } => {
+                    inputs.iter()
+                        .chain(deps.iter())
+                        .cloned()
+                        .collect::<StrHashSet>()
+                } 
+            }
         }).unwrap_or_default();
 
         if let Some(job) = parsed.jobs.get(node) {

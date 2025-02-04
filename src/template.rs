@@ -1,5 +1,5 @@
 use crate::loc::Loc;
-use crate::parser::{PreprocessedJob, Defs, Job};
+use crate::parser::{Job, Defs, Phony, PreprocessedJob, PreprocessedPhony};
 
 #[derive(Clone)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
@@ -96,7 +96,10 @@ impl Template<'_> {
             let s = match c {
                 TemplateChunk::Static(s) | TemplateChunk::JoinedStatic(s) => Ok(*s),
                 TemplateChunk::Placeholder(placeholder) | TemplateChunk::JoinedPlaceholder(placeholder) => match *placeholder {
-                    "in" => Ok(job.inputs_str),
+                    "in" => Ok(match job.phony {
+                        Phony::Phony { .. } => "",
+                        Phony::NotPhony { inputs_str, .. } => { inputs_str },
+                    }),
                     "out" => Ok(job.target),
                     _ => job.shadows
                         .as_ref()
@@ -116,7 +119,10 @@ impl Template<'_> {
             let s = match c {
                 TemplateChunk::Static(s) | TemplateChunk::JoinedStatic(s) => Ok(*s),
                 TemplateChunk::Placeholder(placeholder) | TemplateChunk::JoinedPlaceholder(placeholder) => match *placeholder {
-                    "in" => Ok(job.inputs_wo_rule_str),
+                    "in" => Ok(match job.phony {
+                        PreprocessedPhony::Phony { .. } => "",
+                        PreprocessedPhony::NotPhony { inputs_str, .. } => { inputs_str },
+                    }),
                     "out" => Ok(job.target),
                     _ => job.shadows
                         .as_ref()
