@@ -74,7 +74,7 @@ impl<'a> CommandRunner<'a> {
                         None => {
                             let e = report_fmt!{
                                 job.loc,
-                                "undefined job: {target}\nNOTE: in phony jobs you can only alias jobs, no input permitted here",
+                                "undefined job: {target}\nNOTE: in phony jobs you can only alias jobs, no input permitted here\n",
                                 target = job.target
                             };
                             _ = self.print(e);
@@ -112,7 +112,6 @@ impl<'a> CommandRunner<'a> {
             let mut stdout_handle = io::stdout().lock();
             for s in stdout_recv {
                 _ = stdout_handle.write_all(s.as_bytes());
-                _ = stdout_handle.flush();
             }
         });
 
