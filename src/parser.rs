@@ -1,6 +1,7 @@
 use crate::loc::Loc;
 use crate::template::Template;
 use crate::types::{StrHashMap, StrHashSet};
+use crate::consts::syntax::{RULE, BUILD, PHONY, DEPFILE, COMMAND, COMMENT, DESCRIPTION, LINE_ESCAPE};
 
 use std::sync::Arc;
 use std::str::Lines;
@@ -39,16 +40,14 @@ impl<'a> Rule<'a> {
     #[inline]
     fn new(
         command: &'a str,
-        description: Option::<&'a str>,
-        depfile_path: Option::<&'a str>,
         command_loc: Loc,
-        description_loc: Loc,
-        depfile_path_loc: Loc,
+        description: Option::<Description<'a>>,
+        depfile_path: Option::<DepfilePath<'a>>
     ) -> Self {
         Self {
-            depfile: depfile_path.map(|dp| Template::new(dp, depfile_path_loc)),
             command: Template::new(command, command_loc),
-            description: description.map(|d| Template::new(d, description_loc)),
+            depfile: depfile_path.map(|dp| Template::new(dp.path, dp.loc)),
+            description: description.map(|d| Template::new(d.description, d.loc)),
         }
     }
 }
@@ -212,7 +211,6 @@ impl<'a> Parsed<'a> {
                 }
             };
 
-
             Some((target, job))
         }).collect::<StrHashMap::<_>>();
 
@@ -226,6 +224,16 @@ pub struct Processed<'a> {
     pub rules: StrHashMap::<'a, Rule<'a>>,
     pub jobs: StrHashMap::<'a, Job<'a>>,
 }
+
+#[repr(packed)]
+#[derive(Copy, Clone)]
+#[cfg_attr(feature = "dbg", derive(Debug))]
+struct DepfilePath<'a> { loc: Loc, path: &'a str }
+
+#[repr(packed)]
+#[derive(Copy, Clone)]
+#[cfg_attr(feature = "dbg", derive(Debug))]
+struct Description<'a> { loc: Loc, description: &'a str }
 
 #[derive(Default)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
@@ -241,11 +249,8 @@ enum Context<'a> {
 
         already_inserted: bool,
 
-        depfile_path: Option::<&'a str>,
-        depfile_path_loc: Option::<Loc>,
-
-        description: Option::<&'a str>,
-        description_loc: Option::<Loc>,
+        depfile_path: Option::<DepfilePath<'a>>,
+        description: Option::<Description<'a>>,
     }
 }
 
@@ -281,7 +286,7 @@ impl<'a> Parser<'a> {
                 return
             }
 
-            if matches!(first, Some((.., "build" | "phony" | "rule" ))) {
+            if matches!(first, Some((.., BUILD | PHONY | RULE))) {
                 self.finish_job();
                 self.context = Context::Global
             }
@@ -308,10 +313,11 @@ impl<'a> Parser<'a> {
             Def { value }
         };
 
+        // TODO: we should move context here and this match should return another updated context
         match &mut self.context {
             Context::Job { target, shadows, .. } => {
                 match first_token {
-                    "command" => {
+                    COMMAND => {
                         let command_ = line[second_space + 1 + 1..].trim();
                         let command_loc = Loc(self.cursor);
                         let command = Template::new(command_, command_loc);
@@ -331,65 +337,59 @@ impl<'a> Parser<'a> {
                     }
                 }
             },
-            Context::Rule { name, depfile_path, depfile_path_loc, already_inserted, description_loc, description } => {
+            Context::Rule { name, depfile_path, already_inserted, description } => {
                 match first_token {
-                    "command" => {
+                    RULE => {
                         let command = line[second_space + 1 + 1..].trim();
                         let command_loc = self.cursor;
                         let rule = Rule::new(
                             command,
+                            Loc(command_loc),
                             *description,
                             *depfile_path,
-                            Loc(command_loc),
-                            description_loc.unwrap_or(Loc(command_loc)),
-                            depfile_path_loc.unwrap_or(Loc(command_loc))
                         );
                         self.parsed.rules.insert(name, rule);
                         self.context = Context::Rule {
                             name,
                             already_inserted: true,
-                            depfile_path: *depfile_path,
                             description: *description,
-                            description_loc: *description_loc,
-                            depfile_path_loc: *depfile_path_loc
+                            depfile_path: *depfile_path,
                         }
                     },
-                    "depfile" => {
-                        let Def {value: depfile_path} = parse_def();
+                    DEPFILE => {
+                        let Def {value: path} = parse_def();
+                        let loc = Loc(self.cursor);
+                        let depfile_path = DepfilePath {path, loc};
                         if *already_inserted {
                             let rule = self.parsed.rule_mut(name);
-                            let depfile = Template::new(depfile_path, Loc(self.cursor));
+                            let depfile = Template::new(depfile_path.path, depfile_path.loc);
                             rule.depfile = Some(depfile)
                         } else {
                             self.context = Context::Rule {
                                 name,
                                 already_inserted: true,
-                                depfile_path_loc: Some(Loc(self.cursor)),
                                 description: *description,
                                 depfile_path: Some(depfile_path),
-                                description_loc: *description_loc
                             }
                         }
                     },
-                    "description" => {
-                        let description_loc = Loc(self.cursor);
-                        let description_str = line[second_space + 1 + 1..].trim();
+                    DESCRIPTION => {
+                        let loc = Loc(self.cursor);
+                        let description = line[second_space + 1 + 1..].trim();
+                        let description = Description { loc, description };
                         if *already_inserted {
                             let rule = self.parsed.rule_mut(name);
-                            rule.description = Some(Template::new(description_str, description_loc));
+                            rule.description = Some(Template::new(description.description, description.loc));
                         } else {
-                            let description = Some(description_str);
                             self.context = Context::Rule {
                                 name,
-                                description,
-                                description_loc: Some(description_loc),
+                                description: Some(description),
                                 depfile_path: *depfile_path,
-                                depfile_path_loc: *depfile_path_loc,
                                 already_inserted: *already_inserted,
                             }
                         }
                     },
-                    _ => if line.chars().next() != Some('#') {
+                    _ => if line.chars().next() != Some(COMMENT) {
                         report!{
                             Loc(self.cursor),
                             "undefined property: `{first_token}`, existing properties are: `command`, `description`"
@@ -399,21 +399,19 @@ impl<'a> Parser<'a> {
             },
             Context::Global => {
                 match first_token {
-                    "phony" => {
+                    PHONY => {
                         let phony = line[first_space..].trim();
                         self.parsed.phonys.insert(phony);
                     },
-                    "rule" => {
+                    RULE => {
                         self.context = Context::Rule {
+                            description: None,
                             depfile_path: None,
-                            depfile_path_loc: None,
                             name: line[second_space..].trim_end(),
                             already_inserted: false,
-                            description: None,
-                            description_loc: None,
                         }
                     },
-                    "build" => {
+                    BUILD => {
                         let Some(colon_idx) = line.find(':') else {
                             report!(Loc(self.cursor), "expected colon after build target")
                         };
@@ -476,7 +474,7 @@ impl<'a> Parser<'a> {
 
     fn handle_newline_escape(&mut self, line: &'a str, lines: &mut Lines<'a>) -> &'a str {
         let mut full_line = line.trim_end();
-        while full_line.as_bytes().last() == Some(&b'$') {
+        while full_line.as_bytes().last() == Some(&(LINE_ESCAPE as _)) {
             let trimmed = full_line[..full_line.len() - 1].trim_end();
             let Some(next_line) = lines.next() else { break };
             self.cursor += 1;
@@ -500,7 +498,7 @@ impl<'a> Parser<'a> {
         let mut lines = content.lines();
         while let Some(line) = lines.next() {
             parser.cursor += 1;
-            if line.as_bytes().first() == Some(&b'#') { continue }
+            if line.as_bytes().first() == Some(&(COMMENT as _)) { continue }
             let line = parser.handle_newline_escape(line, &mut lines);
             parser.parse_line(line)
         } parser.parsed

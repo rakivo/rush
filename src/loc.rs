@@ -7,9 +7,8 @@ impl Loc {
     #[inline(always)]
     #[cfg_attr(feature = "dbg", track_caller)]
     pub fn report(literal: &str) -> ! {
-        #[cfg(feature = "dbg")] {
-            panic!("{literal}")
-        } #[cfg(not(feature = "dbg"))] {
+        #[cfg(feature = "dbg")] { panic!("{literal}") }
+        #[cfg(not(feature = "dbg"))] {
             eprintln!("{literal}");
             std::process::exit(1)
         }

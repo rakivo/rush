@@ -35,6 +35,7 @@ pub fn build_dependency_graph<'a>(parsed: &'a Processed) -> (Graph<'a>, DefaultT
             }
         }).unwrap_or_default();
 
+        // check if depfile exists, if it does => read it, extend our deps with the ones that are listed in the .d file
         if let Some(job) = parsed.jobs.get(node) {
             if let Some(Some(rule)) = job.rule.as_ref().map(|rule| parsed.rules.get(rule)) {
                 if let Some(ref depfile_template) = rule.depfile {
@@ -46,12 +47,8 @@ pub fn build_dependency_graph<'a>(parsed: &'a Processed) -> (Graph<'a>, DefaultT
                         let depfile = Box::leak(depfile.into_boxed_str());
                         let colon_idx = depfile.find(':');
                         let colon_idx = {
-                            #[cfg(feature = "dbg")] {
-                                colon_idx.unwrap()
-                            }
-                            #[cfg(not(feature = "dbg"))] unsafe {
-                                colon_idx.unwrap_unchecked()
-                            }
+                            #[cfg(feature = "dbg")] { colon_idx.unwrap() }
+                            #[cfg(not(feature = "dbg"))] unsafe { colon_idx.unwrap_unchecked() }
                         };
                         let depfile_deps = depfile[colon_idx + 1..]
                             .split_ascii_whitespace()
@@ -107,6 +104,8 @@ pub fn build_dependency_graph<'a>(parsed: &'a Processed) -> (Graph<'a>, DefaultT
             }
         }
 
+        // find a job that does not act as an input anywhere,
+        // then sort those by first appearing in the source code row-wise
         parsed.jobs.keys()
             .filter(|job| !reverse_graph.contains_key(*job))
             .map(|t| unsafe { parsed.jobs.get(t).unwrap_unchecked() })
