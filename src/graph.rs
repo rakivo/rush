@@ -37,7 +37,8 @@ pub fn build_dependency_graph<'a>(parsed: &'a Processed) -> (Graph<'a>, DefaultT
 
         // check if depfile exists, if it does => read it, extend our deps with the ones that are listed in the .d file
         if let Some(job) = parsed.jobs.get(node) {
-            if let Some(Some(rule)) = job.rule.as_ref().map(|rule| parsed.rules.get(rule)) {
+            
+            if let Some(Some(rule)) = job.rule().map(|rule| parsed.rules.get(rule)) {
                 if let Some(ref depfile_template) = rule.depfile {
                     let depfile_path = match depfile_template.compile_(job, &parsed.defs) {
                         Ok(ok) => ok,

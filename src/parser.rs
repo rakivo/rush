@@ -3,6 +3,7 @@ use crate::template::Template;
 use crate::types::{StrHashMap, StrHashSet};
 use crate::consts::syntax::{RULE, BUILD, PHONY, DEPFILE, COMMAND, COMMENT, DESCRIPTION, LINE_ESCAPE};
 
+use std::mem;
 use std::sync::Arc;
 use std::str::Lines;
 use std::fs::{self, File};
@@ -52,22 +53,30 @@ impl<'a> Rule<'a> {
     }
 }
 
+#[cfg_attr(feature = "dbg", derive(Debug))]
 pub enum Phony<'a> {
     Phony {
         command: String,
+        aliases: Vec::<String>
     },
     NotPhony {
+        rule: Option::<&'a str>,
         inputs: Vec::<&'a str>,
         inputs_str: &'a str,
         deps: Vec::<&'a str>,
     }
 }
 
+#[cfg_attr(feature = "dbg", derive(Debug))]
 pub enum PreprocessedPhony<'a> {
     Phony {
         command: Template<'a>,
+        aliases: Vec::<&'a str>,
+        aliases_templates: Vec::<Template<'a>>,
     },
     NotPhony {
+        rule: Option::<&'a str>,
+
         inputs: Vec::<&'a str>,
         inputs_str: &'a str,
         inputs_templates: Vec::<Template<'a>>,
@@ -81,8 +90,6 @@ pub enum PreprocessedPhony<'a> {
 pub struct PreprocessedJob<'a> {
     pub loc: Loc,
 
-    pub rule: Option::<&'a str>,
-
     pub shadows: Option::<Arc::<Defs<'a>>>,
 
     pub target: &'a str,
@@ -95,13 +102,21 @@ pub struct PreprocessedJob<'a> {
 pub struct Job<'a> {
     pub loc: Loc,
 
-    pub rule: Option::<&'a str>,
-
     pub target: &'a str,
 
     pub shadows: Option::<Arc::<Defs<'a>>>,
 
     pub phony: Phony<'a>
+}
+
+impl<'a> Job<'a> {
+    #[inline]
+    pub fn rule(&self) -> Option::<&'a str> {
+        match self.phony {
+            Phony::Phony { .. } => None,
+            Phony::NotPhony { rule, .. } => rule,
+        }
+    }
 }
 
 #[repr(transparent)]
@@ -133,7 +148,13 @@ impl<'a> Parsed<'a> {
     pub fn into_processed(self) -> Processed<'a> {
         let Parsed { defs, jobs, rules, phonys } = self;
         let jobs = jobs.iter().filter_map(|(.., job)| {
-            if job.rule.as_ref().map_or(false, |rule| !rules.contains_key(rule)) { return None }
+            if matches!{
+                job.phony,
+                PreprocessedPhony::NotPhony { rule, .. }
+                if rule.map_or(false, |rule| !rules.contains_key(rule))
+            } {
+                return None
+            }
 
             let target = match job.target_template.compile(&job, &defs) {
                 Ok(ok) => ok.leak() as &_,
@@ -141,7 +162,7 @@ impl<'a> Parsed<'a> {
             };
 
             let job = match &job.phony {
-                PreprocessedPhony::Phony { command } => {
+                PreprocessedPhony::Phony { command, aliases_templates, aliases } => {
                     if !phonys.contains(job.target) {
                         report!{
                             job.loc,
@@ -155,22 +176,31 @@ impl<'a> Parsed<'a> {
                         Err(e) => report!(job.loc, "{e}")
                     };
 
+                    let aliases = aliases_templates.iter()
+                        .zip(aliases.iter())
+                        .map(|(template, ..)| {
+                            match template.compile(&job, &defs) {
+                                Ok(ok) => ok,
+                                Err(e) => report!(job.loc, "{e}")
+                            }
+                        }).collect::<Vec::<_>>();
+
                     Job {
                         target,
                         loc: job.loc,
-                        rule: job.rule,
                         shadows: job.shadows.as_ref().map(Arc::clone),
-                        phony: Phony::Phony { command }
+                        phony: Phony::Phony { command, aliases }
                     }
                 }
                 PreprocessedPhony::NotPhony {
+                    rule,
                     inputs,
+                    inputs_str,
                     inputs_templates,
-                    inputs_str: inputs_wo_rule_str,
                     deps,
                     deps_templates
                 } => {
-                    let mut inputs_str = String::with_capacity(inputs_wo_rule_str.len() + 10);
+                    let mut inputs_str = String::with_capacity(inputs_str.len() + 10);
                     let inputs = inputs_templates.iter()
                         .zip(inputs.iter())
                         .map(|(template, ..)| {
@@ -200,12 +230,12 @@ impl<'a> Parsed<'a> {
                     Job {
                         target,
                         loc: job.loc,
-                        rule: job.rule,
                         shadows: job.shadows.as_ref().map(Arc::clone),
                         phony: Phony::NotPhony {
                             deps,
                             inputs,
-                            inputs_str
+                            inputs_str,
+                            rule: *rule,
                         }
                     }
                 }
@@ -322,7 +352,33 @@ impl<'a> Parser<'a> {
                         let command_loc = Loc(self.cursor);
                         let command = Template::new(command_, command_loc);
                         let job = self.parsed.job_mut(target);
-                        job.phony = PreprocessedPhony::Phony { command };
+                        job.phony = match &mut job.phony {
+                            PreprocessedPhony::Phony {
+                                aliases,
+                                aliases_templates,
+                                ..
+                            } => PreprocessedPhony::Phony {
+                                command,
+                                aliases: mem::take(aliases),
+                                aliases_templates: mem::take(aliases_templates)
+                            },
+                            PreprocessedPhony::NotPhony {
+                                rule,
+                                inputs,
+                                deps,
+                                ..
+                            } => {
+                                let mut aliases = Vec::with_capacity(inputs.len() + 1);
+                                if let Some(rule) = rule { aliases.push(*rule) }
+                                aliases.extend(mem::take(inputs).into_iter());
+                                aliases.extend(mem::take(deps).into_iter());
+                                PreprocessedPhony::Phony {
+                                    command: Template::new("", Loc(0)),
+                                    aliases_templates: aliases.iter().map(|a| Template::new(a, job.loc)).collect(),
+                                    aliases
+                                }
+                            },
+                        };
                     },
                     name => {
                         let def = parse_def();
@@ -339,7 +395,7 @@ impl<'a> Parser<'a> {
             },
             Context::Rule { name, depfile_path, already_inserted, description } => {
                 match first_token {
-                    RULE => {
+                    COMMAND => {
                         let command = line[second_space + 1 + 1..].trim();
                         let command_loc = self.cursor;
                         let rule = Rule::new(
@@ -402,6 +458,30 @@ impl<'a> Parser<'a> {
                     PHONY => {
                         let phony = line[first_space..].trim();
                         self.parsed.phonys.insert(phony);
+
+                        if let Some(job) = self.parsed.jobs.get_mut(phony) {
+                            if !matches!(job.phony, PreprocessedPhony::Phony { .. }) {
+                                job.phony = match &mut job.phony {
+                                    PreprocessedPhony::NotPhony {
+                                        rule,
+                                        inputs,
+                                        deps,
+                                        ..
+                                    } => {
+                                        let mut aliases = Vec::with_capacity(inputs.len() + 1);
+                                        if let Some(rule) = rule { aliases.push(*rule) }
+                                        aliases.extend(mem::take(inputs).into_iter());
+                                        aliases.extend(mem::take(deps).into_iter());
+                                        PreprocessedPhony::Phony {
+                                            command: Template::new("", Loc(0)),
+                                            aliases_templates: aliases.iter().map(|a| Template::new(a, job.loc)).collect(),
+                                            aliases
+                                        }
+                                    },
+                                    _ => unreachable!()
+                                }
+                            }
+                        }
                     },
                     RULE => {
                         self.context = Context::Rule {
@@ -418,45 +498,68 @@ impl<'a> Parser<'a> {
                         let post_colon = line[colon_idx + 1..].trim();
                         let or_idx = post_colon.find('|');
 
-                        let (inputs_str, deps) = if let Some(or_idx) = or_idx {
-                            let inputs_str = post_colon[..or_idx].trim_end();
-                            let deps = post_colon[or_idx + 1..].split_ascii_whitespace().collect();
-                            (inputs_str, deps)
-                        } else {
-                            (post_colon, Vec::new())
-                        };
-
-                        let mut input_tokens = inputs_str.split_ascii_whitespace();
-                        let rule = input_tokens.next();
-
-                        let target = line[first_space..colon_idx].trim();
-
                         let loc = Loc(self.cursor);
-                        let (inputs, inputs_templates, inputs_wo_rule_str) = if let Some(rule_len) = rule.map(|r| r.len()) {
-                            let inputs = input_tokens.collect::<Vec::<_>>();
-                            let inputs_templates = inputs.iter().map(|input| Template::new(input, loc)).collect();
-                            let inputs_wo_rule_str = inputs_str[rule_len + 1..].trim_end();
-                            (inputs, inputs_templates, inputs_wo_rule_str)
-                        } else {
-                            (Vec::new(), Vec::new(), "")
-                        };
-
+                        let target = line[first_space..colon_idx].trim();
                         let target_template = Template::new(target, loc);
 
-                        let deps_templates = deps.iter().map(|input| Template::new(input, loc)).collect();
-                        let job = PreprocessedJob {
-                            loc,
-                            rule,
-                            target,
-                            target_template,
-                            phony: PreprocessedPhony::NotPhony {
-                                inputs,
-                                inputs_templates,
-                                inputs_str: inputs_wo_rule_str,
-                                deps,
-                                deps_templates
-                            },
-                            shadows: None,
+                        let job = if self.parsed.phonys.contains(target) {
+                            let aliases_str = if let Some(or_idx) = or_idx {
+                                post_colon[..or_idx].trim_end()
+                            } else {
+                                post_colon.trim_end()
+                            };
+
+                            let aliases_tokens = aliases_str.split_ascii_whitespace();
+                            let aliases = aliases_tokens.collect::<Vec::<_>>();
+                            let aliases_templates = aliases.iter().map(|alias| Template::new(alias, loc)).collect();
+
+                            PreprocessedJob {
+                                loc,
+                                target,
+                                target_template,
+                                phony: PreprocessedPhony::Phony {
+                                    command: Template::new("", Loc(0)),
+                                    aliases,
+                                    aliases_templates
+                                },
+                                shadows: None,
+                            }
+                        } else {
+                            let (inputs_str, deps) = if let Some(or_idx) = or_idx {
+                                let inputs_str = post_colon[..or_idx].trim_end();
+                                let deps = post_colon[or_idx + 1..].split_ascii_whitespace().collect();
+                                (inputs_str, deps)
+                            } else {
+                                (post_colon, Vec::new())
+                            };
+
+                            let mut input_tokens = inputs_str.split_ascii_whitespace();
+                            let rule = input_tokens.next();
+
+                            let (inputs, inputs_str, inputs_templates) = if let Some(rule_len) = rule.map(|r| r.len()) {
+                                let inputs = input_tokens.collect::<Vec::<_>>();
+                                let inputs_str = inputs_str[rule_len + 1..].trim_end();
+                                let inputs_templates = inputs.iter().map(|input| Template::new(input, loc)).collect();
+                                (inputs, inputs_str, inputs_templates)
+                            } else {
+                                (Vec::new(), "", Vec::new())
+                            };
+
+                            let deps_templates = deps.iter().map(|input| Template::new(input, loc)).collect();
+                            PreprocessedJob {
+                                loc,
+                                target,
+                                target_template,
+                                phony: PreprocessedPhony::NotPhony {
+                                    rule,
+                                    inputs,
+                                    inputs_str,
+                                    inputs_templates,
+                                    deps,
+                                    deps_templates
+                                },
+                                shadows: None,
+                            }
                         };
 
                         self.parsed.jobs.insert(target, job);

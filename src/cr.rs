@@ -22,6 +22,7 @@ type StdoutThread = JoinHandle::<()>;
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct CommandRunner<'a> {
     stdout: Stdout,
+    graph: Graph<'a>,
     context: &'a Processed<'a>,
     processed: StrDashSet::<'a>,
     metadata_cache: MetadataCache<'a>,
@@ -32,11 +33,13 @@ impl<'a> CommandRunner<'a> {
     #[inline]
     fn new(
         stdout: Stdout,
+        graph: Graph<'a>,
         context: &'a Processed<'a>,
         transitive_deps: &'a TransitiveDeps<'a>
     ) -> Self {
         let n = context.jobs.len();
         Self {
+            graph,
             stdout,
             context,
             processed: DashSet::with_capacity_and_hasher(n, FxBuildHasher::default()),
@@ -61,12 +64,24 @@ impl<'a> CommandRunner<'a> {
     }
 
     #[inline]
+    #[track_caller]
     fn run_phony(&self, job: &Job<'a>) {
         match &job.phony {
-            Phony::Phony { command } => {
-                if let Some(Some(rule)) = job.rule.as_ref().map(|rule| self.context.rules.get(rule)) {
-                    self.execute_job(job, rule);
-                }
+            Phony::Phony { command, aliases, .. } => {
+                aliases.iter().filter_map(|_job| {
+                    match self.context.jobs.get(_job.as_str()) {
+                        Some(j) => Some(j),
+                        None => {
+                            let e = report_fmt!{
+                                job.loc,
+                                "undefined job: {target}\nNOTE: in phony jobs you can only alias jobs, no input permitted here",
+                                target = job.target
+                            };
+                            _ = self.print(e);
+                            None
+                        }
+                    }
+                }).for_each(|job| self._run_target(job));
                 
                 if let Ok(command_output) = {
                     let command = Command { command: command.to_owned(), description: None };
@@ -104,6 +119,19 @@ impl<'a> CommandRunner<'a> {
         (stdout, writer)
     }
 
+    fn _run_target(&self, job: &Job<'a>) {
+        let levels = {
+            let subgraph = Self::build_subgraph(&self.graph, job.target, self.transitive_deps);
+            topological_sort_levels(&subgraph)
+        };
+
+        levels.into_iter().for_each(|level| {
+            level.into_par_iter().filter_map(|t| self.context.jobs.get(t)).for_each(|job| {
+                self._resolve_and_run(job);
+            });
+        });
+    }
+
     pub fn run_target(
         context: &'a Processed,
         graph: Graph<'a>,
@@ -111,7 +139,7 @@ impl<'a> CommandRunner<'a> {
         job: &Job<'a>
     ) {
         let (stdout, writer) = Self::stdout_thread();
-        let cb = Self::new(stdout, context, transitive_deps);
+        let cb = Self::new(stdout, graph, context, transitive_deps);
 
         if PHONY_TARGETS.contains(&job.target) {
             cb.run_phony(job);
@@ -119,17 +147,7 @@ impl<'a> CommandRunner<'a> {
             return
         }
 
-        let levels = {
-            let subgraph = Self::build_subgraph(&graph, job.target, &transitive_deps);
-            topological_sort_levels(&subgraph)
-        };
-
-        levels.into_iter().for_each(|level| {
-            level.into_par_iter().filter_map(|t| context.jobs.get(t)).for_each(|job| {
-                cb._resolve_and_run(job);
-            });
-        });
-
+        cb._run_target(job);
         cb.drop(writer);
     }
 
@@ -147,7 +165,7 @@ impl<'a> CommandRunner<'a> {
         };
 
         let (stdout, writer) = Self::stdout_thread();
-        let cb = Self::new(stdout, context, transitive_deps);
+        let cb = Self::new(stdout, graph, context, transitive_deps);
 
         levels.into_iter().for_each(|level| {
             level.into_par_iter().filter_map(|t| context.jobs.get(t)).for_each(|job| {
@@ -236,7 +254,7 @@ impl<'a> CommandRunner<'a> {
                     self.run_phony(job);
                     return
                 },
-                Phony::NotPhony { inputs, .. } => {
+                Phony::NotPhony { rule, inputs, .. } => {
                     let mut all_deps_resolved = true;
                     for input in inputs.iter() {
                         if !self.processed.contains(input) {
@@ -255,22 +273,21 @@ impl<'a> CommandRunner<'a> {
                     }
 
                     if !all_deps_resolved { continue }
-                }
-            }
 
-
-            if let Some(ref job_rule) = job.rule {
-                if let Some(rule) = self.context.rules.get(job_rule) {
-                    self.processed.insert(job.target);
-                    if self.execute_job(job, rule) { continue }
-                } else {
-                    let err = report_fmt!{
-                        job.loc,
-                        "no rule named: {rule} found for job {target}\n",
-                        rule = job_rule,
-                        target = job.target
-                    };
-                    _ = self.print(err)
+                    if let Some(ref job_rule) = rule {
+                        if let Some(rule) = self.context.rules.get(job_rule) {
+                            self.processed.insert(job.target);
+                            if self.execute_job(job, rule) { continue }
+                        } else {
+                            let err = report_fmt!{
+                                job.loc,
+                                "no rule named: {rule} found for job {target}\n",
+                                rule = job_rule,
+                                target = job.target
+                            };
+                            _ = self.print(err)
+                        }
+                    }
                 }
             }
         }

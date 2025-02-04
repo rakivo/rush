@@ -24,13 +24,11 @@ pub struct CommandOutput {
 }
 
 impl fmt::Display for CommandOutput {
+    #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let CommandOutput { stdout, stderr, command, description } = self;
-        write!{
-            f,
-            "{command}\n{stdout}{stderr}",
-            command = description.as_ref().unwrap_or(command),
-        }
+        let command = description.as_ref().unwrap_or(command);
+        write!(f, "{command}\n{stdout}{stderr}")
     }
 }
 
