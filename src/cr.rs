@@ -185,7 +185,7 @@ impl<'a> CommandRunner<'a> {
     fn print(&self, s: String) {
         #[cfg(feature = "dbg")] {
             self.stdout.send(s).unwrap()
-        } #[cfg(not(feature = "dbg"))] unsafe {
+        } #[cfg(not(feature = "dbg"))] {
             _ = self.stdout.send(s);
         }
     }
