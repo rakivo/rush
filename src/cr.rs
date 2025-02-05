@@ -1,7 +1,7 @@
 use crate::types::StrDashSet;
 use crate::consts::PHONY_TARGETS;
-use crate::parser::{Job, Rule, Phony, Processed};
 use crate::command::{Command, MetadataCache, CommandOutput};
+use crate::parser::{Job, Rule, Phony, Processed, DefaultJob};
 use crate::graph::{Graph, TransitiveDeps, topological_sort_levels};
 
 use std::sync::Arc;
@@ -13,8 +13,6 @@ use dashmap::DashSet;
 use rayon::prelude::*;
 use fxhash::FxBuildHasher;
 use crossbeam_channel::{unbounded, Sender};
-
-pub type DefaultTarget<'a> = Option::<&'a Job<'a>>;
 
 type Stdout = Sender::<String>;
 type StdoutThread = JoinHandle::<()>;
@@ -33,13 +31,13 @@ impl<'a> CommandRunner<'a> {
     pub fn run(
         context: &'a Processed,
         graph: Graph<'a>,
-        default_target: DefaultTarget<'a>,
+        default_job: DefaultJob<'a>,
         transitive_deps: &'a TransitiveDeps<'a>
     ) {
         let (stdout, writer) = Self::stdout_thread();
         let cb = Self::new(stdout, graph, context, transitive_deps);
 
-        let levels = if let Some(job) = default_target {
+        let levels = if let Some(job) = default_job {
             cb.run_target(job);
             cb.drop(writer);
             return
@@ -188,7 +186,7 @@ impl<'a> CommandRunner<'a> {
         #[cfg(feature = "dbg")] {
             self.stdout.send(s).unwrap()
         } #[cfg(not(feature = "dbg"))] unsafe {
-            self.stdout.send(s).unwrap_unchecked()
+            _ = self.stdout.send(s);
         }
     }
 

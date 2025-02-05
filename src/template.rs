@@ -120,4 +120,21 @@ impl Template<'_> {
     pub fn compile_prep(&self, job: &prep::Job, defs: &Defs) -> Result::<String, String> {
         self._compile(job.target, job.inputs_str(self.in_used), &job.shadows, defs)
     }
+
+    #[inline]
+    #[cfg_attr(feature = "dbg", track_caller)]
+    pub fn compile_def<'a>(&self, defs: &Defs) -> String {
+        self.chunks.iter().map(|c| {
+            match c {
+                TemplateChunk::Static(s) | TemplateChunk::JoinedStatic(s) => *s,
+                TemplateChunk::Placeholder(placeholder) | TemplateChunk::JoinedPlaceholder(placeholder) => match *placeholder {
+                    "in" => report!(self.loc, "$in is not allowed in variables definitions"),
+                    "out" => report!(self.loc, "$out is not allowed in variables definitions"),
+                    _ => defs.get(placeholder).map(|def| def.value).unwrap_or_else(|| {
+                        report!(self.loc, "undefined variable: {placeholder}")
+                    })
+                },
+            }
+        }).collect()
+    }
 }

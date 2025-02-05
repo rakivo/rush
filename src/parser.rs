@@ -1,7 +1,8 @@
 use crate::loc::Loc;
+use crate::consts::syntax::*;
 use crate::template::Template;
+use crate::consts::PHONY_TARGETS;
 use crate::types::{StrHashMap, StrHashSet};
-use crate::consts::syntax::{RULE, BUILD, PHONY, DEPFILE, COMMAND, COMMENT, DESCRIPTION, LINE_ESCAPE};
 
 use std::mem;
 use std::sync::Arc;
@@ -52,9 +53,20 @@ impl<'a> Rule<'a> {
 }
 
 pub type Shadows<'a> = Option::<Arc::<Defs<'a>>>;
+pub type DefaultJob<'a> = Option::<&'a Job<'a>>;
+pub type DefaultTarget = Option::<String>;
 
 pub mod prep {
     use super::*;
+
+    #[repr(packed)]
+    #[cfg_attr(feature = "dbg", derive(Debug))]
+    pub struct Target<'a> {
+        pub t: &'a str,
+        pub loc: Loc
+    }
+
+    pub type DefaultTarget<'a> = Option::<Target<'a>>;
 
     #[cfg_attr(feature = "dbg", derive(Debug))]
     pub enum Phony<'a> {
@@ -185,6 +197,7 @@ pub type Defs<'a> = StrHashMap::<'a, Def<'a>>;
 pub struct Parsed<'a> {
     defs: Defs<'a>,
     phonys: StrHashSet<'a>,
+    default_target: prep::DefaultTarget<'a>,
     jobs: StrHashMap::<'a, prep::Job<'a>>,
     rules: StrHashMap::<'a, Rule<'a>>,
 }
@@ -201,7 +214,7 @@ impl<'a> Parsed<'a> {
     }
 
     pub fn into_processed(self) -> Processed<'a> {
-        let Parsed { defs, jobs, rules, phonys } = self;
+        let Parsed { defs, jobs, rules, phonys, default_target } = self;
         let jobs = jobs.iter().filter_map(|(.., job)| {
             if matches!{
                 job.phony,
@@ -218,7 +231,7 @@ impl<'a> Parsed<'a> {
 
             let job = match &job.phony {
                 prep::Phony::Phony { command, aliases_templates, aliases } => {
-                    if !phonys.contains(job.target) {
+                    if  !phonys.contains(job.target) {
                         report!{
                             job.loc,
                             "mark {target} as phony for it to have a command",
@@ -299,13 +312,18 @@ impl<'a> Parsed<'a> {
             Some((target, job))
         }).collect::<StrHashMap::<_>>();
 
-        Processed {jobs, rules, defs}
+        let default_target = default_target.map(|dt| {
+            Template::new(dt.t, dt.loc).compile_def(&defs)
+        });
+
+        Processed {jobs, rules, defs, default_target}
     }
 }
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct Processed<'a> {
     pub defs: Defs<'a>,
+    pub default_target: DefaultTarget,
     pub rules: StrHashMap::<'a, Rule<'a>>,
     pub jobs: StrHashMap::<'a, Job<'a>>,
 }
@@ -492,6 +510,12 @@ impl<'a> Parser<'a> {
                             job.phony = job.into_phony(None)
                         }
                     },
+                    DEFAULT => {
+                        self.parsed.default_target = Some(prep::Target {
+                            t: line[first_space..].trim(),
+                            loc: Loc(self.cursor)
+                        });
+                    },
                     RULE => {
                         self.context = Context::Rule {
                             description: None,
@@ -546,10 +570,14 @@ impl<'a> Parser<'a> {
                             let rule = input_tokens.next();
 
                             let (inputs, inputs_str, inputs_templates) = if let Some(rule_len) = rule.map(|r| r.len()) {
-                                let inputs = input_tokens.collect::<Vec::<_>>();
-                                let inputs_str = inputs_str[rule_len + 1..].trim_end();
-                                let inputs_templates = inputs.iter().map(|input| Template::new(input, loc)).collect();
-                                (inputs, inputs_str, inputs_templates)
+                                if rule_len + 1 >= inputs_str.len() {
+                                    (Vec::new(), "", Vec::new())
+                                } else {
+                                    let inputs = input_tokens.collect::<Vec::<_>>();
+                                    let inputs_str = inputs_str[rule_len + 1..].trim_end();
+                                    let inputs_templates = inputs.iter().map(|input| Template::new(input, loc)).collect();
+                                    (inputs, inputs_str, inputs_templates)
+                                }
                             } else {
                                 (Vec::new(), "", Vec::new())
                             };
@@ -623,7 +651,12 @@ impl<'a> Parser<'a> {
                 defs: Defs::with_capacity(32),
                 jobs: StrHashMap::with_capacity(32),
                 rules: StrHashMap::with_capacity(32),
-                phonys: StrHashSet::with_capacity(32),
+                phonys: {
+                    let mut phonys = StrHashSet::from_iter(PHONY_TARGETS.iter().cloned());
+                    _ = phonys.try_reserve(32);
+                    phonys
+                },
+                default_target: None,
             },
             context: Context::Global
         };

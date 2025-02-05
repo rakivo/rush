@@ -5,6 +5,7 @@ pub mod syntax {
 
     pub const COMMAND: &str = "command";
     pub const DEPFILE: &str = "depfile";
+    pub const DEFAULT: &str = "default";
     pub const DESCRIPTION: &str = "description";
 
     pub const COMMENT: char = '#';

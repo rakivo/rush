@@ -1,6 +1,5 @@
-use crate::cr::DefaultTarget;
-use crate::parser::{Phony, Processed};
 use crate::types::{StrHashMap, StrHashSet};
+use crate::parser::{Phony, Processed, DefaultJob};
 
 use std::fs;
 use std::sync::Arc;
@@ -9,7 +8,7 @@ use std::collections::VecDeque;
 pub type Graph<'a> = StrHashMap::<'a, Arc::<StrHashSet<'a>>>;
 pub type TransitiveDeps<'a> = StrHashMap::<'a, Arc::<StrHashSet<'a>>>;
 
-pub fn build_dependency_graph<'a>(parsed: &'a Processed) -> (Graph<'a>, DefaultTarget<'a>, TransitiveDeps<'a>) {
+pub fn build_dependency_graph<'a>(processed: &'a Processed) -> (Graph<'a>, DefaultJob<'a>, TransitiveDeps<'a>) {
     fn collect_deps<'a>(
         node: &'a str,
         parsed: &'a Processed,
@@ -86,17 +85,19 @@ pub fn build_dependency_graph<'a>(parsed: &'a Processed) -> (Graph<'a>, DefaultT
         deps
     }
 
-    let n = parsed.jobs.len();
+    let n = processed.jobs.len();
     let mut graph = StrHashMap::with_capacity(n);
     let mut visited = StrHashSet::with_capacity(n);
     let mut transitive_deps = StrHashMap::with_capacity(n);
 
-    for target in parsed.jobs.keys() {
-        collect_deps(target, parsed, &mut graph, &mut visited, &mut transitive_deps);
+    for target in processed.jobs.keys() {
+        collect_deps(target, processed, &mut graph, &mut visited, &mut transitive_deps);
     }
 
-    let default_target = if graph.is_empty() {
-        parsed.jobs.values().next()
+    let default_job = if let Some(ref dt) = processed.default_target {
+        processed.jobs.get(dt.as_str())
+    } else if graph.is_empty() {
+        processed.jobs.values().next()
     } else {
         let mut reverse_graph = StrHashMap::with_capacity(n);
         for (node, deps) in graph.iter() {
@@ -107,13 +108,13 @@ pub fn build_dependency_graph<'a>(parsed: &'a Processed) -> (Graph<'a>, DefaultT
 
         // find a job that does not act as an input anywhere,
         // then sort those by first appearing in the source code row-wise
-        parsed.jobs.keys()
+        processed.jobs.keys()
             .filter(|job| !reverse_graph.contains_key(*job))
-            .map(|t| unsafe { parsed.jobs.get(t).unwrap_unchecked() })
+            .map(|t| unsafe { processed.jobs.get(t).unwrap_unchecked() })
             .min_by(|x, y| x.loc.0.cmp(&y.loc.0))
     };
 
-    (graph, default_target, transitive_deps)
+    (graph, default_job, transitive_deps)
 }
 
 pub fn topological_sort_levels<'a>(graph: &Graph<'a>) -> Vec::<Vec::<&'a str>> {
@@ -141,7 +142,7 @@ pub fn topological_sort_levels<'a>(graph: &Graph<'a>) -> Vec::<Vec::<&'a str>> {
 
             let Some(deps) = graph.get(node) else { continue };
             for dep in deps.iter() {
-                let e = unsafe { in_degree.get_mut(&*dep).unwrap_unchecked() };
+                let e = unsafe { in_degree.get_mut(dep).unwrap_unchecked() };
                 *e -= 1;
                 if *e == 0 {
                     queue.push_back(*dep)
