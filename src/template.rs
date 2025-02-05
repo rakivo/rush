@@ -1,5 +1,5 @@
 use crate::loc::Loc;
-use crate::parser::{prep, Job, Defs, Phony, Shadows};
+use crate::parser::{prep, Job, Defs, Shadows};
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
 enum TemplateChunk<'a> {
@@ -12,6 +12,7 @@ enum TemplateChunk<'a> {
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct Template<'a> {
     loc: Loc,
+    in_used: bool,
     chunks: Vec::<TemplateChunk<'a>>,
 }
 
@@ -21,6 +22,8 @@ impl Template<'_> {
     pub fn new(s: &str, loc: Loc) -> Template {
         let mut start = 0;
         let mut chunks = Vec::new();
+
+        let mut in_used = false;
         let mut last_was_placeholder = false;
 
         while let Some(i) = s[start..].find('$') {
@@ -44,7 +47,8 @@ impl Template<'_> {
                 .unwrap_or_else(|| s.len());
 
             if placeholder_start < placeholder_end {
-                let placeholder = &s[placeholder_start..placeholder_end];
+                let ref placeholder = s[placeholder_start..placeholder_end];
+                in_used = placeholder == "in";
                 let joined = placeholder_end < s.len() && s.chars().nth(placeholder_end) == Some('.');
                 if joined {
                     chunks.push(TemplateChunk::JoinedPlaceholder(placeholder));
@@ -71,7 +75,7 @@ impl Template<'_> {
             }
         }
 
-        Template { loc, chunks }
+        Template { loc, in_used, chunks }
     }
 
     #[inline]
@@ -90,15 +94,12 @@ impl Template<'_> {
     }
 
     #[inline]
-    fn _compile<'a, F>(&self, output_str: &str, input_fn: F, shadows: &Shadows, defs: &Defs) -> Result::<String, String>
-    where
-        F: Fn() -> &'a str
-    {
+    fn _compile<'a>(&self, output_str: &str, input_str: &str, shadows: &Shadows, defs: &Defs) -> Result::<String, String> {
         self.chunks.iter().map(|c| {
             match c {
                 TemplateChunk::Static(s) | TemplateChunk::JoinedStatic(s) => Ok(*s),
                 TemplateChunk::Placeholder(placeholder) | TemplateChunk::JoinedPlaceholder(placeholder) => match *placeholder {
-                    "in" => Ok(input_fn()),
+                    "in" => Ok(input_str),
                     "out" => Ok(output_str),
                     _ => shadows
                         .as_ref()
@@ -110,21 +111,13 @@ impl Template<'_> {
         }).collect()
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn compile(&self, job: &Job, defs: &Defs) -> Result::<String, String> {
-        let input_fn = || match job.phony {
-            Phony::Phony { .. } => report!(job.loc, "$in is not supported yet in phony jobs"),
-            Phony::NotPhony { inputs_str, .. } => { inputs_str },
-        };
-        self._compile(job.target, input_fn, &job.shadows, defs)
+        self._compile(job.target, job.inputs_str(self.in_used), &job.shadows, defs)
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn compile_prep(&self, job: &prep::Job, defs: &Defs) -> Result::<String, String> {
-        let input_fn = || match job.phony {
-            prep::Phony::Phony { .. } => report!(job.loc, "$in is not supported yet in phony jobs"),
-            prep::Phony::NotPhony { inputs_str, .. } => { inputs_str },
-        };
-        self._compile(job.target, input_fn, &job.shadows, defs)
+        self._compile(job.target, job.inputs_str(self.in_used), &job.shadows, defs)
     }
 }

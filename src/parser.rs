@@ -89,6 +89,19 @@ pub mod prep {
 
     impl<'a> Job<'a> {
         #[inline]
+        #[cfg_attr(feature = "dbg", track_caller)]
+        pub fn inputs_str(&self, panic: bool) -> &'a str {
+            match self.phony {
+                Phony::Phony { .. } => if panic {
+                    report!(self.loc, "$in is not supported in phony jobs yet")
+                } else {
+                    ""
+                },
+                Phony::NotPhony { inputs_str, .. } => inputs_str,
+            }
+        }
+
+        #[inline]
         pub(super) fn into_phony(&mut self, command_: Option::<Template<'a>>) -> Phony<'a> {
             match &mut self.phony {
                 Phony::NotPhony { rule, inputs, deps, .. } => {
@@ -140,6 +153,19 @@ pub struct Job<'a> {
 }
 
 impl<'a> Job<'a> {
+    #[inline]
+    #[cfg_attr(feature = "dbg", track_caller)]
+    pub fn inputs_str(&self, panic: bool) -> &'a str {
+        match self.phony {
+            Phony::Phony { .. } => if panic {
+                report!(self.loc, "$in is not supported in phony jobs yet")
+            } else {
+                ""
+            },
+            Phony::NotPhony { inputs_str, .. } => inputs_str,
+        }
+    }
+
     #[inline]
     pub fn rule(&self) -> Option::<&'a str> {
         match self.phony {

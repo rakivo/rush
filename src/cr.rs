@@ -89,7 +89,7 @@ impl<'a> CommandRunner<'a> {
          })
     }
 
-    #[track_caller]
+    #[cfg_attr(feature = "dbg", track_caller)]
     fn run_phony(&self, job: &Job<'a>) {
         match &job.phony {
             Phony::Phony { command, aliases, .. } => {
