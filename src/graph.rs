@@ -5,9 +5,13 @@ use std::fs;
 use std::sync::Arc;
 use std::collections::VecDeque;
 
+#[cfg(feature = "dbg")]
+use tramer::tramer;
+
 pub type Graph<'a> = StrHashMap::<'a, Arc::<StrHashSet<'a>>>;
 pub type TransitiveDeps<'a> = StrHashMap::<'a, Arc::<StrHashSet<'a>>>;
 
+#[cfg_attr(feature = "dbg", tramer("nanos"))]
 pub fn build_dependency_graph<'a>(processed: &'a Processed) -> (Graph<'a>, DefaultJob<'a>, TransitiveDeps<'a>) {
     fn collect_deps<'a>(
         node: &'a str,

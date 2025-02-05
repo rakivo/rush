@@ -9,6 +9,8 @@ use std::sync::Arc;
 use std::fs::{self, File};
 
 use memmap2::Mmap;
+#[cfg(feature = "dbg")]
+use tramer::tramer;
 
 pub const RUSH_FILE_NAME: &str = "build.rush";
 
@@ -213,6 +215,7 @@ impl<'a> Parsed<'a> {
         unsafe { self.rules.get_mut(name).unwrap_unchecked() }
     }
 
+    #[cfg_attr(feature = "dbg", tramer("nanos"))]
     pub fn into_processed(self) -> Processed<'a> {
         let Parsed { defs, jobs, rules, phonys, default_target } = self;
         let jobs = jobs.iter().filter_map(|(.., job)| {
@@ -612,6 +615,7 @@ impl<'a> Parser<'a> {
         };
     }
 
+    #[cfg_attr(feature = "dbg", tramer("nanos"))]
     pub fn handle_newline_escapes(input: &str) -> (String, EscapedIndexes) {
         let mut ret = String::with_capacity(input.len());
         let mut indexes = Vec::with_capacity(32);
@@ -644,6 +648,7 @@ impl<'a> Parser<'a> {
         } (ret, indexes)
     }
 
+    #[cfg_attr(feature = "dbg", tramer("millis"))]
     pub fn parse(escaped: &'a str, escaped_indexes: &EscapedIndexes) -> Parsed<'a> {
         let mut parser = Self {
             cursor: 0,
