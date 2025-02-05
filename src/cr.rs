@@ -19,6 +19,18 @@ use crossbeam_channel::{unbounded, Sender};
 type Stdout = Sender::<String>;
 type StdoutThread = JoinHandle::<()>;
 
+macro_rules! cr_print {
+    ($self: expr, $($arg:tt)*) => {{
+        _ = $self.print(std::fmt::format(format_args!($($arg)*)));
+    }};
+}
+
+macro_rules! cr_report {
+    ($self: expr, $($arg:tt)*) => {{
+        _ = $self.print(report_fmt!($($arg)*));
+    }};
+}
+
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct CommandRunner<'a> {
     stdout: Stdout,
@@ -40,22 +52,22 @@ impl<'a> CommandRunner<'a> {
         transitive_deps: TransitiveDeps<'a>
     ) -> Db<'a> {
         let (stdout, writer) = Self::stdout_thread();
-        let cb = Self::new(stdout, graph, db, context, transitive_deps);
+        let cr = Self::new(stdout, graph, db, context, transitive_deps);
 
         let levels = if let Some(job) = default_job {
-            cb.run_target(job);
-            return cb.finish(writer)
+            cr.run_target(job);
+            return cr.finish(writer)
         } else {
-            topological_sort_levels(&cb.graph)
+            topological_sort_levels(&cr.graph)
         };
 
         levels.into_iter().for_each(|level| {
             level.into_par_iter().filter_map(|t| context.jobs.get(t)).for_each(|job| {
-                cb.resolve_and_run(job)
+                cr.resolve_and_run(job)
             });
         });
 
-        cb.finish(writer)
+        cr.finish(writer)
     }
 
     #[inline]
@@ -88,11 +100,10 @@ impl<'a> CommandRunner<'a> {
 
     #[inline]
     fn execute_command(&self, command: Command, target: &str) -> io::Result::<CommandOutput> {
-         command.execute().map_err(|e| {
-             let err = format!("could not execute job: {target}: {e}\n");
-             _ = self.print(err);
-             e
-         })
+        command.execute().map_err(|e| {
+            cr_print!(self, "could not execute job: {target}: {e}\n");
+            e
+        })
     }
 
     fn run_phony(&self, job: &Job<'a>) {
@@ -102,12 +113,12 @@ impl<'a> CommandRunner<'a> {
                     match self.context.jobs.get(_job.as_str()) {
                         Some(j) => Some(j),
                         None => {
-                            let e = report_fmt!{
+                            cr_report!{
+                                self,
                                 job.loc,
                                 "undefined job: {target}\nNOTE: in phony jobs you can only alias jobs, no input permitted here\n",
                                 target = job.target
                             };
-                            _ = self.print(e);
                             None
                         }
                     }
@@ -119,11 +130,14 @@ impl<'a> CommandRunner<'a> {
                         self.execute_command(command, job.target)
                     })
                 } {
-                    let output = match command_output {
-                        Ok(ok) => ok.to_string(),
-                        Err(e) => e.to_string()
-                    };
-                    _ = self.print(output);
+                    cr_print!{
+                        self,
+                        "{output}\n",
+                        output = match command_output {
+                            Ok(ok) => ok.to_string(),
+                            Err(e) => e.to_string()
+                        }
+                    }
                 }
             },
             Phony::NotPhony { .. } => unreachable!()
@@ -216,9 +230,9 @@ impl<'a> CommandRunner<'a> {
     #[inline]
     fn compile_command(&self, job: &Job<'a>, rule: &Rule) -> Option::<String> {
         rule.command.compile(job, &self.context.defs).map_err(|e| {
-            _ = self.print(e);
+            cr_print!(self, "{e}\n");
             rule.description.as_ref().and_then(|d| d.check(&self.context.defs).err()).map(|err| {
-                _ = self.print(err)
+                cr_print!(self, "{err}\n");
             });
         }).map(|command| {
             self.db_write.metadata_write(job.target, Metadata {
@@ -234,16 +248,16 @@ impl<'a> CommandRunner<'a> {
 
         if self.needs_rebuild(job, &command) {
             if let Err(e) = self.create_dirs_if_needed(job.target) {
-                let msg = format!{
+                cr_print!{
+                    self,
                     "could not create build directory for target: {target}: {e}",
                     target = job.target
                 };
-                _ = self.print(msg);
                 return false
             }
 
             let description = rule.description.as_ref().and_then(|d| d.compile(&job, &self.context.defs).map_err(|e| {
-                _ = self.print(e)
+                cr_print!(self, "{e}");
             }).ok());
 
             let command = Command { command, description };
@@ -251,22 +265,21 @@ impl<'a> CommandRunner<'a> {
                 return true
             };
 
-            _ = self.print(command_output.to_string());
+            cr_print!(self, "{command_output}");
         } else {
             let mut any_err = false;
             if let Err(err) = rule.command.check(&self.context.defs) {
-                _ = self.print(err);
+                cr_print!(self, "{err}");
                 any_err = true
             }
 
             if let Some(Err(err)) = rule.description.as_ref().map(|d| d.check(&self.context.defs)) {
-                _ = self.print(err);
+                cr_print!(self, "{err}");
                 any_err = true
             }
 
             if !any_err {
-                let msg = format!("{target} is already built\n", target = job.target);
-                _ = self.print(msg)
+                cr_print!(self, "{target} is already built\n", target = job.target);
             }
         } false
     }
@@ -277,45 +290,40 @@ impl<'a> CommandRunner<'a> {
         while let Some(job) = stack.pop() {
             if self.processed.contains(job.target) { continue }
 
-            match &job.phony {
-                Phony::Phony { .. } => {
-                    self.run_phony(job);
-                    return
-                },
-                Phony::NotPhony { rule, inputs, .. } => {
-                    let mut all_deps_resolved = true;
-                    for input in inputs.iter() {
-                        if !self.processed.contains(input) {
-                            if let Some(dep_job) = self.context.jobs.get(input) {
-                                stack.push(job);
-                                stack.push(dep_job);
-                                all_deps_resolved = false;
-                                break
-                            } else {
-                                #[cfg(feature = "dbg")] {
-                                    let msg = format!("dependency {input} is assumed to exist\n");
-                                    _ = self.print(msg)
-                                }
-                            }
+            let Phony::NotPhony { rule, inputs, .. } = &job.phony else {
+                self.run_phony(job);
+                return
+            };
+
+            let mut all_deps_resolved = true;
+            for input in inputs.iter() {
+                if !self.processed.contains(input) {
+                    if let Some(dep_job) = self.context.jobs.get(input) {
+                        stack.push(job);
+                        stack.push(dep_job);
+                        all_deps_resolved = false;
+                        break
+                    } else {
+                        #[cfg(feature = "dbg")] {
+                            cr_print!(self, "dependency {input} is assumed to exist\n");
                         }
                     }
+                }
+            }
 
-                    if !all_deps_resolved { continue }
+            if !all_deps_resolved { continue }
 
-                    if let Some(ref job_rule) = rule {
-                        if let Some(rule) = self.context.rules.get(job_rule) {
-                            self.processed.insert(job.target);
-                            if self.execute_job(job, rule) { continue }
-                        } else {
-                            let err = report_fmt!{
-                                job.loc,
-                                "no rule named: {rule} found for job {target}\n",
-                                rule = job_rule,
-                                target = job.target
-                            };
-                            _ = self.print(err)
-                        }
-                    }
+            let Some(ref job_rule) = rule else { continue };
+            if let Some(rule) = self.context.rules.get(job_rule) {
+                self.processed.insert(job.target);
+                if self.execute_job(job, rule) { continue }
+            } else {
+                cr_report!{
+                    self,
+                    job.loc,
+                    "no rule named: {rule} found for job {target}\n",
+                    rule = job_rule,
+                    target = job.target
                 }
             }
         }
