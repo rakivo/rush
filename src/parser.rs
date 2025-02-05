@@ -5,7 +5,6 @@ use crate::consts::syntax::{RULE, BUILD, PHONY, DEPFILE, COMMAND, COMMENT, DESCR
 
 use std::mem;
 use std::sync::Arc;
-use std::str::Lines;
 use std::fs::{self, File};
 
 use memmap2::Mmap;
@@ -56,7 +55,7 @@ impl<'a> Rule<'a> {
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub enum Phony<'a> {
     Phony {
-        command: String,
+        command: Option::<String>,
         aliases: Vec::<String>
     },
     NotPhony {
@@ -70,7 +69,7 @@ pub enum Phony<'a> {
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub enum PreprocessedPhony<'a> {
     Phony {
-        command: Template<'a>,
+        command: Option::<Template<'a>>,
         aliases: Vec::<&'a str>,
         aliases_templates: Vec::<Template<'a>>,
     },
@@ -96,6 +95,32 @@ pub struct PreprocessedJob<'a> {
     pub target_template: Template<'a>,
 
     pub phony: PreprocessedPhony<'a>
+}
+
+impl<'a> PreprocessedJob<'a> {
+    #[inline]
+    fn into_phony(&mut self, command_: Option::<Template<'a>>) -> PreprocessedPhony<'a> {
+        match &mut self.phony {
+            PreprocessedPhony::NotPhony { rule, inputs, deps, .. } => {
+                let mut aliases = Vec::with_capacity(inputs.len() + deps.len() + 1);
+                if let Some(rule) = rule { aliases.push(*rule) }
+                aliases.extend(mem::take(inputs).into_iter());
+                aliases.extend(mem::take(deps).into_iter());
+                PreprocessedPhony::Phony {
+                    command: command_,
+                    aliases_templates: aliases.iter().map(|a| Template::new(a, self.loc)).collect(),
+                    aliases,
+                }
+            },
+            PreprocessedPhony::Phony { aliases, aliases_templates, command } => {
+                PreprocessedPhony::Phony {
+                    command: command_.or(mem::take(command)),
+                    aliases: mem::take(aliases),
+                    aliases_templates: mem::take(aliases_templates)
+                }
+            }
+        }
+    }
 }
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
@@ -171,10 +196,10 @@ impl<'a> Parsed<'a> {
                         }
                     }
 
-                    let command = match command.compile(job, &defs) {
+                    let command = command.as_ref().map(|c| match c.compile(job, &defs) {
                         Ok(ok) => ok,
                         Err(e) => report!(job.loc, "{e}")
-                    };
+                    });
 
                     let aliases = aliases_templates.iter()
                         .zip(aliases.iter())
@@ -284,6 +309,8 @@ enum Context<'a> {
     }
 }
 
+type EscapedIndexes = Vec::<(usize, usize)>;
+
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct Parser<'a> {
     cursor: usize,
@@ -305,6 +332,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_line(&mut self, line: &'a str) {
+        // NOTE: line should be trimmed at the beginning
         let first = line.find(['\t', '\n', '\x0C', '\r', ' ']).map(|first_space| {
             (first_space, &line[..first_space])
         });
@@ -352,33 +380,7 @@ impl<'a> Parser<'a> {
                         let command_loc = Loc(self.cursor);
                         let command = Template::new(command_, command_loc);
                         let job = self.parsed.job_mut(target);
-                        job.phony = match &mut job.phony {
-                            PreprocessedPhony::Phony {
-                                aliases,
-                                aliases_templates,
-                                ..
-                            } => PreprocessedPhony::Phony {
-                                command,
-                                aliases: mem::take(aliases),
-                                aliases_templates: mem::take(aliases_templates)
-                            },
-                            PreprocessedPhony::NotPhony {
-                                rule,
-                                inputs,
-                                deps,
-                                ..
-                            } => {
-                                let mut aliases = Vec::with_capacity(inputs.len() + 1);
-                                if let Some(rule) = rule { aliases.push(*rule) }
-                                aliases.extend(mem::take(inputs).into_iter());
-                                aliases.extend(mem::take(deps).into_iter());
-                                PreprocessedPhony::Phony {
-                                    command: Template::new("", Loc(0)),
-                                    aliases_templates: aliases.iter().map(|a| Template::new(a, job.loc)).collect(),
-                                    aliases
-                                }
-                            },
-                        };
+                        job.phony = job.into_phony(Some(command));
                     },
                     name => {
                         let def = parse_def();
@@ -458,29 +460,8 @@ impl<'a> Parser<'a> {
                     PHONY => {
                         let phony = line[first_space..].trim();
                         self.parsed.phonys.insert(phony);
-
                         if let Some(job) = self.parsed.jobs.get_mut(phony) {
-                            if !matches!(job.phony, PreprocessedPhony::Phony { .. }) {
-                                job.phony = match &mut job.phony {
-                                    PreprocessedPhony::NotPhony {
-                                        rule,
-                                        inputs,
-                                        deps,
-                                        ..
-                                    } => {
-                                        let mut aliases = Vec::with_capacity(inputs.len() + 1);
-                                        if let Some(rule) = rule { aliases.push(*rule) }
-                                        aliases.extend(mem::take(inputs).into_iter());
-                                        aliases.extend(mem::take(deps).into_iter());
-                                        PreprocessedPhony::Phony {
-                                            command: Template::new("", Loc(0)),
-                                            aliases_templates: aliases.iter().map(|a| Template::new(a, job.loc)).collect(),
-                                            aliases
-                                        }
-                                    },
-                                    _ => unreachable!()
-                                }
-                            }
+                            job.phony = job.into_phony(None)
                         }
                     },
                     RULE => {
@@ -518,7 +499,7 @@ impl<'a> Parser<'a> {
                                 target,
                                 target_template,
                                 phony: PreprocessedPhony::Phony {
-                                    command: Template::new("", Loc(0)),
+                                    command: None,
                                     aliases,
                                     aliases_templates
                                 },
@@ -575,19 +556,39 @@ impl<'a> Parser<'a> {
         };
     }
 
-    fn handle_newline_escape(&mut self, line: &'a str, lines: &mut Lines<'a>) -> &'a str {
-        let mut full_line = line.trim_end();
-        while full_line.as_bytes().last() == Some(&(LINE_ESCAPE as _)) {
-            let trimmed = full_line[..full_line.len() - 1].trim_end();
-            let Some(next_line) = lines.next() else { break };
-            self.cursor += 1;
-            let next_trimmed = next_line.trim();
-            full_line = format!("{trimmed} {next_trimmed}").leak()
-        } full_line.trim_start()
+    pub fn handle_newline_escapes(input: &str) -> (String, EscapedIndexes) {
+        let mut ret = String::with_capacity(input.len());
+        let mut indexes = Vec::with_capacity(32);
+
+        let mut lines = input.lines().enumerate().peekable();
+        while let Some((index, line)) = lines.next() {
+            let mut escaped_lines = 0;
+            let mut curr_line = line.trim_end();
+            while curr_line.as_bytes().last() == Some(&(LINE_ESCAPE as u8)) {
+                escaped_lines += 1;
+                curr_line = curr_line[..curr_line.len() - 1].trim_end();
+
+                if let Some((.., next_line)) = lines.peek() {
+                    let next_trimmed = next_line.trim_start();
+                    ret.push_str(curr_line);
+                    ret.push(' ');
+                    curr_line = next_trimmed;
+                    lines.next();
+                } else {
+                    break
+                }
+            }
+
+            if escaped_lines > 0 {
+                indexes.push((index, escaped_lines))
+            }
+
+            ret.push_str(curr_line);
+            ret.push('\n');
+        } (ret, indexes)
     }
 
-    #[inline]
-    pub fn parse(content: &'a str) -> Parsed<'a> {
+    pub fn parse(escaped: &'a str, escaped_indexes: &EscapedIndexes) -> Parsed<'a> {
         let mut parser = Self {
             cursor: 0,
             parsed: Parsed {
@@ -598,12 +599,16 @@ impl<'a> Parser<'a> {
             },
             context: Context::default()
         };
-        let mut lines = content.lines();
-        while let Some(line) = lines.next() {
+
+        let mut escaped_index = 0;
+        for line in escaped.lines() {
             parser.cursor += 1;
-            if line.as_bytes().first() == Some(&(COMMENT as _)) { continue }
-            let line = parser.handle_newline_escape(line, &mut lines);
-            parser.parse_line(line)
+            if escaped_index < escaped_indexes.len() && escaped_indexes[escaped_index].0 <= parser.cursor {
+                parser.cursor += escaped_indexes[escaped_index].1;
+                escaped_index += 1
+            }
+            if line.as_bytes().first() == Some(&(COMMENT as u8)) { continue }
+            parser.parse_line(line.trim_start())
         } parser.parsed
     }
 }

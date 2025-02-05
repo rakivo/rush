@@ -63,7 +63,6 @@ impl<'a> CommandRunner<'a> {
          })
     }
 
-    #[inline]
     #[track_caller]
     fn run_phony(&self, job: &Job<'a>) {
         match &job.phony {
@@ -82,12 +81,18 @@ impl<'a> CommandRunner<'a> {
                         }
                     }
                 }).for_each(|job| self._run_target(job));
-                
-                if let Ok(command_output) = {
-                    let command = Command { command: command.to_owned(), description: None };
-                    self.execute_command(command, job.target)
+
+                if let Some(command_output) = {
+                    command.as_ref().map(|c| {
+                        let command = Command { command: c.to_owned(), description: None };  
+                        self.execute_command(command, job.target)
+                    })
                 } {
-                    _ = self.print(command_output.to_string());
+                    let output = match command_output {
+                        Ok(ok) => ok.to_string(),
+                        Err(e) => e.to_string()
+                    };
+                    _ = self.print(output);
                 }
             },
             Phony::NotPhony { .. } => unreachable!()
@@ -101,11 +106,12 @@ impl<'a> CommandRunner<'a> {
         subgraph.insert(target, Arc::clone(&deps));
         for dep in deps.iter() {
             if let Some(deps_of_dep) = graph.get(dep) {
-                subgraph.insert(*dep, Arc::clone(deps_of_dep));
+                subgraph.insert(&dep, Arc::clone(deps_of_dep));
             }
         } subgraph
     }
 
+    #[inline]
     fn stdout_thread() -> (Stdout, StdoutThread) {
         let (stdout, stdout_recv) = unbounded::<String>();
         let writer = thread::spawn(move || {
@@ -113,9 +119,7 @@ impl<'a> CommandRunner<'a> {
             for s in stdout_recv {
                 _ = stdout_handle.write_all(s.as_bytes());
             }
-        });
-
-        (stdout, writer)
+        }); (stdout, writer)
     }
 
     fn _run_target(&self, job: &Job<'a>) {
