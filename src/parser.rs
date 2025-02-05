@@ -1,9 +1,10 @@
 use crate::loc::Loc;
-use crate::types::StrHashMap;
 use crate::template::Template;
+use crate::types::{StrHashMap, StrHashSet};
+use crate::consts::syntax::{RULE, BUILD, PHONY, DEPFILE, COMMAND, COMMENT, DESCRIPTION, LINE_ESCAPE};
 
+use std::mem;
 use std::sync::Arc;
-use std::str::Lines;
 use std::fs::{self, File};
 
 use memmap2::Mmap;
@@ -27,7 +28,6 @@ pub fn read_rush() -> Option::<Mmap> {
     }
 }
 
-#[derive(Default)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct Rule<'a> {
     pub command: Template<'a>,
@@ -39,59 +39,115 @@ impl<'a> Rule<'a> {
     #[inline]
     fn new(
         command: &'a str,
-        description: Option::<&'a str>,
-        depfile_path: Option::<&'a str>,
         command_loc: Loc,
-        description_loc: Loc,
-        depfile_path_loc: Loc,
+        description: Option::<Description<'a>>,
+        depfile_path: Option::<DepfilePath<'a>>
     ) -> Self {
         Self {
-            depfile: depfile_path.map(|dp| Template::new(dp, depfile_path_loc)),
             command: Template::new(command, command_loc),
-            description: description.map(|d| Template::new(d, description_loc)),
+            depfile: depfile_path.map(|dp| Template::new(dp.path, dp.loc)),
+            description: description.map(|d| Template::new(d.description, d.loc)),
         }
     }
 }
 
-#[derive(Clone, Default)]
+pub mod prep {
+    use super::*;
+
+    #[cfg_attr(feature = "dbg", derive(Debug))]
+    pub enum Phony<'a> {
+        Phony {
+            command: Option::<Template<'a>>,
+            aliases: Vec::<&'a str>,
+            aliases_templates: Vec::<Template<'a>>,
+        },
+        NotPhony {
+            rule: Option::<&'a str>,
+
+            inputs: Vec::<&'a str>,
+            inputs_str: &'a str,
+            inputs_templates: Vec::<Template<'a>>,
+
+            deps: Vec::<&'a str>,
+            deps_templates: Vec::<Template<'a>>
+        }
+    }
+
+    #[cfg_attr(feature = "dbg", derive(Debug))]
+    pub struct Job<'a> {
+        pub loc: Loc,
+
+        pub shadows: Option::<Arc::<Defs<'a>>>,
+
+        pub target: &'a str,
+        pub target_template: Template<'a>,
+
+        pub phony: Phony<'a>
+    }
+
+    impl<'a> Job<'a> {
+        #[inline]
+        pub(super) fn into_phony(&mut self, command_: Option::<Template<'a>>) -> Phony<'a> {
+            match &mut self.phony {
+                Phony::NotPhony { rule, inputs, deps, .. } => {
+                    let mut aliases = Vec::with_capacity(inputs.len() + deps.len() + 1);
+                    if let Some(rule) = rule { aliases.push(*rule) }
+                    aliases.extend(mem::take(inputs).into_iter());
+                    aliases.extend(mem::take(deps).into_iter());
+                    Phony::Phony {
+                        command: command_,
+                        aliases_templates: aliases.iter().map(|a| Template::new(a, self.loc)).collect(),
+                        aliases,
+                    }
+                },
+                Phony::Phony { aliases, aliases_templates, command } => {
+                    Phony::Phony {
+                        command: command_.or(mem::take(command)),
+                        aliases: mem::take(aliases),
+                        aliases_templates: mem::take(aliases_templates)
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg_attr(feature = "dbg", derive(Debug))]
+pub enum Phony<'a> {
+    Phony {
+        command: Option::<String>,
+        aliases: Vec::<String>
+    },
+    NotPhony {
+        rule: Option::<&'a str>,
+        inputs: Vec::<&'a str>,
+        inputs_str: &'a str,
+        deps: Vec::<&'a str>,
+    }
+}
+
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct Job<'a> {
     pub loc: Loc,
 
-    pub rule: &'a str,
+    pub target: &'a str,
 
     pub shadows: Option::<Arc::<Defs<'a>>>,
 
-    pub target: &'a str,
-    pub target_template: Template<'a>,
-
-    pub inputs: Vec::<&'a str>,
-    pub inputs_templates: Vec::<Template<'a>>,
-    pub inputs_wo_rule_str: &'a str,
-
-    pub deps: Vec::<&'a str>,
-    pub deps_templates: Vec::<Template<'a>>
+    pub phony: Phony<'a>
 }
 
-#[derive(Clone, Default)]
-#[cfg_attr(feature = "dbg", derive(Debug))]
-pub struct CompiledJob<'a> {
-    pub loc: Loc,
-
-    pub rule: &'a str,
-
-    pub target: &'a str,
-
-    pub shadows: Option::<Arc::<Defs<'a>>>,
-
-    pub inputs: Vec::<&'a str>,
-    pub inputs_str: &'a str,
-
-    pub deps: Vec::<&'a str>
+impl<'a> Job<'a> {
+    #[inline]
+    pub fn rule(&self) -> Option::<&'a str> {
+        match self.phony {
+            Phony::Phony { .. } => None,
+            Phony::NotPhony { rule, .. } => rule,
+        }
+    }
 }
 
 #[repr(transparent)]
-#[derive(Clone, Default)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct Def<'a> { pub value: &'a str }
 
@@ -100,13 +156,14 @@ pub type Defs<'a> = StrHashMap::<'a, Def<'a>>;
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct Parsed<'a> {
     defs: Defs<'a>,
-    jobs: StrHashMap::<'a, Job<'a>>,
+    phonys: StrHashSet<'a>,
+    jobs: StrHashMap::<'a, prep::Job<'a>>,
     rules: StrHashMap::<'a, Rule<'a>>,
 }
 
 impl<'a> Parsed<'a> {
     #[inline(always)]
-    fn job_mut(&mut self, target: &str) -> &mut Job<'a> {
+    fn job_mut(&mut self, target: &str) -> &mut prep::Job<'a> {
         unsafe { self.jobs.get_mut(target).unwrap_unchecked() }
     }
 
@@ -116,51 +173,102 @@ impl<'a> Parsed<'a> {
     }
 
     pub fn into_processed(self) -> Processed<'a> {
-        let Parsed { defs, jobs, rules } = self;
+        let Parsed { defs, jobs, rules, phonys } = self;
         let jobs = jobs.iter().filter_map(|(.., job)| {
-            if !rules.contains_key(job.rule) { return None }
+            if matches!{
+                job.phony,
+                prep::Phony::NotPhony { rule, .. }
+                if rule.map_or(false, |rule| !rules.contains_key(rule))
+            } {
+                return None
+            }
 
             let target = match job.target_template.compile(&job, &defs) {
                 Ok(ok) => ok.leak() as &_,
                 Err(e) => report!(job.loc, "{e}")
             };
 
-            let mut inputs_str = String::with_capacity(job.inputs_wo_rule_str.len() + 10);
-            let inputs = job.inputs_templates.iter()
-                .zip(job.inputs.iter())
-                .map(|(template, ..)| {
-                    match template.compile(&job, &defs) {
-                        Ok(ok) => {
-                            let compiled = ok.leak() as &_;
-                            inputs_str.push_str(compiled);
-                            inputs_str.push(' ');
-                            compiled
-                        },
-                        Err(e) => report!(job.loc, "{e}")
+            let job = match &job.phony {
+                prep::Phony::Phony { command, aliases_templates, aliases } => {
+                    if !phonys.contains(job.target) {
+                        report!{
+                            job.loc,
+                            "mark {target} as phony for it to have a command",
+                            target = job.target
+                        }
                     }
-                }).collect::<Vec::<_>>();
 
-            if !inputs_str.is_empty() { _ = inputs_str.pop() }
-            let inputs_str = inputs_str.leak();
-
-            let deps = job.deps_templates.iter()
-                .zip(job.deps.iter())
-                .map(|(template, ..)| {
-                    match template.compile(&job, &defs) {
-                        Ok(ok) => ok.leak() as &_,
+                    let command = command.as_ref().map(|c| match c.compile(job, &defs) {
+                        Ok(ok) => ok,
                         Err(e) => report!(job.loc, "{e}")
-                    }
-                }).collect::<Vec::<_>>();
+                    });
 
-            Some((target, CompiledJob {
-                deps,
-                target,
-                inputs,
-                inputs_str,
-                loc: job.loc,
-                rule: job.rule,
-                shadows: job.shadows.as_ref().map(Arc::clone)
-            }))
+                    let aliases = aliases_templates.iter()
+                        .zip(aliases.iter())
+                        .map(|(template, ..)| {
+                            match template.compile(&job, &defs) {
+                                Ok(ok) => ok,
+                                Err(e) => report!(job.loc, "{e}")
+                            }
+                        }).collect::<Vec::<_>>();
+
+                    Job {
+                        target,
+                        loc: job.loc,
+                        shadows: job.shadows.as_ref().map(Arc::clone),
+                        phony: Phony::Phony { command, aliases }
+                    }
+                }
+                prep::Phony::NotPhony {
+                    rule,
+                    inputs,
+                    inputs_str,
+                    inputs_templates,
+                    deps,
+                    deps_templates
+                } => {
+                    let mut inputs_str = String::with_capacity(inputs_str.len() + 10);
+                    let inputs = inputs_templates.iter()
+                        .zip(inputs.iter())
+                        .map(|(template, ..)| {
+                            match template.compile(&job, &defs) {
+                                Ok(ok) => {
+                                    let compiled = ok.leak() as &_;
+                                    inputs_str.push_str(compiled);
+                                    inputs_str.push(' ');
+                                    compiled
+                                },
+                                Err(e) => report!(job.loc, "{e}")
+                            }
+                        }).collect::<Vec::<_>>();
+
+                    if !inputs_str.is_empty() { _ = inputs_str.pop() }
+                    let inputs_str = inputs_str.leak();
+
+                    let deps = deps_templates.iter()
+                        .zip(deps.iter())
+                        .map(|(template, ..)| {
+                            match template.compile(&job, &defs) {
+                                Ok(ok) => ok.leak() as &_,
+                                Err(e) => report!(job.loc, "{e}")
+                            }
+                        }).collect::<Vec::<_>>();
+
+                    Job {
+                        target,
+                        loc: job.loc,
+                        shadows: job.shadows.as_ref().map(Arc::clone),
+                        phony: Phony::NotPhony {
+                            deps,
+                            inputs,
+                            inputs_str,
+                            rule: *rule,
+                        }
+                    }
+                }
+            };
+
+            Some((target, job))
         }).collect::<StrHashMap::<_>>();
 
         Processed {jobs, rules, defs}
@@ -171,13 +279,21 @@ impl<'a> Parsed<'a> {
 pub struct Processed<'a> {
     pub defs: Defs<'a>,
     pub rules: StrHashMap::<'a, Rule<'a>>,
-    pub jobs: StrHashMap::<'a, CompiledJob<'a>>,
+    pub jobs: StrHashMap::<'a, Job<'a>>,
 }
 
-#[derive(Default)]
+#[repr(packed)]
+#[derive(Copy, Clone)]
+#[cfg_attr(feature = "dbg", derive(Debug))]
+struct DepfilePath<'a> { loc: Loc, path: &'a str }
+
+#[repr(packed)]
+#[derive(Copy, Clone)]
+#[cfg_attr(feature = "dbg", derive(Debug))]
+struct Description<'a> { loc: Loc, description: &'a str }
+
 #[cfg_attr(feature = "dbg", derive(Debug))]
 enum Context<'a> {
-    #[default]
     Global,
     Job {
         target: &'a str,
@@ -188,13 +304,12 @@ enum Context<'a> {
 
         already_inserted: bool,
 
-        depfile_path: Option::<&'a str>,
-        depfile_path_loc: Option::<Loc>,
-
-        description: Option::<&'a str>,
-        description_loc: Option::<Loc>,
+        depfile_path: Option::<DepfilePath<'a>>,
+        description: Option::<Description<'a>>,
     }
 }
+
+type EscapedIndexes = Vec::<(usize, usize)>;
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct Parser<'a> {
@@ -204,7 +319,7 @@ pub struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    fn finish_shadows(&mut self) {
+    fn finish_job(&mut self) {
         match &mut self.context {
             Context::Job { target, shadows } => {
                 let job = self.parsed.job_mut(target);
@@ -217,19 +332,20 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_line(&mut self, line: &'a str) {
+        // NOTE: line should be trimmed at the beginning
         let first = line.find(['\t', '\n', '\x0C', '\r', ' ']).map(|first_space| {
             (first_space, &line[..first_space])
         });
 
         if matches!(self.context, Context::Job {..} | Context::Rule {..}) {
             if line.is_empty() {
-                self.finish_shadows();
+                self.finish_job();
                 self.context = Context::Global;
                 return
             }
 
-            if matches!(first, Some((.., "build" | "rule"))) {
-                self.finish_shadows();
+            if matches!(first, Some((.., BUILD | PHONY | RULE))) {
+                self.finish_job();
                 self.context = Context::Global
             }
         } else if line.is_empty() {
@@ -255,78 +371,83 @@ impl<'a> Parser<'a> {
             Def { value }
         };
 
+        // TODO: we should move context here and this match should return another updated context
         match &mut self.context {
-            Context::Job { shadows, .. } => {
-                let name = first_token;
-                let def = parse_def();
-                match shadows.as_mut() {
-                    Some(shadows) => { shadows.insert(name, def); },
-                    None => {
-                        let mut _shadows = StrHashMap::with_capacity(4);
-                        _shadows.insert(name, def);
-                        shadows.replace(_shadows);
+            Context::Job { target, shadows, .. } => {
+                match first_token {
+                    COMMAND => {
+                        let command_ = line[second_space + 1 + 1..].trim();
+                        let command_loc = Loc(self.cursor);
+                        let command = Template::new(command_, command_loc);
+                        let job = self.parsed.job_mut(target);
+                        job.phony = job.into_phony(Some(command));
                     },
+                    name => {
+                        let def = parse_def();
+                        match shadows.as_mut() {
+                            Some(shadows) => { shadows.insert(name, def); },
+                            None => {
+                                let mut _shadows = StrHashMap::with_capacity(4);
+                                _shadows.insert(name, def);
+                                shadows.replace(_shadows);
+                            },
+                        }
+                    }
                 }
             },
-            Context::Rule { name, depfile_path, depfile_path_loc, already_inserted, description_loc, description } => {
+            Context::Rule { name, depfile_path, already_inserted, description } => {
                 match first_token {
-                    "command" => {
+                    COMMAND => {
                         let command = line[second_space + 1 + 1..].trim();
                         let command_loc = self.cursor;
                         let rule = Rule::new(
                             command,
+                            Loc(command_loc),
                             *description,
                             *depfile_path,
-                            Loc(command_loc),
-                            description_loc.unwrap_or(Loc(command_loc)),
-                            depfile_path_loc.unwrap_or(Loc(command_loc))
                         );
                         self.parsed.rules.insert(name, rule);
                         self.context = Context::Rule {
                             name,
                             already_inserted: true,
-                            depfile_path: *depfile_path,
                             description: *description,
-                            description_loc: *description_loc,
-                            depfile_path_loc: *depfile_path_loc
+                            depfile_path: *depfile_path,
                         }
                     },
-                    "depfile" => {
-                        let Def {value: depfile_path} = parse_def();
+                    DEPFILE => {
+                        let Def {value: path} = parse_def();
+                        let loc = Loc(self.cursor);
+                        let depfile_path = DepfilePath {path, loc};
                         if *already_inserted {
                             let rule = self.parsed.rule_mut(name);
-                            let depfile = Template::new(depfile_path, Loc(self.cursor));
+                            let depfile = Template::new(depfile_path.path, depfile_path.loc);
                             rule.depfile = Some(depfile)
                         } else {
                             self.context = Context::Rule {
                                 name,
                                 already_inserted: true,
-                                depfile_path_loc: Some(Loc(self.cursor)),
                                 description: *description,
                                 depfile_path: Some(depfile_path),
-                                description_loc: *description_loc
                             }
                         }
                     },
-                    "description" => {
-                        let description_loc = Loc(self.cursor);
-                        let description_str = line[second_space + 1 + 1..].trim();
+                    DESCRIPTION => {
+                        let loc = Loc(self.cursor);
+                        let description = line[second_space + 1 + 1..].trim();
+                        let description = Description { loc, description };
                         if *already_inserted {
                             let rule = self.parsed.rule_mut(name);
-                            rule.description = Some(Template::new(description_str, description_loc));
+                            rule.description = Some(Template::new(description.description, description.loc));
                         } else {
-                            let description = Some(description_str);
                             self.context = Context::Rule {
                                 name,
-                                description,
-                                description_loc: Some(description_loc),
+                                description: Some(description),
                                 depfile_path: *depfile_path,
-                                depfile_path_loc: *depfile_path_loc,
                                 already_inserted: *already_inserted,
                             }
                         }
                     },
-                    _ => if line.chars().next() != Some('#') {
+                    _ => if line.chars().next() != Some(COMMENT) {
                         report!{
                             Loc(self.cursor),
                             "undefined property: `{first_token}`, existing properties are: `command`, `description`"
@@ -336,46 +457,91 @@ impl<'a> Parser<'a> {
             },
             Context::Global => {
                 match first_token {
-                    "rule" => {
-                        self.context = Context::Rule {
-                            depfile_path: None,
-                            depfile_path_loc: None,
-                            name: line[second_space..].trim_end(),
-                            already_inserted: false,
-                            description: None,
-                            description_loc: None,
+                    PHONY => {
+                        let phony = line[first_space..].trim();
+                        self.parsed.phonys.insert(phony);
+                        if let Some(job) = self.parsed.jobs.get_mut(phony) {
+                            job.phony = job.into_phony(None)
                         }
                     },
-                    "build" => {
+                    RULE => {
+                        self.context = Context::Rule {
+                            description: None,
+                            depfile_path: None,
+                            name: line[second_space..].trim_end(),
+                            already_inserted: false,
+                        }
+                    },
+                    BUILD => {
                         let Some(colon_idx) = line.find(':') else {
                             report!(Loc(self.cursor), "expected colon after build target")
                         };
                         let post_colon = line[colon_idx + 1..].trim();
                         let or_idx = post_colon.find('|');
 
-                        let (inputs_str, deps) = if let Some(or_idx) = or_idx {
-                            let inputs_str = post_colon[..or_idx].trim_end();
-                            let deps = post_colon[or_idx + 1..].split_ascii_whitespace().collect();
-                            (inputs_str, deps)
-                        } else {
-                            (post_colon, Vec::new())
-                        };
-
-                        let mut input_tokens = inputs_str.split_ascii_whitespace();
-                        let Some(rule) = input_tokens.next() else { return };
-
-                        let target = line[first_space..colon_idx].trim();
-
-                        let inputs = input_tokens.collect::<Vec::<_>>();
-                        let inputs_wo_rule_str = inputs_str[rule.len() + 1..].trim_end();
-
                         let loc = Loc(self.cursor);
-
+                        let target = line[first_space..colon_idx].trim();
                         let target_template = Template::new(target, loc);
-                        let inputs_templates = inputs.iter().map(|input| Template::new(input, loc)).collect();
 
-                        let deps_templates = deps.iter().map(|input| Template::new(input, loc)).collect();
-                        let job = Job {loc, target, deps_templates, inputs_templates, target_template, rule, inputs, inputs_wo_rule_str, deps, shadows: None};
+                        let job = if self.parsed.phonys.contains(target) {
+                            let aliases_str = if let Some(or_idx) = or_idx {
+                                post_colon[..or_idx].trim_end()
+                            } else {
+                                post_colon.trim_end()
+                            };
+
+                            let aliases_tokens = aliases_str.split_ascii_whitespace();
+                            let aliases = aliases_tokens.collect::<Vec::<_>>();
+                            let aliases_templates = aliases.iter().map(|alias| Template::new(alias, loc)).collect();
+
+                            prep::Job {
+                                loc,
+                                target,
+                                target_template,
+                                phony: prep::Phony::Phony {
+                                    command: None,
+                                    aliases,
+                                    aliases_templates
+                                },
+                                shadows: None,
+                            }
+                        } else {
+                            let (inputs_str, deps) = if let Some(or_idx) = or_idx {
+                                let inputs_str = post_colon[..or_idx].trim_end();
+                                let deps = post_colon[or_idx + 1..].split_ascii_whitespace().collect();
+                                (inputs_str, deps)
+                            } else {
+                                (post_colon, Vec::new())
+                            };
+
+                            let mut input_tokens = inputs_str.split_ascii_whitespace();
+                            let rule = input_tokens.next();
+
+                            let (inputs, inputs_str, inputs_templates) = if let Some(rule_len) = rule.map(|r| r.len()) {
+                                let inputs = input_tokens.collect::<Vec::<_>>();
+                                let inputs_str = inputs_str[rule_len + 1..].trim_end();
+                                let inputs_templates = inputs.iter().map(|input| Template::new(input, loc)).collect();
+                                (inputs, inputs_str, inputs_templates)
+                            } else {
+                                (Vec::new(), "", Vec::new())
+                            };
+
+                            let deps_templates = deps.iter().map(|input| Template::new(input, loc)).collect();
+                            prep::Job {
+                                loc,
+                                target,
+                                target_template,
+                                phony: prep::Phony::NotPhony {
+                                    rule,
+                                    inputs,
+                                    inputs_str,
+                                    inputs_templates,
+                                    deps,
+                                    deps_templates
+                                },
+                                shadows: None,
+                            }
+                        };
 
                         self.parsed.jobs.insert(target, job);
                         self.context = Context::Job {target, shadows: None}
@@ -390,33 +556,59 @@ impl<'a> Parser<'a> {
         };
     }
 
-    fn handle_newline_escape(&mut self, line: &'a str, lines: &mut Lines<'a>) -> &'a str {
-        let mut full_line = line.trim_end();
-        while full_line.as_bytes().last() == Some(&b'$') {
-            let trimmed = full_line[..full_line.len() - 1].trim_end();
-            let Some(next_line) = lines.next() else { break };
-            let next_trimmed = next_line.trim();
-            full_line = format!("{trimmed} {next_trimmed}").leak()
-        } full_line.trim_start()
+    pub fn handle_newline_escapes(input: &str) -> (String, EscapedIndexes) {
+        let mut ret = String::with_capacity(input.len());
+        let mut indexes = Vec::with_capacity(32);
+
+        let mut lines = input.lines().enumerate().peekable();
+        while let Some((index, line)) = lines.next() {
+            let mut escaped_lines = 0;
+            let mut curr_line = line.trim_end();
+            while curr_line.as_bytes().last() == Some(&(LINE_ESCAPE as u8)) {
+                escaped_lines += 1;
+                curr_line = curr_line[..curr_line.len() - 1].trim_end();
+
+                if let Some((.., next_line)) = lines.peek() {
+                    let next_trimmed = next_line.trim_start();
+                    ret.push_str(curr_line);
+                    ret.push(' ');
+                    curr_line = next_trimmed;
+                    lines.next();
+                } else {
+                    break
+                }
+            }
+
+            if escaped_lines > 0 {
+                indexes.push((index, escaped_lines))
+            }
+
+            ret.push_str(curr_line);
+            ret.push('\n');
+        } (ret, indexes)
     }
 
-    #[inline]
-    pub fn parse(content: &'a str) -> Parsed<'a> {
+    pub fn parse(escaped: &'a str, escaped_indexes: &EscapedIndexes) -> Parsed<'a> {
         let mut parser = Self {
             cursor: 0,
             parsed: Parsed {
                 defs: Defs::with_capacity(32),
                 jobs: StrHashMap::with_capacity(32),
-                rules: StrHashMap::with_capacity(32)
+                rules: StrHashMap::with_capacity(32),
+                phonys: StrHashSet::with_capacity(32),
             },
-            context: Context::default()
+            context: Context::Global
         };
-        let mut lines = content.lines();
-        while let Some(line) = lines.next() {
+
+        let mut escaped_index = 0;
+        for line in escaped.lines() {
             parser.cursor += 1;
-            if line.as_bytes().first() == Some(&b'#') { continue }
-            let line = parser.handle_newline_escape(line, &mut lines);
-            parser.parse_line(line)
+            if escaped_index < escaped_indexes.len() && escaped_indexes[escaped_index].0 <= parser.cursor {
+                parser.cursor += escaped_indexes[escaped_index].1;
+                escaped_index += 1
+            }
+            if line.as_bytes().first() == Some(&(COMMENT as u8)) { continue }
+            parser.parse_line(line.trim_start())
         } parser.parsed
     }
 }

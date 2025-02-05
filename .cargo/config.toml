@@ -1,2 +1,5 @@
+[profile.release]
+lto = true
+
 [build]
 rustflags = ["-C", "target-cpu=native"]

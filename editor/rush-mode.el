@@ -39,7 +39,7 @@
 
 (eval-and-compile
   (defconst rush-keywords
-    '("rule" "build" "command" "description" "depfile")))
+    '("rule" "build" "command" "description" "depfile" "phony")))
 
 (defconst rush-highlights
   `((,(regexp-opt rush-keywords 'symbols) . font-lock-keyword-face)))

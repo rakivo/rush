@@ -7,9 +7,8 @@ impl Loc {
     #[inline(always)]
     #[cfg_attr(feature = "dbg", track_caller)]
     pub fn report(literal: &str) -> ! {
-        #[cfg(feature = "dbg")] {
-            panic!("{literal}")
-        } #[cfg(not(feature = "dbg"))] {
+        #[cfg(feature = "dbg")] { panic!("{literal}") }
+        #[cfg(not(feature = "dbg"))] {
             eprintln!("{literal}");
             std::process::exit(1)
         }
@@ -20,7 +19,7 @@ impl Loc {
 macro_rules! report_fmt {
     ($loc: expr, $($arg:tt)*) => {
         format!{
-            "{f}:{row}: {msg}\n",
+            "{f}:{row}: {msg}",
             f = crate::parser::RUSH_FILE_NAME,
             row = $loc.0,
             msg = std::fmt::format(format_args!($($arg)*))
@@ -28,7 +27,7 @@ macro_rules! report_fmt {
     };
     ($loc: expr, $lit: literal) => {
         format!{
-            "{f}:{row}: {msg}\n",
+            "{f}:{row}: {msg}",
             f = crate::parser::RUSH_FILE_NAME,
             row = $loc.0,
             msg = $lit

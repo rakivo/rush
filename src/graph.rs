@@ -1,5 +1,6 @@
-use crate::types::*;
-use crate::parser::Processed;
+use crate::cr::DefaultTarget;
+use crate::parser::{Phony, Processed};
+use crate::types::{StrHashMap, StrHashSet};
 
 use std::fs;
 use std::sync::Arc;
@@ -8,7 +9,7 @@ use std::collections::VecDeque;
 pub type Graph<'a> = StrHashMap::<'a, Arc::<StrHashSet<'a>>>;
 pub type TransitiveDeps<'a> = StrHashMap::<'a, Arc::<StrHashSet<'a>>>;
 
-pub fn build_dependency_graph<'a>(parsed: &'a Processed) -> (Graph<'a>, TransitiveDeps<'a>) {
+pub fn build_dependency_graph<'a>(parsed: &'a Processed) -> (Graph<'a>, DefaultTarget<'a>, TransitiveDeps<'a>) {
     fn collect_deps<'a>(
         node: &'a str,
         parsed: &'a Processed,
@@ -23,14 +24,21 @@ pub fn build_dependency_graph<'a>(parsed: &'a Processed) -> (Graph<'a>, Transiti
         visited.insert(node);
 
         let mut deps = parsed.jobs.get(node).map(|job| {
-            job.inputs.iter()
-                .chain(job.deps.iter())
-                .cloned()
-                .collect::<StrHashSet>()
+            match &job.phony {
+                Phony::Phony { .. } => { StrHashSet::default() },
+                Phony::NotPhony { deps, inputs, .. } => {
+                    inputs.iter()
+                        .chain(deps.iter())
+                        .cloned()
+                        .collect::<StrHashSet>()
+                } 
+            }
         }).unwrap_or_default();
 
+        // check if depfile exists, if it does => read it, extend our deps with the ones that are listed in the .d file
         if let Some(job) = parsed.jobs.get(node) {
-            if let Some(rule) = parsed.rules.get(job.rule) {
+            
+            if let Some(Some(rule)) = job.rule().map(|rule| parsed.rules.get(rule)) {
                 if let Some(ref depfile_template) = rule.depfile {
                     let depfile_path = match depfile_template.compile_(job, &parsed.defs) {
                         Ok(ok) => ok,
@@ -40,12 +48,8 @@ pub fn build_dependency_graph<'a>(parsed: &'a Processed) -> (Graph<'a>, Transiti
                         let depfile = Box::leak(depfile.into_boxed_str());
                         let colon_idx = depfile.find(':');
                         let colon_idx = {
-                            #[cfg(feature = "dbg")] {
-                                colon_idx.unwrap()
-                            }
-                            #[cfg(not(feature = "dbg"))] unsafe {
-                                colon_idx.unwrap_unchecked()
-                            }
+                            #[cfg(feature = "dbg")] { colon_idx.unwrap() }
+                            #[cfg(not(feature = "dbg"))] unsafe { colon_idx.unwrap_unchecked() }
                         };
                         let depfile_deps = depfile[colon_idx + 1..]
                             .split_ascii_whitespace()
@@ -89,7 +93,27 @@ pub fn build_dependency_graph<'a>(parsed: &'a Processed) -> (Graph<'a>, Transiti
 
     for target in parsed.jobs.keys() {
         collect_deps(target, parsed, &mut graph, &mut visited, &mut transitive_deps);
-    } (graph, transitive_deps)
+    }
+
+    let default_target = if graph.is_empty() {
+        parsed.jobs.values().next()
+    } else {
+        let mut reverse_graph = StrHashMap::with_capacity(n);
+        for (node, deps) in graph.iter() {
+            for dep in deps.iter() {
+                reverse_graph.entry(*dep).or_insert_with(StrHashSet::default).insert(node);
+            }
+        }
+
+        // find a job that does not act as an input anywhere,
+        // then sort those by first appearing in the source code row-wise
+        parsed.jobs.keys()
+            .filter(|job| !reverse_graph.contains_key(*job))
+            .map(|t| unsafe { parsed.jobs.get(t).unwrap_unchecked() })
+            .min_by(|x, y| x.loc.0.cmp(&y.loc.0))
+    };
+
+    (graph, default_target, transitive_deps)
 }
 
 pub fn topological_sort_levels<'a>(graph: &Graph<'a>) -> Vec::<Vec::<&'a str>> {

@@ -1,10 +1,11 @@
+use crate::parser::Job;
 use crate::types::StrDashMap;
-use crate::parser::CompiledJob;
 use crate::graph::TransitiveDeps;
 
 use std::io;
 use std::ptr;
 use std::mem;
+use std::fmt;
 use std::fs::File;
 use std::path::Path;
 use std::ffi::CString;
@@ -20,6 +21,15 @@ pub struct CommandOutput {
     pub stderr: String,
     pub command: String,
     pub description: Option::<String>
+}
+
+impl fmt::Display for CommandOutput {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let CommandOutput { stdout, stderr, command, description } = self;
+        let command = description.as_ref().unwrap_or(command);
+        write!(f, "{command}\n{stdout}{stderr}")
+    }
 }
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
@@ -52,7 +62,7 @@ impl<'a> MetadataCache<'a> {
     }
 
     #[inline]
-    pub fn needs_rebuild(&self, job: &CompiledJob<'a>, transitive_deps: &TransitiveDeps<'a>) -> bool {
+    pub fn needs_rebuild(&self, job: &Job<'a>, transitive_deps: &TransitiveDeps<'a>) -> bool {
         // TODO: do something here if dependent file does not exist
         let mtimes = unsafe {
             transitive_deps.get(job.target).unwrap_unchecked()
