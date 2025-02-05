@@ -24,7 +24,6 @@ fn main() -> ExitCode {
     let content = unsafe { std::str::from_utf8_unchecked(&mmap[..]) };
     let (escaped, escaped_indexes) = Parser::handle_newline_escapes(content);
     let processed = Parser::parse(&escaped, &escaped_indexes).into_processed();
-    println!("{processed:#?}");
 
     let (graph, default_target, transitive_deps) = build_dependency_graph(&processed);
     CommandRunner::run(&processed, graph, default_target, &transitive_deps);

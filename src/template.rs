@@ -1,5 +1,5 @@
 use crate::loc::Loc;
-use crate::parser::{Job, Defs, Phony, PreprocessedJob, PreprocessedPhony};
+use crate::parser::{prep, Job, Defs, Phony};
 
 #[derive(Clone)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
@@ -113,15 +113,15 @@ impl Template<'_> {
         Ok(ret)
     }
 
-    pub fn compile(&self, job: &PreprocessedJob, defs: &Defs) -> Result::<String, String> {
+    pub fn compile(&self, job: &prep::Job, defs: &Defs) -> Result::<String, String> {
         let mut ret = String::new();
         for c in self.chunks.iter() {
             let s = match c {
                 TemplateChunk::Static(s) | TemplateChunk::JoinedStatic(s) => Ok(*s),
                 TemplateChunk::Placeholder(placeholder) | TemplateChunk::JoinedPlaceholder(placeholder) => match *placeholder {
                     "in" => Ok(match job.phony {
-                        PreprocessedPhony::Phony { .. } => "",
-                        PreprocessedPhony::NotPhony { inputs_str, .. } => { inputs_str },
+                        prep::Phony::Phony { .. } => "",
+                        prep::Phony::NotPhony { inputs_str, .. } => { inputs_str },
                     }),
                     "out" => Ok(job.target),
                     _ => job.shadows

@@ -52,6 +52,67 @@ impl<'a> Rule<'a> {
     }
 }
 
+pub mod prep {
+    use super::*;
+
+    #[cfg_attr(feature = "dbg", derive(Debug))]
+    pub enum Phony<'a> {
+        Phony {
+            command: Option::<Template<'a>>,
+            aliases: Vec::<&'a str>,
+            aliases_templates: Vec::<Template<'a>>,
+        },
+        NotPhony {
+            rule: Option::<&'a str>,
+
+            inputs: Vec::<&'a str>,
+            inputs_str: &'a str,
+            inputs_templates: Vec::<Template<'a>>,
+
+            deps: Vec::<&'a str>,
+            deps_templates: Vec::<Template<'a>>
+        }
+    }
+
+    #[cfg_attr(feature = "dbg", derive(Debug))]
+    pub struct Job<'a> {
+        pub loc: Loc,
+
+        pub shadows: Option::<Arc::<Defs<'a>>>,
+
+        pub target: &'a str,
+        pub target_template: Template<'a>,
+
+        pub phony: Phony<'a>
+    }
+
+    impl<'a> Job<'a> {
+        #[inline]
+        pub(super) fn into_phony(&mut self, command_: Option::<Template<'a>>) -> Phony<'a> {
+            match &mut self.phony {
+                Phony::NotPhony { rule, inputs, deps, .. } => {
+                    let mut aliases = Vec::with_capacity(inputs.len() + deps.len() + 1);
+                    if let Some(rule) = rule { aliases.push(*rule) }
+                    aliases.extend(mem::take(inputs).into_iter());
+                    aliases.extend(mem::take(deps).into_iter());
+                    Phony::Phony {
+                        command: command_,
+                        aliases_templates: aliases.iter().map(|a| Template::new(a, self.loc)).collect(),
+                        aliases,
+                    }
+                },
+                Phony::Phony { aliases, aliases_templates, command } => {
+                    Phony::Phony {
+                        command: command_.or(mem::take(command)),
+                        aliases: mem::take(aliases),
+                        aliases_templates: mem::take(aliases_templates)
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub enum Phony<'a> {
     Phony {
@@ -63,63 +124,6 @@ pub enum Phony<'a> {
         inputs: Vec::<&'a str>,
         inputs_str: &'a str,
         deps: Vec::<&'a str>,
-    }
-}
-
-#[cfg_attr(feature = "dbg", derive(Debug))]
-pub enum PreprocessedPhony<'a> {
-    Phony {
-        command: Option::<Template<'a>>,
-        aliases: Vec::<&'a str>,
-        aliases_templates: Vec::<Template<'a>>,
-    },
-    NotPhony {
-        rule: Option::<&'a str>,
-
-        inputs: Vec::<&'a str>,
-        inputs_str: &'a str,
-        inputs_templates: Vec::<Template<'a>>,
-
-        deps: Vec::<&'a str>,
-        deps_templates: Vec::<Template<'a>>
-    }
-}
-
-#[cfg_attr(feature = "dbg", derive(Debug))]
-pub struct PreprocessedJob<'a> {
-    pub loc: Loc,
-
-    pub shadows: Option::<Arc::<Defs<'a>>>,
-
-    pub target: &'a str,
-    pub target_template: Template<'a>,
-
-    pub phony: PreprocessedPhony<'a>
-}
-
-impl<'a> PreprocessedJob<'a> {
-    #[inline]
-    fn into_phony(&mut self, command_: Option::<Template<'a>>) -> PreprocessedPhony<'a> {
-        match &mut self.phony {
-            PreprocessedPhony::NotPhony { rule, inputs, deps, .. } => {
-                let mut aliases = Vec::with_capacity(inputs.len() + deps.len() + 1);
-                if let Some(rule) = rule { aliases.push(*rule) }
-                aliases.extend(mem::take(inputs).into_iter());
-                aliases.extend(mem::take(deps).into_iter());
-                PreprocessedPhony::Phony {
-                    command: command_,
-                    aliases_templates: aliases.iter().map(|a| Template::new(a, self.loc)).collect(),
-                    aliases,
-                }
-            },
-            PreprocessedPhony::Phony { aliases, aliases_templates, command } => {
-                PreprocessedPhony::Phony {
-                    command: command_.or(mem::take(command)),
-                    aliases: mem::take(aliases),
-                    aliases_templates: mem::take(aliases_templates)
-                }
-            }
-        }
     }
 }
 
@@ -155,13 +159,13 @@ pub type Defs<'a> = StrHashMap::<'a, Def<'a>>;
 pub struct Parsed<'a> {
     defs: Defs<'a>,
     phonys: StrHashSet<'a>,
-    jobs: StrHashMap::<'a, PreprocessedJob<'a>>,
+    jobs: StrHashMap::<'a, prep::Job<'a>>,
     rules: StrHashMap::<'a, Rule<'a>>,
 }
 
 impl<'a> Parsed<'a> {
     #[inline(always)]
-    fn job_mut(&mut self, target: &str) -> &mut PreprocessedJob<'a> {
+    fn job_mut(&mut self, target: &str) -> &mut prep::Job<'a> {
         unsafe { self.jobs.get_mut(target).unwrap_unchecked() }
     }
 
@@ -175,7 +179,7 @@ impl<'a> Parsed<'a> {
         let jobs = jobs.iter().filter_map(|(.., job)| {
             if matches!{
                 job.phony,
-                PreprocessedPhony::NotPhony { rule, .. }
+                prep::Phony::NotPhony { rule, .. }
                 if rule.map_or(false, |rule| !rules.contains_key(rule))
             } {
                 return None
@@ -187,7 +191,7 @@ impl<'a> Parsed<'a> {
             };
 
             let job = match &job.phony {
-                PreprocessedPhony::Phony { command, aliases_templates, aliases } => {
+                prep::Phony::Phony { command, aliases_templates, aliases } => {
                     if !phonys.contains(job.target) {
                         report!{
                             job.loc,
@@ -217,7 +221,7 @@ impl<'a> Parsed<'a> {
                         phony: Phony::Phony { command, aliases }
                     }
                 }
-                PreprocessedPhony::NotPhony {
+                prep::Phony::NotPhony {
                     rule,
                     inputs,
                     inputs_str,
@@ -494,11 +498,11 @@ impl<'a> Parser<'a> {
                             let aliases = aliases_tokens.collect::<Vec::<_>>();
                             let aliases_templates = aliases.iter().map(|alias| Template::new(alias, loc)).collect();
 
-                            PreprocessedJob {
+                            prep::Job {
                                 loc,
                                 target,
                                 target_template,
-                                phony: PreprocessedPhony::Phony {
+                                phony: prep::Phony::Phony {
                                     command: None,
                                     aliases,
                                     aliases_templates
@@ -527,11 +531,11 @@ impl<'a> Parser<'a> {
                             };
 
                             let deps_templates = deps.iter().map(|input| Template::new(input, loc)).collect();
-                            PreprocessedJob {
+                            prep::Job {
                                 loc,
                                 target,
                                 target_template,
-                                phony: PreprocessedPhony::NotPhony {
+                                phony: prep::Phony::NotPhony {
                                     rule,
                                     inputs,
                                     inputs_str,
