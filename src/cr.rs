@@ -5,10 +5,10 @@ use crate::command::{Command, MetadataCache, CommandOutput};
 use crate::parser::{Job, Rule, Phony, Processed, DefaultJob};
 use crate::graph::{Graph, TransitiveDeps, topological_sort_levels};
 
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::path::Path;
 use std::io::{self, Write};
+use std::hash::{Hash, Hasher};
 use std::thread::{self, JoinHandle};
 
 use dashmap::DashSet;
@@ -38,7 +38,7 @@ pub struct CommandRunner<'a> {
     db_read: Option::<Db<'a>>,
     db_write: Db<'a>,
     context: &'a Processed<'a>,
-    processed: StrDashSet::<'a>,
+    executed: StrDashSet::<'a>,
     metadata_cache: MetadataCache<'a>,
     transitive_deps: TransitiveDeps<'a>
 }
@@ -85,7 +85,7 @@ impl<'a> CommandRunner<'a> {
             context,
             db_read,
             db_write: Db::write(),
-            processed: DashSet::with_capacity_and_hasher(n, FxBuildHasher::default()),
+            executed: DashSet::with_capacity_and_hasher(n, FxBuildHasher::default()),
             metadata_cache: MetadataCache::new(n),
             transitive_deps
         }
@@ -288,7 +288,7 @@ impl<'a> CommandRunner<'a> {
         // TODO: reserve total amount of jobs here
         let mut stack = vec![job];
         while let Some(job) = stack.pop() {
-            if self.processed.contains(job.target) { continue }
+            if self.executed.contains(job.target) { continue }
 
             let Phony::NotPhony { rule, inputs, .. } = &job.phony else {
                 self.run_phony(job);
@@ -297,7 +297,7 @@ impl<'a> CommandRunner<'a> {
 
             let mut all_deps_resolved = true;
             for input in inputs.iter() {
-                if !self.processed.contains(input) {
+                if !self.executed.contains(input) {
                     if let Some(dep_job) = self.context.jobs.get(input) {
                         stack.push(job);
                         stack.push(dep_job);
@@ -315,7 +315,7 @@ impl<'a> CommandRunner<'a> {
 
             let Some(ref job_rule) = rule else { continue };
             if let Some(rule) = self.context.rules.get(job_rule) {
-                self.processed.insert(job.target);
+                self.executed.insert(job.target);
                 if self.execute_job(job, rule) { continue }
             } else {
                 cr_report!{
