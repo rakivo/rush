@@ -53,7 +53,7 @@ impl Template<'_> {
                 } else {
                     chunks.push(TemplateChunk::Placeholder(placeholder));
                 }
-                last_was_placeholder = true;
+                last_was_placeholder = true
             } else {
                 report!(loc, "empty placeholder")
             }
@@ -76,6 +76,7 @@ impl Template<'_> {
         Template { loc, chunks }
     }
 
+    #[inline]
     pub fn check(&self, defs: &Defs) -> Result::<(), String> {
         for placeholder in self.chunks.iter().filter_map(|c| {
             match c {
@@ -90,14 +91,14 @@ impl Template<'_> {
         } Ok(())
     }
 
+    #[inline]
     pub fn compile_(&self, job: &Job, defs: &Defs) -> Result::<String, String> {
-        let mut ret = String::new();
-        for c in self.chunks.iter() {
-            let s = match c {
+        self.chunks.iter().map(|c| {
+            match c {
                 TemplateChunk::Static(s) | TemplateChunk::JoinedStatic(s) => Ok(*s),
                 TemplateChunk::Placeholder(placeholder) | TemplateChunk::JoinedPlaceholder(placeholder) => match *placeholder {
                     "in" => Ok(match job.phony {
-                        Phony::Phony { .. } => "",
+                        Phony::Phony { .. } => report!(job.loc, "$in is not supported yet in phony jobs"),
                         Phony::NotPhony { inputs_str, .. } => { inputs_str },
                     }),
                     "out" => Ok(job.target),
@@ -107,32 +108,28 @@ impl Template<'_> {
                         .or_else(|| defs.get(placeholder).map(|def| def.value))
                         .ok_or(report_fmt!(self.loc, "undefined variable: {placeholder}"))
                 },
-            }?;
-            ret.push_str(s);
-        }
-        Ok(ret)
+            }
+        }).collect()
     }
 
+    #[inline]
     pub fn compile(&self, job: &prep::Job, defs: &Defs) -> Result::<String, String> {
-        let mut ret = String::new();
-        for c in self.chunks.iter() {
-            let s = match c {
+        self.chunks.iter().map(|c| {
+            match c {
                 TemplateChunk::Static(s) | TemplateChunk::JoinedStatic(s) => Ok(*s),
                 TemplateChunk::Placeholder(placeholder) | TemplateChunk::JoinedPlaceholder(placeholder) => match *placeholder {
                     "in" => Ok(match job.phony {
-                        prep::Phony::Phony { .. } => "",
+                        prep::Phony::Phony { .. } => report!(job.loc, "$in is not supported yet in phony jobs"),
                         prep::Phony::NotPhony { inputs_str, .. } => { inputs_str },
                     }),
                     "out" => Ok(job.target),
-                    _ => job.shadows
+                    undefined => job.shadows
                         .as_ref()
                         .and_then(|shadows| shadows.get(placeholder).map(|shadow| shadow.value))
                         .or_else(|| defs.get(placeholder).map(|def| def.value))
-                        .ok_or(report_fmt!(self.loc, "undefined variable: {placeholder}"))
-                },
-            }?;
-            ret.push_str(s);
-        }
-        Ok(ret)
+                        .ok_or(report_fmt!(self.loc, "undefined variable: {undefined}"))
+                }
+            }
+        }).collect()
     }
 }
