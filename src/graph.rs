@@ -40,7 +40,7 @@ pub fn build_dependency_graph<'a>(parsed: &'a Processed) -> (Graph<'a>, DefaultT
             
             if let Some(Some(rule)) = job.rule().map(|rule| parsed.rules.get(rule)) {
                 if let Some(ref depfile_template) = rule.depfile {
-                    let depfile_path = match depfile_template.compile_(job, &parsed.defs) {
+                    let depfile_path = match depfile_template.compile(job, &parsed.defs) {
                         Ok(ok) => ok,
                         Err(e) => report!(job.loc, "{e}")
                     };

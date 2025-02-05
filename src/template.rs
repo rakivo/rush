@@ -1,5 +1,5 @@
 use crate::loc::Loc;
-use crate::parser::{prep, Job, Defs, Phony};
+use crate::parser::{prep, Job, Defs, Phony, Shadows};
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
 enum TemplateChunk<'a> {
@@ -90,17 +90,17 @@ impl Template<'_> {
     }
 
     #[inline]
-    pub fn compile_(&self, job: &Job, defs: &Defs) -> Result::<String, String> {
+    fn _compile<'a, F>(&self, output_str: &str, input_fn: F, shadows: &Shadows, defs: &Defs) -> Result::<String, String>
+    where
+        F: Fn() -> &'a str
+    {
         self.chunks.iter().map(|c| {
             match c {
                 TemplateChunk::Static(s) | TemplateChunk::JoinedStatic(s) => Ok(*s),
                 TemplateChunk::Placeholder(placeholder) | TemplateChunk::JoinedPlaceholder(placeholder) => match *placeholder {
-                    "in" => Ok(match job.phony {
-                        Phony::Phony { .. } => report!(job.loc, "$in is not supported yet in phony jobs"),
-                        Phony::NotPhony { inputs_str, .. } => { inputs_str },
-                    }),
-                    "out" => Ok(job.target),
-                    _ => job.shadows
+                    "in" => Ok(input_fn()),
+                    "out" => Ok(output_str),
+                    _ => shadows
                         .as_ref()
                         .and_then(|shadows| shadows.get(placeholder).map(|shadow| shadow.value))
                         .or_else(|| defs.get(placeholder).map(|def| def.value))
@@ -111,23 +111,20 @@ impl Template<'_> {
     }
 
     #[inline]
-    pub fn compile(&self, job: &prep::Job, defs: &Defs) -> Result::<String, String> {
-        self.chunks.iter().map(|c| {
-            match c {
-                TemplateChunk::Static(s) | TemplateChunk::JoinedStatic(s) => Ok(*s),
-                TemplateChunk::Placeholder(placeholder) | TemplateChunk::JoinedPlaceholder(placeholder) => match *placeholder {
-                    "in" => Ok(match job.phony {
-                        prep::Phony::Phony { .. } => report!(job.loc, "$in is not supported yet in phony jobs"),
-                        prep::Phony::NotPhony { inputs_str, .. } => { inputs_str },
-                    }),
-                    "out" => Ok(job.target),
-                    undefined => job.shadows
-                        .as_ref()
-                        .and_then(|shadows| shadows.get(placeholder).map(|shadow| shadow.value))
-                        .or_else(|| defs.get(placeholder).map(|def| def.value))
-                        .ok_or(report_fmt!(self.loc, "undefined variable: {undefined}"))
-                }
-            }
-        }).collect()
+    pub fn compile(&self, job: &Job, defs: &Defs) -> Result::<String, String> {
+        let input_fn = || match job.phony {
+            Phony::Phony { .. } => report!(job.loc, "$in is not supported yet in phony jobs"),
+            Phony::NotPhony { inputs_str, .. } => { inputs_str },
+        };
+        self._compile(job.target, input_fn, &job.shadows, defs)
+    }
+
+    #[inline]
+    pub fn compile_prep(&self, job: &prep::Job, defs: &Defs) -> Result::<String, String> {
+        let input_fn = || match job.phony {
+            prep::Phony::Phony { .. } => report!(job.loc, "$in is not supported yet in phony jobs"),
+            prep::Phony::NotPhony { inputs_str, .. } => { inputs_str },
+        };
+        self._compile(job.target, input_fn, &job.shadows, defs)
     }
 }

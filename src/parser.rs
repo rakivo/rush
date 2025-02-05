@@ -51,6 +51,8 @@ impl<'a> Rule<'a> {
     }
 }
 
+pub type Shadows<'a> = Option::<Arc::<Defs<'a>>>;
+
 pub mod prep {
     use super::*;
 
@@ -77,7 +79,7 @@ pub mod prep {
     pub struct Job<'a> {
         pub loc: Loc,
 
-        pub shadows: Option::<Arc::<Defs<'a>>>,
+        pub shadows: Shadows<'a>,
 
         pub target: &'a str,
         pub target_template: Template<'a>,
@@ -132,7 +134,7 @@ pub struct Job<'a> {
 
     pub target: &'a str,
 
-    pub shadows: Option::<Arc::<Defs<'a>>>,
+    pub shadows: Shadows<'a>,
 
     pub phony: Phony<'a>
 }
@@ -183,7 +185,7 @@ impl<'a> Parsed<'a> {
                 return None
             }
 
-            let target = match job.target_template.compile(&job, &defs) {
+            let target = match job.target_template.compile_prep(&job, &defs) {
                 Ok(ok) => ok.leak() as &_,
                 Err(e) => report!(job.loc, "{e}")
             };
@@ -198,7 +200,7 @@ impl<'a> Parsed<'a> {
                         }
                     }
 
-                    let command = command.as_ref().map(|c| match c.compile(job, &defs) {
+                    let command = command.as_ref().map(|c| match c.compile_prep(job, &defs) {
                         Ok(ok) => ok,
                         Err(e) => report!(job.loc, "{e}")
                     });
@@ -206,7 +208,7 @@ impl<'a> Parsed<'a> {
                     let aliases = aliases_templates.iter()
                         .zip(aliases.iter())
                         .map(|(template, ..)| {
-                            match template.compile(&job, &defs) {
+                            match template.compile_prep(&job, &defs) {
                                 Ok(ok) => ok,
                                 Err(e) => report!(job.loc, "{e}")
                             }
@@ -231,7 +233,7 @@ impl<'a> Parsed<'a> {
                     let inputs = inputs_templates.iter()
                         .zip(inputs.iter())
                         .map(|(template, ..)| {
-                            match template.compile(&job, &defs) {
+                            match template.compile_prep(&job, &defs) {
                                 Ok(ok) => {
                                     let compiled = ok.leak() as &_;
                                     inputs_str.push_str(compiled);
@@ -248,7 +250,7 @@ impl<'a> Parsed<'a> {
                     let deps = deps_templates.iter()
                         .zip(deps.iter())
                         .map(|(template, ..)| {
-                            match template.compile(&job, &defs) {
+                            match template.compile_prep(&job, &defs) {
                                 Ok(ok) => ok.leak() as &_,
                                 Err(e) => report!(job.loc, "{e}")
                             }

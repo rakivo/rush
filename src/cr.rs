@@ -203,7 +203,7 @@ impl<'a> CommandRunner<'a> {
                 return false
             }
 
-            let Some(command) = rule.command.compile_(job, &self.context.defs).map_err(|e| {
+            let Some(command) = rule.command.compile(job, &self.context.defs).map_err(|e| {
                 _ = self.print(e);
                 rule.description.as_ref().and_then(|d| d.check(&self.context.defs).err()).map(|err| {
                     _ = self.print(err)
@@ -212,7 +212,7 @@ impl<'a> CommandRunner<'a> {
                 return true
             };
 
-            let description = rule.description.as_ref().and_then(|d| d.compile_(&job, &self.context.defs).map_err(|e| {
+            let description = rule.description.as_ref().and_then(|d| d.compile(&job, &self.context.defs).map_err(|e| {
                 _ = self.print(e)
             }).ok());
 
