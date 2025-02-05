@@ -28,7 +28,6 @@ pub fn read_rush() -> Option::<Mmap> {
     }
 }
 
-#[derive(Default)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct Rule<'a> {
     pub command: Template<'a>,
@@ -149,7 +148,6 @@ impl<'a> Job<'a> {
 }
 
 #[repr(transparent)]
-#[derive(Clone, Default)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct Def<'a> { pub value: &'a str }
 
@@ -294,10 +292,8 @@ struct DepfilePath<'a> { loc: Loc, path: &'a str }
 #[cfg_attr(feature = "dbg", derive(Debug))]
 struct Description<'a> { loc: Loc, description: &'a str }
 
-#[derive(Default)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 enum Context<'a> {
-    #[default]
     Global,
     Job {
         target: &'a str,
@@ -601,7 +597,7 @@ impl<'a> Parser<'a> {
                 rules: StrHashMap::with_capacity(32),
                 phonys: StrHashSet::with_capacity(32),
             },
-            context: Context::default()
+            context: Context::Global
         };
 
         let mut escaped_index = 0;

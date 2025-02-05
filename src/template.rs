@@ -1,7 +1,6 @@
 use crate::loc::Loc;
 use crate::parser::{prep, Job, Defs, Phony};
 
-#[derive(Clone)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 enum TemplateChunk<'a> {
     Static(&'a str),
@@ -10,7 +9,6 @@ enum TemplateChunk<'a> {
     JoinedPlaceholder(&'a str),
 }
 
-#[derive(Clone, Default)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct Template<'a> {
     loc: Loc,
