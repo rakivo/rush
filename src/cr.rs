@@ -30,6 +30,32 @@ pub struct CommandRunner<'a> {
 }
 
 impl<'a> CommandRunner<'a> {
+    pub fn run(
+        context: &'a Processed,
+        graph: Graph<'a>,
+        default_target: DefaultTarget<'a>,
+        transitive_deps: &'a TransitiveDeps<'a>
+    ) {
+        let (stdout, writer) = Self::stdout_thread();
+        let cb = Self::new(stdout, graph, context, transitive_deps);
+
+        let levels = if let Some(job) = default_target {
+            cb.run_target(job);
+            cb.drop(writer);
+            return
+        } else {
+            topological_sort_levels(&cb.graph)
+        };
+
+        levels.into_iter().for_each(|level| {
+            level.into_par_iter().filter_map(|t| context.jobs.get(t)).for_each(|job| {
+                cb.resolve_and_run(job)
+            });
+        });
+
+        cb.drop(writer);
+    }
+
     #[inline]
     fn new(
         stdout: Stdout,
@@ -134,6 +160,7 @@ impl<'a> CommandRunner<'a> {
             for s in stdout_recv {
                 _ = stdout_handle.write_all(s.as_bytes());
             }
+            _ = stdout_handle.flush();
         }); (stdout, writer)
     }
 
@@ -145,32 +172,6 @@ impl<'a> CommandRunner<'a> {
         }
 
         self.resolve_and_run_target(job);
-    }
-
-    pub fn run(
-        context: &'a Processed,
-        graph: Graph<'a>,
-        default_target: DefaultTarget<'a>,
-        transitive_deps: &'a TransitiveDeps<'a>
-    ) {
-        let (stdout, writer) = Self::stdout_thread();
-        let cb = Self::new(stdout, graph, context, transitive_deps);
-
-        let levels = if let Some(job) = default_target {
-            cb.run_target(job);
-            cb.drop(writer);
-            return
-        } else {
-            topological_sort_levels(&cb.graph)
-        };
-
-        levels.into_iter().for_each(|level| {
-            level.into_par_iter().filter_map(|t| context.jobs.get(t)).for_each(|job| {
-                cb.resolve_and_run(job)
-            });
-        });
-
-        cb.drop(writer);
     }
 
     #[inline]
