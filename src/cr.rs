@@ -80,7 +80,7 @@ impl<'a> CommandRunner<'a> {
                             None
                         }
                     }
-                }).for_each(|job| self._run_target(job));
+                }).for_each(|job| self.resolve_and_run_target(job));
 
                 if let Some(command_output) = {
                     command.as_ref().map(|c| {
@@ -99,16 +99,31 @@ impl<'a> CommandRunner<'a> {
         }
     }
 
-    fn build_subgraph(graph: &Graph<'a>, target: &'a str, transitive_deps: &TransitiveDeps<'a>) -> Graph<'a> {
-        let deps = transitive_deps.get(target).cloned().unwrap_or_default();
+    #[inline]
+    fn build_subgraph(&self, target: &'a str) -> Graph<'a> {
+        let deps = self.transitive_deps.get(target).cloned().unwrap_or_default();
         let mut subgraph = Graph::with_capacity(deps.len() + 1);
 
         subgraph.insert(target, Arc::clone(&deps));
         for dep in deps.iter() {
-            if let Some(deps_of_dep) = graph.get(dep) {
+            if let Some(deps_of_dep) = self.graph.get(dep) {
                 subgraph.insert(&dep, Arc::clone(deps_of_dep));
             }
         } subgraph
+    }
+
+    #[inline]
+    fn resolve_and_run_target(&self, job: &Job<'a>) {
+        let levels = {
+            let subgraph = self.build_subgraph(job.target);
+            topological_sort_levels(&subgraph)
+        };
+
+        levels.into_iter().for_each(|level| {
+            level.into_par_iter().filter_map(|t| self.context.jobs.get(t)).for_each(|job| {
+                self.resolve_and_run(job);
+            });
+        });
     }
 
     #[inline]
@@ -122,36 +137,14 @@ impl<'a> CommandRunner<'a> {
         }); (stdout, writer)
     }
 
-    fn _run_target(&self, job: &Job<'a>) {
-        let levels = {
-            let subgraph = Self::build_subgraph(&self.graph, job.target, self.transitive_deps);
-            topological_sort_levels(&subgraph)
-        };
-
-        levels.into_iter().for_each(|level| {
-            level.into_par_iter().filter_map(|t| self.context.jobs.get(t)).for_each(|job| {
-                self._resolve_and_run(job);
-            });
-        });
-    }
-
-    pub fn run_target(
-        context: &'a Processed,
-        graph: Graph<'a>,
-        transitive_deps: &'a TransitiveDeps<'a>,
-        job: &Job<'a>
-    ) {
-        let (stdout, writer) = Self::stdout_thread();
-        let cb = Self::new(stdout, graph, context, transitive_deps);
-
+    #[inline]
+    fn run_target(&self, job: &Job<'a>) {
         if PHONY_TARGETS.contains(&job.target) {
-            cb.run_phony(job);
-            cb.drop(writer);
+            self.run_phony(job);
             return
         }
 
-        cb._run_target(job);
-        cb.drop(writer);
+        self.resolve_and_run_target(job);
     }
 
     pub fn run(
@@ -160,19 +153,20 @@ impl<'a> CommandRunner<'a> {
         default_target: DefaultTarget<'a>,
         transitive_deps: &'a TransitiveDeps<'a>
     ) {
-        let levels = if let Some(job) = default_target {
-            Self::run_target(context, graph, transitive_deps, job);
-            return
-        } else {
-            topological_sort_levels(&graph)
-        };
-
         let (stdout, writer) = Self::stdout_thread();
         let cb = Self::new(stdout, graph, context, transitive_deps);
 
+        let levels = if let Some(job) = default_target {
+            cb.run_target(job);
+            cb.drop(writer);
+            return
+        } else {
+            topological_sort_levels(&cb.graph)
+        };
+
         levels.into_iter().for_each(|level| {
             level.into_par_iter().filter_map(|t| context.jobs.get(t)).for_each(|job| {
-                cb._resolve_and_run(job)
+                cb.resolve_and_run(job)
             });
         });
 
@@ -246,7 +240,7 @@ impl<'a> CommandRunner<'a> {
         } false
     }
 
-    fn _resolve_and_run(&self, job: &Job<'a>) {
+    fn resolve_and_run(&self, job: &Job<'a>) {
         // TODO: reserve total amount of jobs here
         let mut stack = vec![job];
         while let Some(job) = stack.pop() {
