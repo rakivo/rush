@@ -8,6 +8,7 @@ authors = ["Mark Tyrkba <marktyrkba456@gmail.com>"]
 dbg = ["dep:tramer"]
 
 [dependencies]
+fnv = "1.0.7"
 libc = "0.2.169"
 rayon = "1.10.0"
 memmap2 = "0.9.5"

@@ -12,17 +12,15 @@ use memmap2::Mmap;
 #[cfg(feature = "dbg")]
 use tramer::tramer;
 
-pub const RUSH_FILE_NAME: &str = "build.rush";
-
 #[inline]
-pub fn read_rush() -> Option::<Mmap> {
-    if let Some(path) = fs::read_dir(".")
+pub fn read_file(path: &str) -> Option::<Mmap> {
+    if fs::read_dir(".")
         .expect("could not read cwd")
         .filter_map(|res| res.map(|e| e.path()).ok())
-        .find(|path| {
-            path.file_name()
-                .map_or(false, |name| name.to_string_lossy() == RUSH_FILE_NAME)
-        })
+        .find(|_path| {
+            _path.file_name()
+                .map_or(false, |name| name.to_string_lossy() == path)
+        }).is_some()
     {
         let file = File::open(path).ok()?;
         Some(unsafe { Mmap::map(&file) }.ok()?)
@@ -30,6 +28,7 @@ pub fn read_rush() -> Option::<Mmap> {
         None
     }
 }
+
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct Rule<'a> {
@@ -368,6 +367,13 @@ pub struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
+    pub const RUSH_FILE_NAME: &'static str = "build.rush";
+
+    #[inline(always)]
+    pub fn read_rush() -> Option::<Mmap> {
+        read_file(Self::RUSH_FILE_NAME)
+    }
+
     fn finish_job(&mut self) {
         match &mut self.context {
             Context::Job { target, shadows } => {

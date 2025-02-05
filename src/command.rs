@@ -33,14 +33,8 @@ impl fmt::Display for CommandOutput {
 }
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
-#[derive(Copy, Clone, PartialEq, PartialOrd)]
-pub struct Metadata {
-    mtime: SystemTime
-}
-
-#[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct MetadataCache<'a> {
-    files: StrDashMap::<'a, Metadata>
+    files: StrDashMap::<'a, SystemTime>
 }
 
 impl<'a> MetadataCache<'a> {
@@ -50,12 +44,12 @@ impl<'a> MetadataCache<'a> {
     }
 
     #[inline]
-    pub fn mtime(&self, f: &'a str) -> io::Result::<Metadata> {
+    pub fn mtime(&self, f: &'a str) -> io::Result::<SystemTime> {
         if let Some(mtime) = self.files.get(f) {
             Ok(*mtime)
         } else {
             let p: &Path = f.as_ref();
-            let m = Metadata { mtime: p.metadata()?.modified()? };
+            let m = p.metadata()?.modified()?;
             self.files.insert(f, m);
             Ok(m)
         }

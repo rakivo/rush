@@ -1,9 +1,11 @@
 use crate::types::StrDashSet;
+use crate::db::{Db, Metadata};
 use crate::consts::PHONY_TARGETS;
 use crate::command::{Command, MetadataCache, CommandOutput};
 use crate::parser::{Job, Rule, Phony, Processed, DefaultJob};
 use crate::graph::{Graph, TransitiveDeps, topological_sort_levels};
 
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::path::Path;
 use std::io::{self, Write};
@@ -21,26 +23,28 @@ type StdoutThread = JoinHandle::<()>;
 pub struct CommandRunner<'a> {
     stdout: Stdout,
     graph: Graph<'a>,
+    db_read: Option::<Db<'a>>,
+    db_write: Db<'a>,
     context: &'a Processed<'a>,
     processed: StrDashSet::<'a>,
     metadata_cache: MetadataCache<'a>,
-    transitive_deps: &'a TransitiveDeps<'a>
+    transitive_deps: TransitiveDeps<'a>
 }
 
 impl<'a> CommandRunner<'a> {
     pub fn run(
         context: &'a Processed,
         graph: Graph<'a>,
+        db: Option::<Db<'a>>,
         default_job: DefaultJob<'a>,
-        transitive_deps: &'a TransitiveDeps<'a>
-    ) {
+        transitive_deps: TransitiveDeps<'a>
+    ) -> Db<'a> {
         let (stdout, writer) = Self::stdout_thread();
-        let cb = Self::new(stdout, graph, context, transitive_deps);
+        let cb = Self::new(stdout, graph, db, context, transitive_deps);
 
         let levels = if let Some(job) = default_job {
             cb.run_target(job);
-            cb.drop(writer);
-            return
+            return cb.finish(writer)
         } else {
             topological_sort_levels(&cb.graph)
         };
@@ -51,21 +55,24 @@ impl<'a> CommandRunner<'a> {
             });
         });
 
-        cb.drop(writer);
+        cb.finish(writer)
     }
 
     #[inline]
     fn new(
         stdout: Stdout,
         graph: Graph<'a>,
+        db_read: Option::<Db<'a>>,
         context: &'a Processed<'a>,
-        transitive_deps: &'a TransitiveDeps<'a>
+        transitive_deps: TransitiveDeps<'a>
     ) -> Self {
         let n = context.jobs.len();
         Self {
             graph,
             stdout,
             context,
+            db_read,
+            db_write: Db::write(),
             processed: DashSet::with_capacity_and_hasher(n, FxBuildHasher::default()),
             metadata_cache: MetadataCache::new(n),
             transitive_deps
@@ -73,9 +80,10 @@ impl<'a> CommandRunner<'a> {
     }
 
     #[inline]
-    fn drop(self, writer: StdoutThread) {
-        drop(self);
-        _ = writer.join()
+    fn finish(self, writer: StdoutThread) -> Db<'a> {
+        drop(self.stdout);
+        _ = writer.join();
+        self.db_write
     }
 
     #[inline]
@@ -189,8 +197,42 @@ impl<'a> CommandRunner<'a> {
         }
     }
 
+    #[inline]
+    fn hash(command: &str) -> u64 {
+        let mut hasher = fnv::FnvHasher::default();
+        command.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    #[inline]
+    fn needs_rebuild(&self, job: &Job<'a>, command: &str) -> bool {
+        self.db_read.as_ref().map_or(false, |db| {
+            db.metadata_read(job.target).map_or(false, |md| {
+                md.command_hash != Self::hash(command)
+            })
+        }) || self.metadata_cache.needs_rebuild(job, &self.transitive_deps)
+    }
+
+    #[inline]
+    fn compile_command(&self, job: &Job<'a>, rule: &Rule) -> Option::<String> {
+        rule.command.compile(job, &self.context.defs).map_err(|e| {
+            _ = self.print(e);
+            rule.description.as_ref().and_then(|d| d.check(&self.context.defs).err()).map(|err| {
+                _ = self.print(err)
+            });
+        }).map(|command| {
+            self.db_write.metadata_write(job.target, Metadata {
+                command_hash: Self::hash(&command)
+            }); command
+        }).ok()
+    }
+
     fn execute_job(&self, job: &Job<'a>, rule: &Rule) -> bool {
-        if self.metadata_cache.needs_rebuild(job, &self.transitive_deps) {
+        let Some(command) = self.compile_command(job, rule) else {
+            return true
+        };
+
+        if self.needs_rebuild(job, &command) {
             if let Err(e) = self.create_dirs_if_needed(job.target) {
                 let msg = format!{
                     "could not create build directory for target: {target}: {e}",
@@ -199,15 +241,6 @@ impl<'a> CommandRunner<'a> {
                 _ = self.print(msg);
                 return false
             }
-
-            let Some(command) = rule.command.compile(job, &self.context.defs).map_err(|e| {
-                _ = self.print(e);
-                rule.description.as_ref().and_then(|d| d.check(&self.context.defs).err()).map(|err| {
-                    _ = self.print(err)
-                });
-            }).ok() else {
-                return true
-            };
 
             let description = rule.description.as_ref().and_then(|d| d.compile(&job, &self.context.defs).map_err(|e| {
                 _ = self.print(e)
