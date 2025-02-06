@@ -102,25 +102,11 @@ impl Template<'_> {
                 TemplateChunk::Placeholder(placeholder) | TemplateChunk::JoinedPlaceholder(placeholder) => match *placeholder {
                     "in" => Ok(input_str),
                     "out" => Ok(output_str),
-                    // _ => shadows
-                    //     .as_ref()
-                    //     .and_then(|shadows| shadows.get(placeholder).map(|shadow| shadow.value))
-                    //     .or_else(|| defs.get(placeholder).map(|def| def.value))
-                    //     .ok_or(report_fmt!(self.loc, "undefined variable: {placeholder}"))
-                    _ => if let Some(shadows) = shadows.as_ref() {
-                        // Look up in shadows first
-                        if let Some(a) = shadows.get(placeholder).map(|shadow| shadow.value) {
-                            Ok(a)
-                        } else if let Some(d) = defs.get(placeholder).map(|def| def.value) {
-                            Ok(d)
-                        } else {
-                            Err(report_fmt!(self.loc, "[SHADOWS] undefined variable: {placeholder}"))
-                        }
-                    } else if let Some(d) = defs.get(placeholder).map(|def| def.value) {
-                        Ok(d)
-                    } else {
-                        Err(report_fmt!(self.loc, "[DEFS] undefined variable: {placeholder}"))
-                    }
+                    _ => shadows
+                        .as_ref()
+                        .and_then(|shadows| shadows.get(placeholder).map(|shadow| shadow.value))
+                        .or_else(|| defs.get(placeholder).map(|def| def.value))
+                        .ok_or(report_fmt!(self.loc, "undefined variable: {placeholder}"))
                 },
             }
         }).collect()
