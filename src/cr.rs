@@ -21,6 +21,12 @@ type StdoutThread = JoinHandle::<()>;
 
 macro_rules! cr_print {
     ($self: expr, $($arg:tt)*) => {{
+        #[cfg(feature = "dbg")] {
+            _ = $self.print(format!{
+                "{f}:{l}:{c}:\n",
+                f = file!(), l = line!(), c = column!()
+            });
+        }
         _ = $self.print(std::fmt::format(format_args!($($arg)*)));
     }};
 }
@@ -237,7 +243,7 @@ impl<'a> CommandRunner<'a> {
     fn compile_command(&self, job: &Job<'a>, rule: &Rule) -> Option::<String> {
         rule.command.compile(job, &self.context.defs).map_err(|e| {
             cr_print!(self, "{e}\n");
-            rule.description.as_ref().and_then(|d| d.check(&self.context.defs).err()).map(|err| {
+            rule.description.as_ref().and_then(|d| d.check(&job.shadows, &self.context.defs).err()).map(|err| {
                 cr_print!(self, "{err}\n");
             });
         }).map(|command| {
@@ -256,14 +262,14 @@ impl<'a> CommandRunner<'a> {
             if let Err(e) = self.create_dirs_if_needed(job.target) {
                 cr_print!{
                     self,
-                    "could not create build directory for target: {target}: {e}",
+                    "could not create build directory for target: {target}: {e}\n",
                     target = job.target
                 };
                 return false
             }
 
             let description = rule.description.as_ref().and_then(|d| d.compile(&job, &self.context.defs).map_err(|e| {
-                cr_print!(self, "{e}");
+                cr_print!(self, "{e}\n");
             }).ok());
 
             let command = Command { command, description };
@@ -274,13 +280,13 @@ impl<'a> CommandRunner<'a> {
             cr_print!(self, "{command_output}");
         } else {
             let mut any_err = false;
-            if let Err(err) = rule.command.check(&self.context.defs) {
-                cr_print!(self, "{err}");
+            if let Err(err) = rule.command.check(&job.shadows, &self.context.defs) {
+                cr_print!(self, "{err}\n");
                 any_err = true
             }
 
-            if let Some(Err(err)) = rule.description.as_ref().map(|d| d.check(&self.context.defs)) {
-                cr_print!(self, "{err}");
+            if let Some(Err(err)) = rule.description.as_ref().map(|d| d.check(&job.shadows, &self.context.defs)) {
+                cr_print!(self, "{err}\n");
                 any_err = true
             }
 

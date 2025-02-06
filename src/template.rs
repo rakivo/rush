@@ -19,6 +19,7 @@ pub struct Template<'a> {
 impl Template<'_> {
     const CONSTANT_PLACEHOLDERS: &'static [&'static str] = &["in", "out"];
 
+    #[cfg_attr(feature = "dbg", track_caller)]
     pub fn new(s: &str, loc: Loc) -> Template {
         let mut start = 0;
         let mut chunks = Vec::new();
@@ -79,7 +80,7 @@ impl Template<'_> {
     }
 
     #[inline]
-    pub fn check(&self, defs: &Defs) -> Result::<(), String> {
+    pub fn check(&self, shadows: &Shadows, defs: &Defs) -> Result::<(), String> {
         for placeholder in self.chunks.iter().filter_map(|c| {
             match c {
                 TemplateChunk::Placeholder(p) |
@@ -87,25 +88,39 @@ impl Template<'_> {
                 _ => None
             }
         }) {
-            if !defs.contains_key(placeholder) {
+            if !shadows.as_ref().map_or(false, |s| s.contains_key(placeholder)) && !defs.contains_key(placeholder) {
                 return Err(report_fmt!(self.loc, "undefined variable: {placeholder}"))
             }
         } Ok(())
     }
 
     #[inline]
-    fn _compile<'a>(&self, output_str: &str, input_str: &str, shadows: &Shadows, defs: &Defs) -> Result::<String, String> {
+    fn _compile(&self, output_str: &str, input_str: &str, shadows: &Shadows, defs: &Defs) -> Result::<String, String> {
         self.chunks.iter().map(|c| {
             match c {
                 TemplateChunk::Static(s) | TemplateChunk::JoinedStatic(s) => Ok(*s),
                 TemplateChunk::Placeholder(placeholder) | TemplateChunk::JoinedPlaceholder(placeholder) => match *placeholder {
                     "in" => Ok(input_str),
                     "out" => Ok(output_str),
-                    _ => shadows
-                        .as_ref()
-                        .and_then(|shadows| shadows.get(placeholder).map(|shadow| shadow.value))
-                        .or_else(|| defs.get(placeholder).map(|def| def.value))
-                        .ok_or(report_fmt!(self.loc, "undefined variable: {placeholder}"))
+                    // _ => shadows
+                    //     .as_ref()
+                    //     .and_then(|shadows| shadows.get(placeholder).map(|shadow| shadow.value))
+                    //     .or_else(|| defs.get(placeholder).map(|def| def.value))
+                    //     .ok_or(report_fmt!(self.loc, "undefined variable: {placeholder}"))
+                    _ => if let Some(shadows) = shadows.as_ref() {
+                        // Look up in shadows first
+                        if let Some(a) = shadows.get(placeholder).map(|shadow| shadow.value) {
+                            Ok(a)
+                        } else if let Some(d) = defs.get(placeholder).map(|def| def.value) {
+                            Ok(d)
+                        } else {
+                            Err(report_fmt!(self.loc, "[SHADOWS] undefined variable: {placeholder}"))
+                        }
+                    } else if let Some(d) = defs.get(placeholder).map(|def| def.value) {
+                        Ok(d)
+                    } else {
+                        Err(report_fmt!(self.loc, "[DEFS] undefined variable: {placeholder}"))
+                    }
                 },
             }
         }).collect()
@@ -123,15 +138,15 @@ impl Template<'_> {
 
     #[inline]
     #[cfg_attr(feature = "dbg", track_caller)]
-    pub fn compile_def<'a>(&self, defs: &Defs) -> String {
+    pub fn compile_def(&self, defs: &Defs) -> String {
         self.chunks.iter().map(|c| {
             match c {
                 TemplateChunk::Static(s) | TemplateChunk::JoinedStatic(s) => *s,
                 TemplateChunk::Placeholder(placeholder) | TemplateChunk::JoinedPlaceholder(placeholder) => match *placeholder {
-                    "in" => report!(self.loc, "$in is not allowed in variables definitions"),
-                    "out" => report!(self.loc, "$out is not allowed in variables definitions"),
+                    "in" => report!(self.loc, "$in is not allowed in variables definitions\n"),
+                    "out" => report!(self.loc, "$out is not allowed in variables definitions\n"),
                     _ => defs.get(placeholder).map(|def| def.value).unwrap_or_else(|| {
-                        report!(self.loc, "undefined variable: {placeholder}")
+                        report!(self.loc, "undefined variable: {placeholder}\n")
                     })
                 },
             }

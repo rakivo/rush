@@ -28,6 +28,7 @@ phony run
 build run:
   command = ./$builddir/main
 
-phony clean:
+phony clean
+build clean:
   command = rm -f $builddir/*
 ```

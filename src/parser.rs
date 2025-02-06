@@ -39,6 +39,7 @@ pub struct Rule<'a> {
 
 impl<'a> Rule<'a> {
     #[inline]
+    #[cfg_attr(feature = "dbg", track_caller)]
     fn new(
         command: &'a str,
         command_loc: Loc,
@@ -218,17 +219,17 @@ impl<'a> Parsed<'a> {
     pub fn into_processed(self) -> Processed<'a> {
         let Parsed { defs, jobs, rules, phonys, default_target } = self;
         let jobs = jobs.iter().filter_map(|(.., job)| {
-            if matches!{
-                job.phony,
-                prep::Phony::NotPhony { rule, .. }
-                if rule.map_or(false, |rule| !rules.contains_key(rule))
-            } {
-                return None
+            if let prep::Phony::NotPhony { rule, .. } = &job.phony {
+                if let Some(ref rule) = rule {
+                    if !rules.contains_key(rule) {
+                        report!(job.loc, "undefined rule: {rule}\n")
+                    }
+                }
             }
 
             let target = match job.target_template.compile_prep(&job, &defs) {
                 Ok(ok) => ok.leak() as &_,
-                Err(e) => report!(job.loc, "{e}")
+                Err(e) => panic!("{e}\n")
             };
 
             let job = match &job.phony {
@@ -236,14 +237,14 @@ impl<'a> Parsed<'a> {
                     if  !phonys.contains(job.target) {
                         report!{
                             job.loc,
-                            "mark {target} as phony for it to have a command",
+                            "mark {target} as phony for it to have a command\n",
                             target = job.target
                         }
                     }
 
                     let command = command.as_ref().map(|c| match c.compile_prep(job, &defs) {
                         Ok(ok) => ok,
-                        Err(e) => report!(job.loc, "{e}")
+                        Err(e) => panic!("{e}\n")
                     });
 
                     let aliases = aliases_templates.iter()
@@ -251,7 +252,7 @@ impl<'a> Parsed<'a> {
                         .map(|(template, ..)| {
                             match template.compile_prep(&job, &defs) {
                                 Ok(ok) => ok,
-                                Err(e) => report!(job.loc, "{e}")
+                                Err(e) => panic!("{e}\n")
                             }
                         }).collect::<Vec::<_>>();
 
@@ -281,7 +282,7 @@ impl<'a> Parsed<'a> {
                                     inputs_str.push(' ');
                                     compiled
                                 },
-                                Err(e) => report!(job.loc, "{e}")
+                                Err(e) => panic!("{e}\n")
                             }
                         }).collect::<Vec::<_>>();
 
@@ -293,7 +294,7 @@ impl<'a> Parsed<'a> {
                         .map(|(template, ..)| {
                             match template.compile_prep(&job, &defs) {
                                 Ok(ok) => ok.leak() as &_,
-                                Err(e) => report!(job.loc, "{e}")
+                                Err(e) => panic!("{e}\n")
                             }
                         }).collect::<Vec::<_>>();
 
@@ -386,26 +387,31 @@ impl<'a> Parser<'a> {
         };
     }
 
-    fn parse_line(&mut self, line: &'a str) {
-        // NOTE: line should be trimmed at the beginning
-        let first = line.find(['\t', '\n', '\x0C', '\r', ' ']).map(|first_space| {
-            (first_space, &line[..first_space])
+    fn parse_line(&mut self, line_: &'a str, trimmed_: &'a str) {
+        let first = line_.find(['\t', '\n', '\x0C', '\r', ' ']).map(|first_space| {
+            (first_space, &line_[..first_space])
         });
 
+        let line = trimmed_;
         if matches!(self.context, Context::Job {..} | Context::Rule {..}) {
-            if line.is_empty() {
+            if line.is_empty() || matches!(line_.find(|c: char| c.is_alphanumeric()), Some(first) if first == 0) {
                 self.finish_job();
                 self.context = Context::Global;
-                return
             }
 
             if matches!(first, Some((.., BUILD | PHONY | RULE))) {
                 self.finish_job();
                 self.context = Context::Global
             }
-        } else if line.is_empty() {
+        }
+
+        if line.is_empty() {
             return
         }
+
+        let first = line.find(['\t', '\n', '\x0C', '\r', ' ']).map(|first_space| {
+            (first_space, &line[..first_space])
+        });
 
         let Some((first_space, first_token)) = first else {
             report!(Loc(self.cursor), "undefined token: {line}")
@@ -679,8 +685,12 @@ impl<'a> Parser<'a> {
                 parser.cursor += escaped_indexes[escaped_index].1;
                 escaped_index += 1
             }
-            if line.as_bytes().first() == Some(&(COMMENT as u8)) { continue }
-            parser.parse_line(line.trim_start())
-        } parser.parsed
+            let trimmed = line.trim_start();
+            if trimmed.as_bytes().first() == Some(&(COMMENT as u8)) { continue }
+            parser.parse_line(line, trimmed)
+        }
+
+        parser.finish_job();
+        parser.parsed
     }
 }
