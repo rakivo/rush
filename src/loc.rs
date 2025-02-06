@@ -20,7 +20,7 @@ macro_rules! report_fmt {
     ($loc: expr, $($arg:tt)*) => {
         format!{
             "{f}:{row}: {msg}",
-            f = crate::parser::Parser::RUSH_FILE_NAME,
+            f = crate::parser::Parser::RUSH_FILE_PATH,
             row = $loc.0,
             msg = std::fmt::format(format_args!($($arg)*))
         }
@@ -28,7 +28,7 @@ macro_rules! report_fmt {
     ($loc: expr, $lit: literal) => {
         format!{
             "{f}:{row}: {msg}",
-            f = crate::parser::Parser::RUSH_FILE_NAME,
+            f = crate::parser::Parser::RUSH_FILE_PATH,
             row = $loc.0,
             msg = $lit
         }

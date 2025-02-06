@@ -1,3 +1,4 @@
+use crate::mode::Mode;
 use crate::parser::Job;
 use crate::types::StrDashMap;
 use crate::graph::TransitiveDeps;
@@ -5,7 +6,7 @@ use crate::graph::TransitiveDeps;
 use std::io;
 use std::ptr;
 use std::mem;
-use std::fmt;
+use std::ops::Add;
 use std::fs::File;
 use std::path::Path;
 use std::ffi::CString;
@@ -15,62 +16,6 @@ use std::os::fd::{IntoRawFd, FromRawFd};
 use dashmap::DashMap;
 use rayon::prelude::*;
 use fxhash::FxBuildHasher;
-
-pub struct CommandOutput {
-    pub stdout: String,
-    pub stderr: String,
-    pub command: String,
-    pub description: Option::<String>
-}
-
-impl fmt::Display for CommandOutput {
-    #[inline]
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let CommandOutput { stdout, stderr, command, description } = self;
-        let command = description.as_ref().unwrap_or(command);
-        write!(f, "{command}\n{stdout}{stderr}")
-    }
-}
-
-#[cfg_attr(feature = "dbg", derive(Debug))]
-pub struct MetadataCache<'a> {
-    files: StrDashMap::<'a, SystemTime>
-}
-
-impl<'a> MetadataCache<'a> {
-    #[inline]
-    pub fn new(files_count: usize) -> Self {
-        Self {files: DashMap::with_capacity_and_hasher(files_count, FxBuildHasher::default())}
-    }
-
-    #[inline]
-    pub fn mtime(&self, f: &'a str) -> io::Result::<SystemTime> {
-        if let Some(mtime) = self.files.get(f) {
-            Ok(*mtime)
-        } else {
-            let p: &Path = f.as_ref();
-            let m = p.metadata()?.modified()?;
-            self.files.insert(f, m);
-            Ok(m)
-        }
-    }
-
-    #[inline]
-    pub fn needs_rebuild(&self, job: &Job<'a>, transitive_deps: &TransitiveDeps<'a>) -> bool {
-        // TODO: do something here if dependent file does not exist
-        let mtimes = unsafe {
-            transitive_deps.get(job.target).unwrap_unchecked()
-        }.iter().filter_map(|dep| {
-            self.mtime(*dep).ok()
-        }).collect::<Vec::<_>>();
-
-        let Ok(target_mtime) = self.mtime(job.target) else {
-            return true
-        };
-
-        mtimes.into_par_iter().any(|src_mtime| src_mtime > target_mtime)
-    }
-}
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct Command {
@@ -151,5 +96,96 @@ impl Command {
         }
 
         Ok(CommandOutput {command, stdout, stderr, description})
+    }
+}
+
+pub struct CommandOutput {
+    pub stdout: String,
+    pub stderr: String,
+    pub command: String,
+    pub description: Option::<String>
+}
+
+impl CommandOutput {
+    #[inline]
+    pub fn to_string(&self, mode: &Mode) -> String {
+        if mode.quiet() {
+            let CommandOutput { stderr, command, description, .. } = self;
+            if stderr.is_empty() { return const { String::new() } }
+            let command = description.as_ref().unwrap_or(command);
+            let mut buf = String::with_capacity(command.len() + stderr.len());
+            buf.push_str(command);
+            buf.push_str(stderr);
+            return buf
+        }
+
+        let CommandOutput { stdout, stderr, command, description } = self;
+        let n = description.as_ref().map_or(0, |d| 1 + d.len() + 1)
+            .add(command.len())
+            .add(1)
+            .add(stdout.len())
+            .add(stderr.len());
+
+        let mut buf = String::with_capacity(n);
+        if mode.verbose() {
+            if let Some(ref d) = description {
+                buf.push('[');
+                buf.push_str(d);
+                buf.push(']');
+                buf.push('\n');
+            }
+            buf.push_str(&command)
+        } else if let Some(ref d) = description {
+            buf.push('[');
+            buf.push_str(d);
+            buf.push(']');
+        } else {
+            buf.push_str(&command)
+        }
+
+        buf.push('\n');
+        buf.push_str(&stdout);
+        buf.push_str(&stderr);
+        buf
+    }
+}
+
+#[cfg_attr(feature = "dbg", derive(Debug))]
+pub struct MetadataCache<'a> {
+    files: StrDashMap::<'a, SystemTime>
+}
+
+impl<'a> MetadataCache<'a> {
+    #[inline]
+    pub fn new(files_count: usize) -> Self {
+        Self {files: DashMap::with_capacity_and_hasher(files_count, FxBuildHasher::default())}
+    }
+
+    #[inline]
+    pub fn mtime(&self, f: &'a str) -> io::Result::<SystemTime> {
+        if let Some(mtime) = self.files.get(f) {
+            Ok(*mtime)
+        } else {
+            let p: &Path = f.as_ref();
+            let m = p.metadata()?.modified()?;
+            self.files.insert(f, m);
+            Ok(m)
+        }
+    }
+
+    #[inline]
+    pub fn needs_rebuild(&self, job: &Job<'a>, transitive_deps: &TransitiveDeps<'a>) -> bool {
+        // TODO: do something here if dependent file does not exist
+        let mtimes = unsafe {
+            transitive_deps.get(job.target).unwrap_unchecked()
+        }.iter().filter_map(|dep| {
+            self.mtime(*dep).ok()
+        }).collect::<Vec::<_>>();
+
+        let Ok(target_mtime) = self.mtime(job.target) else {
+            return true
+        };
+
+        mtimes.into_par_iter().any(|src_mtime| src_mtime > target_mtime)
     }
 }

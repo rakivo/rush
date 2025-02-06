@@ -368,12 +368,7 @@ pub struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    pub const RUSH_FILE_NAME: &'static str = "build.rush";
-
-    #[inline(always)]
-    pub fn read_rush() -> Option::<Mmap> {
-        read_file(Self::RUSH_FILE_NAME)
-    }
+    pub const RUSH_FILE_PATH: &'static str = "build.rush";
 
     fn finish_job(&mut self) {
         match &mut self.context {

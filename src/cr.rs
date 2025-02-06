@@ -1,3 +1,4 @@
+use crate::mode::Mode;
 use crate::types::StrDashSet;
 use crate::db::{Db, Metadata};
 use crate::consts::PHONY_TARGETS;
@@ -45,6 +46,7 @@ macro_rules! cr_report {
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct CommandRunner<'a> {
+    mode: &'a Mode,
     stdout: Stdout,
     graph: Graph<'a>,
     db_read: Option::<Db<'a>>,
@@ -57,6 +59,7 @@ pub struct CommandRunner<'a> {
 
 impl<'a> CommandRunner<'a> {
     pub fn run(
+        mode: &'a Mode,
         context: &'a Processed,
         graph: Graph<'a>,
         db: Option::<Db<'a>>,
@@ -64,7 +67,7 @@ impl<'a> CommandRunner<'a> {
         transitive_deps: TransitiveDeps<'a>
     ) -> Db<'a> {
         let (stdout, writer) = Self::stdout_thread();
-        let cr = Self::new(stdout, graph, db, context, transitive_deps);
+        let cr = Self::new(mode, stdout, graph, db, context, transitive_deps);
 
         let levels = if let Some(job) = default_job {
             cr.run_target(job);
@@ -84,6 +87,7 @@ impl<'a> CommandRunner<'a> {
 
     #[inline]
     fn new(
+        mode: &'a Mode,
         stdout: Stdout,
         graph: Graph<'a>,
         db_read: Option::<Db<'a>>,
@@ -92,6 +96,7 @@ impl<'a> CommandRunner<'a> {
     ) -> Self {
         let n = context.jobs.len();
         Self {
+            mode,
             graph,
             stdout,
             context,
@@ -146,7 +151,7 @@ impl<'a> CommandRunner<'a> {
                         self,
                         "{output}\n",
                         output = match command_output {
-                            Ok(ok) => ok.to_string(),
+                            Ok(ok) => ok.to_string(&self.mode),
                             Err(e) => e.to_string()
                         }
                     }
@@ -232,6 +237,7 @@ impl<'a> CommandRunner<'a> {
 
     #[inline]
     fn needs_rebuild(&self, job: &Job<'a>, command: &str) -> bool {
+        if self.mode.always_build() { return true }
         self.db_read.as_ref().map_or(false, |db| {
             db.metadata_read(job.target).map_or(false, |md| {
                 md.command_hash != Self::hash(command)
@@ -276,7 +282,7 @@ impl<'a> CommandRunner<'a> {
             let Ok(command_output) = self.execute_command(command, job.target) else {
                 return true
             };
-
+            let command_output = command_output.to_string(&self.mode);
             cr_print!(self, "{command_output}");
         } else {
             let mut any_err = false;
