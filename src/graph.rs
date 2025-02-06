@@ -110,8 +110,8 @@ pub fn build_dependency_graph<'a>(processed: &'a Processed) -> (Graph<'a>, Defau
             }
         }
 
-        // find a job that does not act as an input anywhere,
-        // then sort those by first appearing in the source code row-wise
+        // find the jobs that does not act as an input anywhere,
+        // then sort those by their first appearance in the source code row-wise
         processed.jobs.keys()
             .filter(|job| !reverse_graph.contains_key(*job))
             .map(|t| unsafe { processed.jobs.get(t).unwrap_unchecked() })
