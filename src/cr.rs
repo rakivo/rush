@@ -27,6 +27,12 @@ macro_rules! cr_print {
 
 macro_rules! cr_report {
     ($self: expr, $($arg:tt)*) => {{
+        #[cfg(feature = "dbg")] {
+            _ = $self.print(format!{
+                "{f}:{l}:{c}:\n",
+                f = file!(), l = line!(), c = column!()
+            });
+        }
         _ = $self.print(report_fmt!($($arg)*));
     }};
 }
@@ -117,7 +123,7 @@ impl<'a> CommandRunner<'a> {
                                 self,
                                 job.loc,
                                 "undefined job: {target}\nNOTE: in phony jobs you can only alias jobs, no input permitted here\n",
-                                target = job.target
+                                target = _job
                             };
                             None
                         }
