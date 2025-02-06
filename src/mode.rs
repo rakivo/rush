@@ -5,6 +5,7 @@ const VERBOSE_MODE: Flag = new_flag!("-v", "--verbose");
 const ALWAYS_BUILD_MODE: Flag = new_flag!("-B", "--always-build");
 
 #[repr(packed)]
+#[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct Mode {
     quiet: bool,
     verbose: bool,
