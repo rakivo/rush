@@ -14,13 +14,12 @@ cflags = -g -Wall -Wextra -Wno-deprecated -Wno-missing-field-initializers $
     -Wno-unused-parameter -fno-rtti -fno-exceptions -std=c++14 $
     -fvisibility=hidden -pipe '-DNINJA_PYTHON="python3"' -O2 -DNDEBUG $
     -fdiagnostics-color -DUSE_PPOLL -DNINJA_HAVE_BROWSE -I.
-ldflags = -L$builddir
+ldflags = -L build
 
 rule cxx
   command = $cxx -MMD -MT $out -MF $out.d $cflags -c $in -o $out
   description = CXX $out
   depfile = $out.d
-  # deps = gcc
 
 rule ar
   command = rm -f $out && $ar crs $out $in
@@ -28,7 +27,6 @@ rule ar
 
 rule link
   command = $cxx $ldflags -o $out $in $libs
-  description = LINK $out
 
 # browse_py.h is used to inline browse.py.
 rule inline
