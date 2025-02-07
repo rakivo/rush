@@ -390,29 +390,22 @@ impl<'a> Parser<'a> {
         };
     }
 
-    fn parse_line(&mut self, line_: &'a str, trimmed_: &'a str) {
-        let first = line_.find(['\t', '\n', '\x0C', '\r', ' ']).map(|first_space| {
-            (first_space, &line_[..first_space])
-        });
-
-        let line = trimmed_;
-        if matches!(self.context, Context::Job {..} | Context::Rule {..}) {
-            if line.is_empty() || matches!(line_.find(|c: char| c.is_alphanumeric()), Some(first) if first == 0) {
-                self.finish_job();
-                self.context = Context::Global;
-            }
-
-            if matches!(first, Some((.., BUILD | PHONY | RULE))) {
+    fn parse_line(&mut self, not_trimmed: &'a str, trimmed: &'a str) {
+        if matches!(&self.context, Context::Job { .. } | Context::Rule { .. }) {
+            if (trimmed.is_empty() || not_trimmed.as_bytes().first().map_or(false, |c| c.is_ascii_alphanumeric()))
+ || not_trimmed.find(|c: char| c.is_ascii_whitespace()).map(|first_space| {
+                    (first_space, &not_trimmed[..first_space])
+                }).map_or(false, |(_, first_token)| matches!(first_token, BUILD | PHONY | RULE))
+            {
                 self.finish_job();
                 self.context = Context::Global
             }
         }
 
-        if line.is_empty() {
-            return
-        }
+        if trimmed.is_empty() { return }
 
-        let first = line.find(['\t', '\n', '\x0C', '\r', ' ']).map(|first_space| {
+        let line = trimmed;
+        let first = line.find(|c: char| c.is_ascii_whitespace()).map(|first_space| {
             (first_space, &line[..first_space])
         });
 
