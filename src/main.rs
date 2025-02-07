@@ -25,6 +25,7 @@ use std::thread::available_parallelism;
 const CUSTOM_FILE_PATH: Flag::<String> = new_flag!("-f", "--file");
 const CUSTOM_PARALLELALISM: Flag::<i64> = new_flag!("-j", "--jobs");
 const CUSTOM_DEFAULT_TARGET: Flag::<String> = new_flag!("-t", "--target");
+const CUSTOM_FAILS_UNTIL_EXIT: Flag::<usize> = new_flag!("-k", "--keep-going");
 
 fn main() -> ExitCode {
     let flag_parser = FlagParser::new();
@@ -79,12 +80,18 @@ fn main() -> ExitCode {
         })
     });
 
+    let maximum_fail_count = if flag_parser.passed(&CUSTOM_FAILS_UNTIL_EXIT) {
+        flag_parser.parse(&CUSTOM_FAILS_UNTIL_EXIT).or(Some(1))
+    } else {
+        None
+    };
+
     let mmap = Db::read_cache();
     let content = mmap.as_ref().map(|mmap| unsafe { std::str::from_utf8_unchecked(&mmap[..]) });
     let db = content.and_then(|content| Db::read(content).ok());
 
     let (graph, default_job, transitive_deps) = build_dependency_graph(&processed, default_job);
-    _ = CommandRunner::run(&mode, &processed, graph, db, default_job, transitive_deps).write_finish();
+    _ = CommandRunner::run(&mode, &processed, graph, db, default_job, transitive_deps, maximum_fail_count).write_finish();
 
     ExitCode::SUCCESS
 }

@@ -3,15 +3,16 @@ use crate::types::StrDashSet;
 use crate::db::{Db, Metadata};
 use crate::consts::PHONY_TARGETS;
 use crate::parser::comp::{Job, Phony};
-use crate::command::{Command, MetadataCache, CommandOutput};
 use crate::parser::{Rule, Processed, DefaultJob};
-use crate::graph::{Graph, topological_sort_levels};
+use crate::graph::{Graph, Levels, topological_sort};
+use crate::command::{Command, MetadataCache, CommandOutput};
 
 use std::sync::Arc;
 use std::path::Path;
 use std::io::{self, Write};
 use std::hash::{Hash, Hasher};
 use std::thread::{self, JoinHandle};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use dashmap::DashSet;
 use rayon::prelude::*;
@@ -45,59 +46,79 @@ macro_rules! cr_report {
     }};
 }
 
+#[derive(PartialEq)]
+#[cfg_attr(feature = "dbg", derive(Debug))]
+enum ExecutorFlow { Ok, Failed }
+
+impl From::<bool> for ExecutorFlow {
+    #[inline(always)]
+    fn from(v: bool) -> Self { if v { Self::Failed } else { Self::Ok } }
+}
+
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct CommandRunner<'a> {
-    mode: &'a Mode,
-    stdout: Stdout,
+    context: &'a Processed<'a>,
+
     graph: Graph<'a>,
+    transitive_deps: Graph<'a>,
+
+    mode: &'a Mode,
+
+    stdout: Stdout,
+    stdout_thread: StdoutThread,
+
+    failed: AtomicBool,
+    fail_count: AtomicUsize,
+    maximum_fails_count: Option::<usize>,
+
     db_read: Option::<Db<'a>>,
     db_write: Db<'a>,
-    context: &'a Processed<'a>,
+
     default_job: DefaultJob<'a>,
-    executed: StrDashSet::<'a>,
+
+    executed: StrDashSet<'a>,
+
     metadata_cache: MetadataCache<'a>,
-    transitive_deps: Graph<'a>
 }
 
 impl<'a> CommandRunner<'a> {
-    pub fn run(
-        mode: &'a Mode,
-        context: &'a Processed,
-        graph: Graph<'a>,
-        db: Option::<Db<'a>>,
-        default_job: DefaultJob<'a>,
-        transitive_deps: Graph<'a>
-    ) -> Db<'a> {
-        let (stdout, writer) = Self::stdout_thread();
-        let cr = Self::new(mode, stdout, graph, db, default_job, context, transitive_deps);
+    #[inline]
+    fn run_levels(&self, levels: &Levels<'a>) {
+        for level in levels.into_iter() {
+            if level.into_par_iter().filter_map(|t| self.context.jobs.get(t)).try_for_each(|job| {
+                self.resolve_and_run(job);
+                if self.failed.load(Ordering::Relaxed) { Err(()) } else { Ok(()) }
+            }).is_err() {
+                cr_print!(self, "execution failed..");
+                break
+            }
+        }
+    }
 
-        let levels = if let Some(job) = default_job {
-            cr.run_target(job);
-            return cr.finish(writer)
-        } else {
-            topological_sort_levels(&cr.graph)
-        };
-
-        levels.into_iter().for_each(|level| {
-            level.into_par_iter().filter_map(|t| context.jobs.get(t)).for_each(|job| {
-                cr.resolve_and_run(job)
-            });
-        });
-
-        cr.finish(writer)
+    #[inline]
+    fn stdout_thread() -> (Stdout, StdoutThread) {
+        let (stdout, stdout_recv) = unbounded::<String>();
+        let writer = thread::spawn(move || {
+            let mut stdout_handle = io::stdout().lock();
+            for s in stdout_recv {
+                _ = stdout_handle.write_all(s.as_bytes())
+            }
+            _ = stdout_handle.flush();
+        }); (stdout, writer)
     }
 
     #[inline]
     fn new(
         mode: &'a Mode,
-        stdout: Stdout,
         graph: Graph<'a>,
         db_read: Option::<Db<'a>>,
         default_job: DefaultJob<'a>,
         context: &'a Processed<'a>,
-        transitive_deps: Graph<'a>
+        transitive_deps: Graph<'a>,
+        maximum_fails_count: Option::<usize>,
     ) -> Self {
         let n = context.jobs.len();
+        let (stdout, stdout_thread) = Self::stdout_thread();
         Self {
             mode,
             graph,
@@ -105,25 +126,71 @@ impl<'a> CommandRunner<'a> {
             context,
             db_read,
             default_job,
+            stdout_thread,
             transitive_deps,
+            maximum_fails_count,
             db_write: Db::write(),
+            failed: AtomicBool::new(false),
+            fail_count: AtomicUsize::new(0),
+            metadata_cache: MetadataCache::new(n),
             executed: DashSet::with_capacity_and_hasher(n, FxBuildHasher::default()),
-            metadata_cache: MetadataCache::new(n)
         }
     }
 
     #[inline]
-    fn finish(self, writer: StdoutThread) -> Db<'a> {
+    pub fn run(
+        mode: &'a Mode,
+        context: &'a Processed,
+        graph: Graph<'a>,
+        db: Option::<Db<'a>>,
+        default_job: DefaultJob<'a>,
+        transitive_deps: Graph<'a>,
+        maximum_fail_count: Option::<usize>,
+    ) -> Db<'a> {
+        let cr = Self::new(mode, graph, db, default_job, context, transitive_deps, maximum_fail_count);
+
+        let levels = if let Some(job) = default_job {
+            cr.run_target(job);
+            return cr.finish()
+        } else {
+            topological_sort(&cr.graph)
+        };
+
+        _ = cr.run_levels(&levels);
+        cr.finish()
+    }
+
+    #[inline]
+    fn finish(self) -> Db<'a> {
         drop(self.stdout);
-        _ = writer.join();
+        _ = self.stdout_thread.join();
         self.db_write
     }
 
     #[inline]
-    fn execute_command(&self, command: Command, target: &str) -> io::Result::<CommandOutput> {
+    fn job_failed(&self) -> bool {
+        self.maximum_fails_count.map_or(false, |max| {
+            self.fail_count.fetch_add(1, Ordering::Relaxed);
+            if self.fail_count.load(Ordering::Relaxed) >= max {
+                self.failed.store(true, Ordering::Relaxed);
+                true
+            } else {
+                false
+            }
+        })
+    }
+
+    #[inline]
+    fn execute_command(&self, command: Command, target: &str) -> io::Result::<(CommandOutput, bool)> {
         command.execute().map_err(|e| {
             cr_print!(self, "could not execute job: {target}: {e}\n");
             e
+        }).map(|command_output| {
+            let failed = if command_output.status != 0 {
+                self.job_failed()
+            } else {
+                false
+            }; (command_output, failed)
         })
     }
 
@@ -155,10 +222,10 @@ impl<'a> CommandRunner<'a> {
                         self,
                         "{output}",
                         output = match command_output {
-                            Ok(ok) => ok.to_string(&self.mode),
+                            Ok((ok, ..)) => ok.to_string(&self.mode),
                             Err(e) => e.to_string()
                         }
-                    }
+                    };
                 }
             },
             Phony::NotPhony { .. } => unreachable!()
@@ -182,26 +249,10 @@ impl<'a> CommandRunner<'a> {
     fn resolve_and_run_target(&self, job: &Job<'a>) {
         let levels = {
             let subgraph = self.build_subgraph(job.target);
-            topological_sort_levels(&subgraph)
+            topological_sort(&subgraph)
         };
 
-        levels.into_iter().for_each(|level| {
-            level.into_par_iter().filter_map(|t| self.context.jobs.get(t)).for_each(|job| {
-                self.resolve_and_run(job);
-            });
-        });
-    }
-
-    #[inline]
-    fn stdout_thread() -> (Stdout, StdoutThread) {
-        let (stdout, stdout_recv) = unbounded::<String>();
-        let writer = thread::spawn(move || {
-            let mut stdout_handle = io::stdout().lock();
-            for s in stdout_recv {
-                _ = stdout_handle.write_all(s.as_bytes());
-            }
-            _ = stdout_handle.flush();
-        }); (stdout, writer)
+        _ = self.run_levels(&levels)
     }
 
     #[inline]
@@ -211,7 +262,7 @@ impl<'a> CommandRunner<'a> {
             return
         }
 
-        self.resolve_and_run_target(job);
+        _ = self.resolve_and_run_target(job)
     }
 
     #[inline]
@@ -228,7 +279,7 @@ impl<'a> CommandRunner<'a> {
         #[cfg(feature = "dbg")] {
             self.stdout.send(s).unwrap()
         } #[cfg(not(feature = "dbg"))] {
-            _ = self.stdout.send(s);
+            _ = self.stdout.send(s)
         }
     }
 
@@ -263,9 +314,9 @@ impl<'a> CommandRunner<'a> {
         }).ok()
     }
 
-    fn execute_job(&self, job: &Job<'a>, rule: &Rule) -> bool {
+    fn execute_job(&self, job: &Job<'a>, rule: &Rule) -> ExecutorFlow {
         let Some(command) = self.compile_command(job, rule) else {
-            return true
+            return ExecutorFlow::Ok
         };
 
         if self.needs_rebuild(job, &command) {
@@ -275,7 +326,7 @@ impl<'a> CommandRunner<'a> {
                     "could not create build directory for target: {target}: {e}\n",
                     target = job.target
                 };
-                return false
+                return ExecutorFlow::Ok
             }
 
             let description = rule.description.as_ref().and_then(|d| d.compile(&job, &self.context.defs).map_err(|e| {
@@ -283,11 +334,14 @@ impl<'a> CommandRunner<'a> {
             }).ok());
 
             let command = Command { command, description };
-            let Ok(command_output) = self.execute_command(command, job.target) else {
-                return true
+            let Ok((command_output, failed)) = self.execute_command(command, job.target) else {
+                // TODO: do something here
+                return ExecutorFlow::Ok
             };
             let command_output = command_output.to_string(&self.mode);
             cr_print!(self, "{command_output}");
+
+            return ExecutorFlow::from(failed)
         } else {
             let mut any_err = false;
             if let Err(err) = rule.command.check(&job.shadows, &self.context.defs) {
@@ -309,7 +363,7 @@ impl<'a> CommandRunner<'a> {
             {
                 cr_print!(self, "{target} is already built\n", target = job.target)
             }
-        } false
+        } ExecutorFlow::Ok
     }
 
     fn resolve_and_run(&self, job: &Job<'a>) {
@@ -344,7 +398,7 @@ impl<'a> CommandRunner<'a> {
             let Some(ref job_rule) = rule else { continue };
             if let Some(rule) = self.context.rules.get(job_rule) {
                 self.executed.insert(job.target);
-                if self.execute_job(job, rule) { continue }
+                if self.execute_job(job, rule) == ExecutorFlow::Failed { break }
             } else {
                 cr_report!{
                     self,

@@ -21,6 +21,7 @@ pub struct Template<'a> {
 }
 
 impl Template<'_> {
+    const AVERAGE_COMPILED_CHUNK_SIZE: usize = 24;
     const CONSTANT_PLACEHOLDERS: &'static [&'static str] = &["in", "out"];
 
     #[cfg_attr(feature = "dbg", track_caller)]
@@ -117,15 +118,19 @@ impl Template<'_> {
         } Ok(())
     }
 
+    fn allocate_result(&self) -> String {
+        String::with_capacity(self.statics_len + self.chunks.len() * Self::AVERAGE_COMPILED_CHUNK_SIZE)
+    }
+
     #[inline]
-    fn _compile(&self, output_str: &str, input_str: &str, shadows: &Shadows, defs: &Defs) -> Result<String, String> {
-        let mut ret = String::with_capacity(self.statics_len + self.chunks.len() * 16);
+    fn _compile(&self, output_str: &str, input_str: &str, shadows: &Shadows, defs: &Defs) -> Result::<String, String> {
+        let mut ret = self.allocate_result();
 
         for chunk in self.chunks.iter() {
             match chunk {
                 TemplateChunk::Static(s) => {
                     if !ret.is_empty() && !s.is_empty() { ret.push(' ') }
-                    ret.push_str(s);
+                    ret.push_str(s)
                 }
                 TemplateChunk::JoinedStatic(s) => ret.push_str(s),
                 TemplateChunk::Placeholder(placeholder) => {
@@ -150,7 +155,7 @@ impl Template<'_> {
                             .as_ref()
                             .and_then(|shadows| shadows.get(placeholder).map(|shadow| *shadow))
                             .or_else(|| defs.get(placeholder).map(|def| def.0.as_str()))
-                            .ok_or(report_fmt!(self.loc, "undefined variable: {placeholder}")),
+                            .ok_or(report_fmt!(self.loc, "undefined variable: {placeholder}"))
                     }?);
                 }
             }
@@ -172,7 +177,7 @@ impl Template<'_> {
     #[inline]
     #[cfg_attr(feature = "dbg", track_caller)]
     pub fn compile_def(&self, defs: &Defs) -> String {
-        let mut ret = String::with_capacity(self.statics_len + self.chunks.len() * 16);
+        let mut ret = self.allocate_result();
         for chunk in self.chunks.iter() {
             match chunk {
                 TemplateChunk::Static(s) => {

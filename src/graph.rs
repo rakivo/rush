@@ -9,6 +9,7 @@ use std::collections::VecDeque;
 #[cfg(feature = "dbg")]
 use tramer::tramer;
 
+pub type Levels<'a> = Vec::<Vec::<&'a str>>;
 pub type Graph<'a> = StrHashMap::<'a, Arc::<StrHashSet<'a>>>;
 
 #[cfg_attr(feature = "dbg", tramer("nanos"))]
@@ -123,7 +124,7 @@ pub fn build_dependency_graph<'a>(processed: &'a Processed, default_job: Default
     (graph, default_job, transitive_deps)
 }
 
-pub fn topological_sort_levels<'a>(graph: &Graph<'a>) -> Vec::<Vec::<&'a str>> {
+pub fn topological_sort<'a>(graph: &Graph<'a>) -> Levels<'a> {
     let mut levels = Vec::new();
     let mut in_degree = StrHashMap::<i64>::with_capacity(graph.len());
 

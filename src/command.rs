@@ -95,12 +95,13 @@ impl Command {
             libc::posix_spawnattr_destroy(&mut attr);
         }
 
-        Ok(CommandOutput {command, stdout, stderr, description})
+        Ok(CommandOutput {command, status, stdout, stderr, description})
     }
 }
 
 pub struct CommandOutput {
     pub stdout: String,
+    pub status: i32,
     pub stderr: String,
     pub command: String,
     pub description: Option::<String>
@@ -119,7 +120,7 @@ impl CommandOutput {
             return buf
         }
 
-        let CommandOutput { stdout, stderr, command, description } = self;
+        let CommandOutput { stdout, stderr, command, description, .. } = self;
         let n = description.as_ref().map_or(0, |d| 1 + d.len() + 1)
             .add(command.len())
             .add(1)
