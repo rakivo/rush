@@ -224,16 +224,12 @@ impl Template<'_> {
         for chunk in def.0.chunks.iter() {
             match chunk {
                 TemplateChunk::Static(s) => {
-                    if !ret.is_empty() && !s.is_empty() {
-                        ret.push(' ');
-                    }
+                    if !ret.is_empty() && !s.is_empty() { ret.push(' ') }
                     ret.push_str(s)
                 }
                 TemplateChunk::JoinedStatic(s) => ret.push_str(s),
                 TemplateChunk::Placeholder(placeholder) => {
-                    if !ret.is_empty() && !placeholder.is_empty() {
-                        ret.push(' ');
-                    }
+                    if !ret.is_empty() && !placeholder.is_empty() { ret.push(' ') }
 
                     if compiling.contains(placeholder) {
                         panic!("circular reference detected involving {placeholder}")

@@ -5,7 +5,7 @@ use crate::consts::PHONY_TARGETS;
 use crate::parser::comp::{Job, Phony};
 use crate::command::{Command, MetadataCache, CommandOutput};
 use crate::parser::{Rule, Processed, DefaultJob};
-use crate::graph::{Graph, TransitiveDeps, topological_sort_levels};
+use crate::graph::{Graph, topological_sort_levels};
 
 use std::sync::Arc;
 use std::path::Path;
@@ -56,7 +56,7 @@ pub struct CommandRunner<'a> {
     default_job: DefaultJob<'a>,
     executed: StrDashSet::<'a>,
     metadata_cache: MetadataCache<'a>,
-    transitive_deps: TransitiveDeps<'a>
+    transitive_deps: Graph<'a>
 }
 
 impl<'a> CommandRunner<'a> {
@@ -66,7 +66,7 @@ impl<'a> CommandRunner<'a> {
         graph: Graph<'a>,
         db: Option::<Db<'a>>,
         default_job: DefaultJob<'a>,
-        transitive_deps: TransitiveDeps<'a>
+        transitive_deps: Graph<'a>
     ) -> Db<'a> {
         let (stdout, writer) = Self::stdout_thread();
         let cr = Self::new(mode, stdout, graph, db, default_job, context, transitive_deps);
@@ -95,7 +95,7 @@ impl<'a> CommandRunner<'a> {
         db_read: Option::<Db<'a>>,
         default_job: DefaultJob<'a>,
         context: &'a Processed<'a>,
-        transitive_deps: TransitiveDeps<'a>
+        transitive_deps: Graph<'a>
     ) -> Self {
         let n = context.jobs.len();
         Self {
@@ -105,10 +105,10 @@ impl<'a> CommandRunner<'a> {
             context,
             db_read,
             default_job,
+            transitive_deps,
             db_write: Db::write(),
             executed: DashSet::with_capacity_and_hasher(n, FxBuildHasher::default()),
-            metadata_cache: MetadataCache::new(n),
-            transitive_deps
+            metadata_cache: MetadataCache::new(n)
         }
     }
 

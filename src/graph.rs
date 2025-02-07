@@ -10,16 +10,15 @@ use std::collections::VecDeque;
 use tramer::tramer;
 
 pub type Graph<'a> = StrHashMap::<'a, Arc::<StrHashSet<'a>>>;
-pub type TransitiveDeps<'a> = StrHashMap::<'a, Arc::<StrHashSet<'a>>>;
 
 #[cfg_attr(feature = "dbg", tramer("nanos"))]
-pub fn build_dependency_graph<'a>(processed: &'a Processed, default_job: DefaultJob<'a>) -> (Graph<'a>, DefaultJob<'a>, TransitiveDeps<'a>) {
+pub fn build_dependency_graph<'a>(processed: &'a Processed, default_job: DefaultJob<'a>) -> (Graph<'a>, DefaultJob<'a>, Graph<'a>) {
     fn collect_deps<'a>(
         node: &'a str,
         parsed: &'a Processed,
         graph: &mut Graph<'a>,
         visited: &mut StrHashSet<'a>,
-        transitive_deps: &mut TransitiveDeps<'a>
+        transitive_deps: &mut Graph<'a>
     ) -> Arc::<StrHashSet<'a>> {
         if visited.contains(node) {
             return transitive_deps.get(node).cloned().unwrap_or_default();
