@@ -137,7 +137,7 @@ impl<'a> CommandRunner<'a> {
                             cr_report!{
                                 self,
                                 job.loc,
-                                "undefined job: {target}\nNOTE: in phony jobs you can only alias jobs, no input permitted here\n",
+                                "undefined job: {target}\nNOTE: in phony jobs you can only alias jobs\n",
                                 target = _job
                             };
                             None

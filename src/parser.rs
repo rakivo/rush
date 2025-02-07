@@ -1,8 +1,8 @@
 use crate::loc::Loc;
 use crate::consts::syntax::*;
+use crate::template::Template;
 use crate::consts::PHONY_TARGETS;
 use crate::types::{StrHashMap, StrHashSet};
-use crate::template::{Template, TemplateChunk};
 
 use std::mem;
 use std::sync::Arc;
@@ -92,13 +92,11 @@ pub mod prep {
     #[cfg_attr(feature = "dbg", derive(Debug))]
     pub struct Job<'a> {
         pub loc: Loc,
-
+        pub phony: Phony<'a>,
         pub shadows: Shadows<'a>,
 
         pub target: &'a str,
         pub target_template: Template<'a>,
-
-        pub phony: Phony<'a>
     }
 
     impl<'a> Job<'a> {
@@ -142,7 +140,7 @@ pub mod prep {
 
     #[repr(transparent)]
     #[cfg_attr(feature = "dbg", derive(Debug))]
-    pub struct Def<'a> { pub value: Template<'a> }
+    pub struct Def<'a>(pub Template<'a>);
 
     #[repr(transparent)]
     #[cfg_attr(feature = "dbg", derive(Debug))]
@@ -153,79 +151,9 @@ pub mod prep {
         pub fn compile(&self) -> comp::Defs<'a> {
             let mut compiled_defs = comp::Defs::new();
             let mut compiling = StrHashSet::with_capacity(128);
-            for (key, def) in self.0.iter() {
-                self.compile_def_recursive(key, def, &mut compiling, &mut compiled_defs)
+            for (name, def) in self.0.iter() {
+                Template::compile_def_recursive(name, def, self, &mut compiling, &mut compiled_defs)
             } compiled_defs
-        }
-
-        fn compile_def_recursive(
-            &self,
-            key: &'a str,
-            def: &Def<'a>,
-            compiling: &mut StrHashSet<'a>,
-            compiled_defs: &mut comp::Defs<'a>,
-        ) {
-            if compiling.contains(key) {
-                panic!("circular reference detected involving {key}")
-            }
-
-            if compiled_defs.contains_key(key) { return }
-
-            compiling.insert(key);
-
-            let mut value = String::with_capacity(32);
-            for chunk in &def.value.chunks {
-                match chunk {
-                    TemplateChunk::Static(s) => {
-                        if !value.is_empty() && !s.is_empty() {
-                            value.push(' ');
-                        }
-                        value.push_str(s)
-                    }
-                    TemplateChunk::JoinedStatic(s) => value.push_str(s),
-                    TemplateChunk::Placeholder(placeholder) => {
-                        if !value.is_empty() && !placeholder.is_empty() {
-                            value.push(' ');
-                        }
-
-                        if compiling.contains(placeholder) {
-                            panic!("circular reference detected involving {placeholder}")
-                        }
-
-                        let compiled = match self.0.get(placeholder) {
-                            Some(def) => {
-                                if !compiled_defs.contains_key(placeholder) {
-                                    self.compile_def_recursive(placeholder, def, compiling, compiled_defs);
-                                }
-                                compiled_defs.get(placeholder).unwrap().value.as_str()
-                            }
-                            None => panic!("Undefined variable: {placeholder}")
-                        };
-
-                        value.push_str(compiled)
-                    }
-                    TemplateChunk::JoinedPlaceholder(placeholder) => {
-                        if compiling.contains(placeholder) {
-                            panic!("circular reference detected involving {placeholder}")
-                        }
-
-                        let compiled = match self.0.get(placeholder) {
-                            Some(def) => {
-                                if !compiled_defs.contains_key(placeholder) {
-                                    self.compile_def_recursive(placeholder, def, compiling, compiled_defs);
-                                }
-                                compiled_defs.get(placeholder).unwrap().value.as_str()
-                            }
-                            None => panic!("Undefined variable: {placeholder}")
-                        };
-
-                        value.push_str(compiled)
-                    }
-                }
-            }
-
-            compiling.remove(key);
-            compiled_defs.insert(key, comp::Def { value });
         }
     }
 }
@@ -250,12 +178,9 @@ pub mod comp {
     #[cfg_attr(feature = "dbg", derive(Debug))]
     pub struct Job<'a> {
         pub loc: Loc,
-
+        pub phony: Phony<'a>,
         pub target: &'a str,
-
         pub shadows: Shadows<'a>,
-
-        pub phony: Phony<'a>
     }
 
     impl<'a> Job<'a> {
@@ -289,7 +214,7 @@ pub mod comp {
 
     #[repr(transparent)]
     #[cfg_attr(feature = "dbg", derive(Debug))]
-    pub struct Def { pub value: String }
+    pub struct Def(pub String);
 
     pub type Defs<'a> = StrHashMap::<'a, Def>;
 }
@@ -319,12 +244,11 @@ impl<'a> Parsed<'a> {
         let Parsed { defs, jobs, rules, phonys, default_target } = self;
 
         let defs = defs.compile();
-
         let jobs = jobs.values().filter_map(|job| {
             if let prep::Phony::NotPhony { rule, .. } = &job.phony {
                 if let Some(ref rule) = rule {
                     if !rules.contains_key(rule) {
-                        report!(job.loc, "undefined rule: {rule}\n")
+                        report!(job.loc, "undefined rule: {rule}")
                     }
                 }
             }
@@ -445,7 +369,8 @@ struct DepfilePath<'a> {
 #[derive(Copy, Clone)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 struct Description<'a> {
-    loc: Loc, description: &'a str
+    loc: Loc,
+    description: &'a str
 }
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
@@ -527,7 +452,7 @@ impl<'a> Parser<'a> {
         };
 
         let parse_def = || -> prep::Def<'a> {
-            prep::Def { value: Template::new(parse_shadow(), Loc(self.cursor)) }
+            prep::Def(Template::new(parse_shadow(), Loc(self.cursor)))
         };
 
         // TODO: we should move context here and this match should return another updated context
@@ -557,7 +482,12 @@ impl<'a> Parser<'a> {
             Context::Rule { name, depfile, already_inserted, description } => {
                 match first_token {
                     COMMAND => {
-                        let command = line[second_space + 1 + 1..].trim();
+                        let command_start = second_space + 1 + 1;
+                        let command = if command_start < line.len() - 1 {
+                            line[command_start..].trim()
+                        } else {
+                            ""
+                        };
                         let command_loc = self.cursor;
                         let rule = Rule::new(
                             command,

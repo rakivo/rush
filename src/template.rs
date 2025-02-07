@@ -1,6 +1,7 @@
 use crate::loc::Loc;
-use crate::parser::{prep, Shadows};
+use crate::types::StrHashSet;
 use crate::parser::comp::{Job, Defs};
+use crate::parser::{prep, comp, Shadows};
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub enum TemplateChunk<'a> {
@@ -12,8 +13,10 @@ pub enum TemplateChunk<'a> {
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct Template<'a> {
-    loc: Loc,
     in_used: bool,
+    statics_len: usize,
+
+    pub loc: Loc,
     pub chunks: Vec::<TemplateChunk<'a>>,
 }
 
@@ -24,6 +27,7 @@ impl Template<'_> {
     pub fn new(s: &str, loc: Loc) -> Template {
         let mut start = 0;
         let mut in_used = false;
+        let mut statics_len = 0;
         let mut chunks = Vec::new();
         let mut last_was_placeholder_or_joined = false;
 
@@ -38,6 +42,7 @@ impl Template<'_> {
                         TemplateChunk::Static(trimmed_static)
                     };
                     chunks.push(chunk);
+                    statics_len += trimmed_static.len();
                     last_was_placeholder_or_joined = false
                 }
             }
@@ -89,11 +94,12 @@ impl Template<'_> {
                 } else {
                     TemplateChunk::Static(trimmed_static)
                 };
+                statics_len += trimmed_static.len();
                 chunks.push(chunk)
             }
         }
 
-        Template { loc, in_used, chunks }
+        Template { loc, in_used, statics_len, chunks }
     }
 
     #[inline]
@@ -112,21 +118,45 @@ impl Template<'_> {
     }
 
     #[inline]
-    fn _compile(&self, output_str: &str, input_str: &str, shadows: &Shadows, defs: &Defs) -> Result::<String, String> {
-        self.chunks.iter().map(|c| {
-            match c {
-                TemplateChunk::Static(s) | TemplateChunk::JoinedStatic(s) => Ok(*s),
-                TemplateChunk::Placeholder(placeholder) | TemplateChunk::JoinedPlaceholder(placeholder) => match *placeholder {
-                    "in" => Ok(input_str),
-                    "out" => Ok(output_str),
-                    _ => shadows
-                        .as_ref()
-                        .and_then(|shadows| shadows.get(placeholder).map(|shadow| *shadow))
-                        .or_else(|| defs.get(placeholder).map(|def| def.value.as_str()))
-                        .ok_or(report_fmt!(self.loc, "undefined variable: {placeholder}"))
-                },
+    fn _compile(&self, output_str: &str, input_str: &str, shadows: &Shadows, defs: &Defs) -> Result<String, String> {
+        let mut ret = String::with_capacity(self.statics_len + self.chunks.len() * 16);
+
+        for chunk in self.chunks.iter() {
+            match chunk {
+                TemplateChunk::Static(s) => {
+                    if !ret.is_empty() && !s.is_empty() { ret.push(' ') }
+                    ret.push_str(s);
+                }
+                TemplateChunk::JoinedStatic(s) => ret.push_str(s),
+                TemplateChunk::Placeholder(placeholder) => {
+                    let compiled = match *placeholder {
+                        "in" => Ok(input_str),
+                        "out" => Ok(output_str),
+                        _ => shadows
+                            .as_ref()
+                            .and_then(|shadows| shadows.get(placeholder).map(|shadow| *shadow))
+                            .or_else(|| defs.get(placeholder).map(|def| def.0.as_str()))
+                            .ok_or(report_fmt!(self.loc, "undefined variable: {placeholder}")),
+                    }?;
+
+                    if !ret.is_empty() && !compiled.is_empty() { ret.push(' ') }
+                    ret.push_str(compiled)
+                }
+                TemplateChunk::JoinedPlaceholder(placeholder) => {
+                    ret.push_str(match *placeholder {
+                        "in" => Ok(input_str),
+                        "out" => Ok(output_str),
+                        _ => shadows
+                            .as_ref()
+                            .and_then(|shadows| shadows.get(placeholder).map(|shadow| *shadow))
+                            .or_else(|| defs.get(placeholder).map(|def| def.0.as_str()))
+                            .ok_or(report_fmt!(self.loc, "undefined variable: {placeholder}")),
+                    }?);
+                }
             }
-        }).collect()
+        }
+
+        Ok(ret)
     }
 
     #[inline(always)]
@@ -142,17 +172,106 @@ impl Template<'_> {
     #[inline]
     #[cfg_attr(feature = "dbg", track_caller)]
     pub fn compile_def(&self, defs: &Defs) -> String {
-        self.chunks.iter().map(|c| {
-            match c {
-                TemplateChunk::Static(s) | TemplateChunk::JoinedStatic(s) => *s,
-                TemplateChunk::Placeholder(placeholder) | TemplateChunk::JoinedPlaceholder(placeholder) => match *placeholder {
-                    "in" => report!(self.loc, "$in is not allowed in variables definitions\n"),
-                    "out" => report!(self.loc, "$out is not allowed in variables definitions\n"),
-                    _ => defs.get(placeholder).map(|def| def.value.as_str()).unwrap_or_else(|| {
-                        report!(self.loc, "undefined variable: {placeholder}\n")
-                    })
+        let mut ret = String::with_capacity(self.statics_len + self.chunks.len() * 16);
+        for chunk in self.chunks.iter() {
+            match chunk {
+                TemplateChunk::Static(s) => {
+                    if !(ret.is_empty() && s.is_empty()) { ret.push(' ') }
+                    ret.push_str(s)
                 },
+                TemplateChunk::JoinedStatic(s) => ret.push_str(s),
+                TemplateChunk::Placeholder(placeholder) => {
+                    let compiled = match *placeholder {
+                        "in" => report!(self.loc, "$in is not allowed in variables definitions"),
+                        "out" => report!(self.loc, "$out is not allowed in variables definitions"),
+                        _ => defs.get(placeholder).map(|def| def.0.as_str()).unwrap_or_else(|| {
+                            report!(self.loc, "undefined variable: {placeholder}")
+                        })
+                    };
+
+                    if !(ret.is_empty() && placeholder.is_empty()) { ret.push(' ') }
+                    ret.push_str(compiled)
+                },
+                TemplateChunk::JoinedPlaceholder(placeholder) => {
+                    ret.push_str(match *placeholder {
+                        "in" => report!(self.loc, "$in is not allowed in variables definitions"),
+                        "out" => report!(self.loc, "$out is not allowed in variables definitions"),
+                        _ => defs.get(placeholder).map(|def| def.0.as_str()).unwrap_or_else(|| {
+                            report!(self.loc, "undefined variable: {placeholder}")
+                        })
+                    })
+                }
             }
-        }).collect()
+        } ret
+    }
+
+    pub fn compile_def_recursive<'a>(
+        name: &'a str,
+        def: &prep::Def<'a>,
+        defs: &prep::Defs<'a>,
+        compiling: &mut StrHashSet<'a>,
+        compiled_defs: &mut comp::Defs<'a>,
+    ) {
+        if compiling.contains(name) {
+            panic!("circular reference detected involving {name}")
+        }
+
+        if compiled_defs.contains_key(name) { return }
+
+        compiling.insert(name);
+
+        let mut ret = String::with_capacity(32);
+        for chunk in def.0.chunks.iter() {
+            match chunk {
+                TemplateChunk::Static(s) => {
+                    if !ret.is_empty() && !s.is_empty() {
+                        ret.push(' ');
+                    }
+                    ret.push_str(s)
+                }
+                TemplateChunk::JoinedStatic(s) => ret.push_str(s),
+                TemplateChunk::Placeholder(placeholder) => {
+                    if !ret.is_empty() && !placeholder.is_empty() {
+                        ret.push(' ');
+                    }
+
+                    if compiling.contains(placeholder) {
+                        panic!("circular reference detected involving {placeholder}")
+                    }
+
+                    let compiled = match defs.0.get(placeholder) {
+                        Some(def) => {
+                            if !compiled_defs.contains_key(placeholder) {
+                                Template::compile_def_recursive(placeholder, def, defs, compiling, compiled_defs);
+                            }
+                            compiled_defs.get(placeholder).unwrap().0.as_str()
+                        }
+                        None => panic!("Undefined variable: {placeholder}")
+                    };
+
+                    ret.push_str(compiled)
+                }
+                TemplateChunk::JoinedPlaceholder(placeholder) => {
+                    if compiling.contains(placeholder) {
+                        panic!("circular reference detected involving {placeholder}")
+                    }
+
+                    let compiled = match defs.0.get(placeholder) {
+                        Some(def) => {
+                            if !compiled_defs.contains_key(placeholder) {
+                                Template::compile_def_recursive(placeholder, def, defs, compiling, compiled_defs);
+                            }
+                            compiled_defs.get(placeholder).unwrap().0.as_str()
+                        }
+                        None => panic!("Undefined variable: {placeholder}")
+                    };
+
+                    ret.push_str(compiled)
+                }
+            }
+        }
+
+        compiling.remove(name);
+        compiled_defs.insert(name, comp::Def(ret));
     }
 }
