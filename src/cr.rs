@@ -149,7 +149,7 @@ impl<'a> CommandRunner<'a> {
                 } {
                     cr_print!{
                         self,
-                        "{output}\n",
+                        "{output}",
                         output = match command_output {
                             Ok(ok) => ok.to_string(&self.mode),
                             Err(e) => e.to_string()
