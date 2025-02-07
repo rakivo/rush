@@ -21,13 +21,13 @@ macro_rules! new {
 }
 
 macro_rules! define_flags {
-    ($([$short: ident, $name: ident]), *) => { paste::paste! {
+    ($([$short: ident, $name: ident, $description: literal]), *) => { paste::paste! {
         $(
             const [<$name:snake:upper _MODE>]: flager::Flag = flager::Flag::new(
                 concat!("-", stringify!($short)),
                 concat!("--", stringify!($name)),
                 None
-            );
+            ).help($description);
         )*
 
         #[repr(u64)]
@@ -38,6 +38,10 @@ macro_rules! define_flags {
         pub struct Mode(u64);
 
         impl Mode {
+            pub fn print_help() {
+                $(println!("{flag}", flag = [<$name:snake:upper _MODE>]);)*
+            }
+
             getter! { $($name: FlagBit:: [<$name:camel>]), * }
             new! { $(FlagBit:: [<$name:camel>] => passed(&[<$name:snake:upper _MODE>])), * }
         }
@@ -45,7 +49,8 @@ macro_rules! define_flags {
 }
 
 define_flags! {
-    [q, quiet],
-    [v, verbose],
-    [B, always_build]
+    [h, help,         "print this text and exit"],
+    [q, quiet,        "print commands only if stderr is not empty, else: stay quiet"],
+    [v, verbose,      "print both command and description while executing job"],
+    [B, always_build, "always build job, no matter is it up-to-date or not"]
 }

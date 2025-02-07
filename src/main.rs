@@ -28,6 +28,13 @@ const CUSTOM_DEFAULT_TARGET: Flag::<String> = new_flag!("-t", "--target");
 
 fn main() -> ExitCode {
     let flag_parser = FlagParser::new();
+    let mode = Mode::new(&flag_parser);
+
+    if mode.help() {
+        Mode::print_help();
+        return ExitCode::SUCCESS
+    }
+
     let rush_file_path = flag_parser.parse(&CUSTOM_FILE_PATH)
         .unwrap_or(Parser::RUSH_FILE_PATH.to_owned());
 
@@ -35,8 +42,6 @@ fn main() -> ExitCode {
         loc::RUSH_FILE_PATH_PTR = rush_file_path.as_ptr();
         loc::RUSH_FILE_PATH_LEN = rush_file_path.len();
     }
-
-    let mode = Mode::new(&flag_parser);
 
     let Some(mmap) = read_file(&rush_file_path) else {
         eprintln!("could not read: {rush_file_path}");
