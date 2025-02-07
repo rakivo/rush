@@ -1,8 +1,8 @@
 use crate::loc::Loc;
 use crate::consts::syntax::*;
-use crate::template::Template;
 use crate::consts::PHONY_TARGETS;
 use crate::types::{StrHashMap, StrHashSet};
+use crate::template::{Template, TemplateChunk};
 
 use std::mem;
 use std::sync::Arc;
@@ -29,7 +29,6 @@ pub fn read_file(path: &str) -> Option::<Mmap> {
     }
 }
 
-
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct Rule<'a> {
     pub command: Template<'a>,
@@ -54,9 +53,10 @@ impl<'a> Rule<'a> {
     }
 }
 
-pub type Shadows<'a> = Option::<Arc::<Defs<'a>>>;
-pub type DefaultJob<'a> = Option::<&'a Job<'a>>;
+pub type Aliases = Vec::<String>;
 pub type DefaultTarget = Option::<String>;
+pub type DefaultJob<'a> = Option::<&'a comp::Job<'a>>;
+pub type Shadows<'a> = Option::<Arc::<StrHashMap::<'a, &'a str>>>;
 
 pub mod prep {
     use super::*;
@@ -139,73 +139,164 @@ pub mod prep {
             }
         }
     }
-}
 
-pub type Aliases = Vec::<String>;
+    #[repr(transparent)]
+    #[cfg_attr(feature = "dbg", derive(Debug))]
+    pub struct Def<'a> { pub value: Template<'a> }
 
-#[cfg_attr(feature = "dbg", derive(Debug))]
-pub enum Phony<'a> {
-    Phony {
-        command: Option::<String>,
-        aliases: Aliases
-    },
-    NotPhony {
-        rule: Option::<&'a str>,
-        inputs: Vec::<&'a str>,
-        inputs_str: &'a str,
-        deps: Vec::<&'a str>,
+    #[repr(transparent)]
+    #[cfg_attr(feature = "dbg", derive(Debug))]
+    pub struct Defs<'a>(pub StrHashMap::<'a, Def<'a>>);
+
+    impl<'a> Defs<'a> {
+        #[inline]
+        pub fn compile(&self) -> comp::Defs<'a> {
+            let mut compiled_defs = comp::Defs::new();
+            let mut compiling = StrHashSet::with_capacity(128);
+            for (key, def) in self.0.iter() {
+                self.compile_def_recursive(key, def, &mut compiling, &mut compiled_defs)
+            } compiled_defs
+        }
+
+        fn compile_def_recursive(
+            &self,
+            key: &'a str,
+            def: &Def<'a>,
+            compiling: &mut StrHashSet<'a>,
+            compiled_defs: &mut comp::Defs<'a>,
+        ) {
+            if compiling.contains(key) {
+                panic!("circular reference detected involving {key}")
+            }
+
+            if compiled_defs.contains_key(key) { return }
+
+            compiling.insert(key);
+
+            let mut value = String::with_capacity(32);
+            for chunk in &def.value.chunks {
+                match chunk {
+                    TemplateChunk::Static(s) => {
+                        if !value.is_empty() && !s.is_empty() {
+                            value.push(' ');
+                        }
+                        value.push_str(s)
+                    }
+                    TemplateChunk::JoinedStatic(s) => value.push_str(s),
+                    TemplateChunk::Placeholder(placeholder) => {
+                        if !value.is_empty() && !placeholder.is_empty() {
+                            value.push(' ');
+                        }
+
+                        if compiling.contains(placeholder) {
+                            panic!("circular reference detected involving {placeholder}")
+                        }
+
+                        let compiled = match self.0.get(placeholder) {
+                            Some(def) => {
+                                if !compiled_defs.contains_key(placeholder) {
+                                    self.compile_def_recursive(placeholder, def, compiling, compiled_defs);
+                                }
+                                compiled_defs.get(placeholder).unwrap().value.as_str()
+                            }
+                            None => panic!("Undefined variable: {placeholder}")
+                        };
+
+                        value.push_str(compiled)
+                    }
+                    TemplateChunk::JoinedPlaceholder(placeholder) => {
+                        if compiling.contains(placeholder) {
+                            panic!("circular reference detected involving {placeholder}")
+                        }
+
+                        let compiled = match self.0.get(placeholder) {
+                            Some(def) => {
+                                if !compiled_defs.contains_key(placeholder) {
+                                    self.compile_def_recursive(placeholder, def, compiling, compiled_defs);
+                                }
+                                compiled_defs.get(placeholder).unwrap().value.as_str()
+                            }
+                            None => panic!("Undefined variable: {placeholder}")
+                        };
+
+                        value.push_str(compiled)
+                    }
+                }
+            }
+
+            compiling.remove(key);
+            compiled_defs.insert(key, comp::Def { value });
+        }
     }
 }
 
-#[cfg_attr(feature = "dbg", derive(Debug))]
-pub struct Job<'a> {
-    pub loc: Loc,
+pub mod comp {
+    use super::*;
 
-    pub target: &'a str,
-
-    pub shadows: Shadows<'a>,
-
-    pub phony: Phony<'a>
-}
-
-impl<'a> Job<'a> {
-    #[inline(always)]
-    pub fn aliases(&self) -> Option::<&Aliases> {
-        if let Phony::Phony { aliases, .. } = &self.phony { Some(aliases) }
-        else { None }
-    }
-
-    #[inline]
-    #[cfg_attr(feature = "dbg", track_caller)]
-    pub fn inputs_str(&self, panic: bool) -> &'a str {
-        match self.phony {
-            Phony::Phony { .. } => if panic {
-                report!(self.loc, "$in is not supported in phony jobs yet")
-            } else {
-                ""
-            },
-            Phony::NotPhony { inputs_str, .. } => inputs_str,
+    #[cfg_attr(feature = "dbg", derive(Debug))]
+    pub enum Phony<'a> {
+        Phony {
+            command: Option::<String>,
+            aliases: Aliases
+        },
+        NotPhony {
+            rule: Option::<&'a str>,
+            inputs: Vec::<&'a str>,
+            inputs_str: &'a str,
+            deps: Vec::<&'a str>,
         }
     }
 
-    #[inline]
-    pub fn rule(&self) -> Option::<&'a str> {
-        match self.phony {
-            Phony::Phony { .. } => None,
-            Phony::NotPhony { rule, .. } => rule,
+    #[cfg_attr(feature = "dbg", derive(Debug))]
+    pub struct Job<'a> {
+        pub loc: Loc,
+
+        pub target: &'a str,
+
+        pub shadows: Shadows<'a>,
+
+        pub phony: Phony<'a>
+    }
+
+    impl<'a> Job<'a> {
+        #[inline(always)]
+        pub fn aliases(&self) -> Option::<&Aliases> {
+            if let Phony::Phony { aliases, .. } = &self.phony { Some(aliases) }
+            else { None }
+        }
+
+        #[inline]
+        #[cfg_attr(feature = "dbg", track_caller)]
+        pub fn inputs_str(&self, panic: bool) -> &'a str {
+            match self.phony {
+                Phony::Phony { .. } => if panic {
+                    report!(self.loc, "$in is not supported in phony jobs yet")
+                } else {
+                    ""
+                },
+                Phony::NotPhony { inputs_str, .. } => inputs_str,
+            }
+        }
+
+        #[inline]
+        pub fn rule(&self) -> Option::<&'a str> {
+            match self.phony {
+                Phony::Phony { .. } => None,
+                Phony::NotPhony { rule, .. } => rule,
+            }
         }
     }
+
+    #[repr(transparent)]
+    #[cfg_attr(feature = "dbg", derive(Debug))]
+    pub struct Def { pub value: String }
+
+    pub type Defs<'a> = StrHashMap::<'a, Def>;
 }
-
-#[repr(transparent)]
-#[cfg_attr(feature = "dbg", derive(Debug))]
-pub struct Def<'a> { pub value: &'a str }
-
-pub type Defs<'a> = StrHashMap::<'a, Def<'a>>;
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct Parsed<'a> {
-    defs: Defs<'a>,
+    defs: prep::Defs<'a>,
     phonys: StrHashSet<'a>,
     default_target: prep::DefaultTarget<'a>,
     jobs: StrHashMap::<'a, prep::Job<'a>>,
@@ -226,7 +317,10 @@ impl<'a> Parsed<'a> {
     #[cfg_attr(feature = "dbg", tramer("nanos"))]
     pub fn into_processed(self) -> Processed<'a> {
         let Parsed { defs, jobs, rules, phonys, default_target } = self;
-        let jobs = jobs.iter().filter_map(|(.., job)| {
+
+        let defs = defs.compile();
+
+        let jobs = jobs.values().filter_map(|job| {
             if let prep::Phony::NotPhony { rule, .. } = &job.phony {
                 if let Some(ref rule) = rule {
                     if !rules.contains_key(rule) {
@@ -264,11 +358,11 @@ impl<'a> Parsed<'a> {
                             }
                         }).collect::<Vec::<_>>();
 
-                    Job {
+                    comp::Job {
                         target,
                         loc: job.loc,
                         shadows: job.shadows.as_ref().map(Arc::clone),
-                        phony: Phony::Phony { command, aliases }
+                        phony: comp::Phony::Phony { command, aliases }
                     }
                 }
                 prep::Phony::NotPhony {
@@ -306,11 +400,11 @@ impl<'a> Parsed<'a> {
                             }
                         }).collect::<Vec::<_>>();
 
-                    Job {
+                    comp::Job {
                         target,
                         loc: job.loc,
                         shadows: job.shadows.as_ref().map(Arc::clone),
-                        phony: Phony::NotPhony {
+                        phony: comp::Phony::NotPhony {
                             deps,
                             inputs,
                             inputs_str,
@@ -333,35 +427,40 @@ impl<'a> Parsed<'a> {
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct Processed<'a> {
-    pub defs: Defs<'a>,
+    pub defs: comp::Defs<'a>,
     pub default_target: DefaultTarget,
     pub rules: StrHashMap::<'a, Rule<'a>>,
-    pub jobs: StrHashMap::<'a, Job<'a>>,
+    pub jobs: StrHashMap::<'a, comp::Job<'a>>,
 }
 
 #[repr(packed)]
 #[derive(Copy, Clone)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
-struct DepfilePath<'a> { loc: Loc, path: &'a str }
+struct DepfilePath<'a> {
+    loc: Loc,
+    path: &'a str
+}
 
 #[repr(packed)]
 #[derive(Copy, Clone)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
-struct Description<'a> { loc: Loc, description: &'a str }
+struct Description<'a> {
+    loc: Loc, description: &'a str
+}
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
 enum Context<'a> {
     Global,
     Job {
         target: &'a str,
-        shadows: Option::<Defs<'a>>,
+        shadows: Option::<StrHashMap::<'a, &'a str>>,
     },
     Rule {
         name: &'a str,
 
         already_inserted: bool,
 
-        depfile_path: Option::<DepfilePath<'a>>,
+        depfile: Option::<DepfilePath<'a>>,
         description: Option::<Description<'a>>,
     }
 }
@@ -418,14 +517,17 @@ impl<'a> Parser<'a> {
                 return
             };
         
-        let parse_def = || -> Def<'a> {
+        let parse_shadow = || -> &'a str {
             let check_start = first_space;
             let check_end = (second_space + 1 + 1).min(line.len());
             if !line[check_start..check_end].contains('=') {
                 report!(Loc(self.cursor), "expected `=` in variable definition")
             }
-            let value = line[second_space + 1..].trim();
-            Def { value }
+            line[second_space + 1..].trim()
+        };
+
+        let parse_def = || -> prep::Def<'a> {
+            prep::Def { value: Template::new(parse_shadow(), Loc(self.cursor)) }
         };
 
         // TODO: we should move context here and this match should return another updated context
@@ -440,7 +542,7 @@ impl<'a> Parser<'a> {
                         job.phony = job.into_phony(Some(command));
                     },
                     name => {
-                        let def = parse_def();
+                        let def = parse_shadow();
                         match shadows.as_mut() {
                             Some(shadows) => { shadows.insert(name, def); },
                             None => {
@@ -452,7 +554,7 @@ impl<'a> Parser<'a> {
                     }
                 }
             },
-            Context::Rule { name, depfile_path, already_inserted, description } => {
+            Context::Rule { name, depfile, already_inserted, description } => {
                 match first_token {
                     COMMAND => {
                         let command = line[second_space + 1 + 1..].trim();
@@ -461,30 +563,30 @@ impl<'a> Parser<'a> {
                             command,
                             Loc(command_loc),
                             *description,
-                            *depfile_path,
+                            *depfile,
                         );
                         self.parsed.rules.insert(name, rule);
                         self.context = Context::Rule {
                             name,
                             already_inserted: true,
                             description: *description,
-                            depfile_path: *depfile_path,
+                            depfile: *depfile,
                         }
                     },
                     DEPFILE => {
-                        let Def {value: path} = parse_def();
+                        let path = parse_shadow();
                         let loc = Loc(self.cursor);
-                        let depfile_path = DepfilePath {path, loc};
+                        let depfile = DepfilePath {loc, path};
                         if *already_inserted {
                             let rule = self.parsed.rule_mut(name);
-                            let depfile = Template::new(depfile_path.path, depfile_path.loc);
+                            let depfile = Template::new(path, loc);
                             rule.depfile = Some(depfile)
                         } else {
                             self.context = Context::Rule {
                                 name,
                                 already_inserted: true,
                                 description: *description,
-                                depfile_path: Some(depfile_path),
+                                depfile: Some(depfile),
                             }
                         }
                     },
@@ -499,7 +601,7 @@ impl<'a> Parser<'a> {
                             self.context = Context::Rule {
                                 name,
                                 description: Some(description),
-                                depfile_path: *depfile_path,
+                                depfile: *depfile,
                                 already_inserted: *already_inserted,
                             }
                         }
@@ -536,8 +638,8 @@ impl<'a> Parser<'a> {
                     },
                     RULE => {
                         self.context = Context::Rule {
+                            depfile: None,
                             description: None,
-                            depfile_path: None,
                             name: line[second_space..].trim_end(),
                             already_inserted: false,
                         }
@@ -623,7 +725,7 @@ impl<'a> Parser<'a> {
                     _ => {
                         let name = first_token;
                         let def = parse_def();
-                        self.parsed.defs.insert(name, def);
+                        self.parsed.defs.0.insert(name, def);
                     }
                 };
             },
@@ -668,7 +770,7 @@ impl<'a> Parser<'a> {
         let mut parser = Self {
             cursor: 0,
             parsed: Parsed {
-                defs: Defs::with_capacity(32),
+                defs: prep::Defs(StrHashMap::with_capacity(32)),
                 jobs: StrHashMap::with_capacity(32),
                 rules: StrHashMap::with_capacity(32),
                 phonys: {

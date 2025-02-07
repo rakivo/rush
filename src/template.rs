@@ -1,8 +1,9 @@
 use crate::loc::Loc;
-use crate::parser::{prep, Job, Defs, Shadows};
+use crate::parser::{prep, Shadows};
+use crate::parser::comp::{Job, Defs};
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
-enum TemplateChunk<'a> {
+pub enum TemplateChunk<'a> {
     Static(&'a str),
     JoinedStatic(&'a str),
     Placeholder(&'a str),
@@ -13,7 +14,7 @@ enum TemplateChunk<'a> {
 pub struct Template<'a> {
     loc: Loc,
     in_used: bool,
-    chunks: Vec::<TemplateChunk<'a>>,
+    pub chunks: Vec::<TemplateChunk<'a>>,
 }
 
 impl Template<'_> {
@@ -24,19 +25,20 @@ impl Template<'_> {
         let mut start = 0;
         let mut in_used = false;
         let mut chunks = Vec::new();
-        let mut last_was_placeholder = false;
+        let mut last_was_placeholder_or_joined = false;
 
         while let Some(i) = s[start..].find('$') {
             let i = start + i;
             if i > start {
                 let trimmed_static = &s[start..i];
                 if !trimmed_static.is_empty() {
-                    let chunk = if last_was_placeholder {
+                    let chunk = if last_was_placeholder_or_joined && trimmed_static.chars().all(|c| !c.is_whitespace()) {
                         TemplateChunk::JoinedStatic(trimmed_static)
                     } else {
                         TemplateChunk::Static(trimmed_static)
                     };
-                    chunks.push(chunk)
+                    chunks.push(chunk);
+                    last_was_placeholder_or_joined = false
                 }
             }
 
@@ -62,12 +64,15 @@ impl Template<'_> {
                 };
 
                 in_used = placeholder == "in";
-                if placeholder_end < s.len() && s.as_bytes().get(placeholder_end) == Some(&b'.') {
-                    chunks.push(TemplateChunk::JoinedPlaceholder(placeholder))
+
+                let chunk = if last_was_placeholder_or_joined {
+                    TemplateChunk::JoinedPlaceholder(placeholder)
                 } else {
-                    chunks.push(TemplateChunk::Placeholder(placeholder))
-                }
-                last_was_placeholder = true
+                    TemplateChunk::Placeholder(placeholder)
+                };
+
+                chunks.push(chunk);
+                last_was_placeholder_or_joined = true
             } else {
                 report!(loc, "empty placeholder")
             }
@@ -79,7 +84,7 @@ impl Template<'_> {
         if start < s.len() {
             let trimmed_static = s[start..].trim();
             if !trimmed_static.is_empty() {
-                let chunk = if last_was_placeholder {
+                let chunk = if last_was_placeholder_or_joined && s[start..].chars().all(|c| !c.is_whitespace()) {
                     TemplateChunk::JoinedStatic(trimmed_static)
                 } else {
                     TemplateChunk::Static(trimmed_static)
@@ -116,8 +121,8 @@ impl Template<'_> {
                     "out" => Ok(output_str),
                     _ => shadows
                         .as_ref()
-                        .and_then(|shadows| shadows.get(placeholder).map(|shadow| shadow.value))
-                        .or_else(|| defs.get(placeholder).map(|def| def.value))
+                        .and_then(|shadows| shadows.get(placeholder).map(|shadow| *shadow))
+                        .or_else(|| defs.get(placeholder).map(|def| def.value.as_str()))
                         .ok_or(report_fmt!(self.loc, "undefined variable: {placeholder}"))
                 },
             }
@@ -143,7 +148,7 @@ impl Template<'_> {
                 TemplateChunk::Placeholder(placeholder) | TemplateChunk::JoinedPlaceholder(placeholder) => match *placeholder {
                     "in" => report!(self.loc, "$in is not allowed in variables definitions\n"),
                     "out" => report!(self.loc, "$out is not allowed in variables definitions\n"),
-                    _ => defs.get(placeholder).map(|def| def.value).unwrap_or_else(|| {
+                    _ => defs.get(placeholder).map(|def| def.value.as_str()).unwrap_or_else(|| {
                         report!(self.loc, "undefined variable: {placeholder}\n")
                     })
                 },

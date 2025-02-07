@@ -1,6 +1,6 @@
 use crate::mode::Mode;
-use crate::parser::Job;
 use crate::types::StrDashMap;
+use crate::parser::comp::Job;
 use crate::graph::TransitiveDeps;
 
 use std::io;

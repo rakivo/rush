@@ -2,8 +2,9 @@ use crate::mode::Mode;
 use crate::types::StrDashSet;
 use crate::db::{Db, Metadata};
 use crate::consts::PHONY_TARGETS;
+use crate::parser::comp::{Job, Phony};
 use crate::command::{Command, MetadataCache, CommandOutput};
-use crate::parser::{Job, Rule, Phony, Processed, DefaultJob};
+use crate::parser::{Rule, Processed, DefaultJob};
 use crate::graph::{Graph, TransitiveDeps, topological_sort_levels};
 
 use std::sync::Arc;

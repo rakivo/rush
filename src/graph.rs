@@ -1,5 +1,6 @@
+use crate::parser::comp::Phony;
 use crate::types::{StrHashMap, StrHashSet};
-use crate::parser::{Phony, Processed, DefaultJob};
+use crate::parser::{Processed, DefaultJob};
 
 use std::fs;
 use std::sync::Arc;

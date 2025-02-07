@@ -1,5 +1,5 @@
 #[repr(transparent)]
-#[derive(Copy, Clone, Default)]
+#[derive(Copy, Clone)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct Loc(pub usize);
 
