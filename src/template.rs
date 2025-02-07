@@ -22,9 +22,8 @@ impl Template<'_> {
     #[cfg_attr(feature = "dbg", track_caller)]
     pub fn new(s: &str, loc: Loc) -> Template {
         let mut start = 0;
-        let mut chunks = Vec::new();
-
         let mut in_used = false;
+        let mut chunks = Vec::new();
         let mut last_was_placeholder = false;
 
         while let Some(i) = s[start..].find('$') {
@@ -42,26 +41,39 @@ impl Template<'_> {
             }
 
             let placeholder_start = i + 1;
-            let placeholder_end = s[placeholder_start..]
-                .find(|c: char| !c.is_alphanumeric() && c != '_')
-                .map(|end| placeholder_start + end)
-                .unwrap_or_else(|| s.len());
+            let curly_syntax = s.as_bytes().get(placeholder_start) == Some(&b'{');
+            let placeholder_end = if curly_syntax {
+                s[placeholder_start + 1..]
+                    .find('}')
+                    .map(|end| placeholder_start + 1 + end)
+                    .unwrap_or_else(|| report!(loc, "missing closing brace for placeholder"))
+            } else {
+                s[placeholder_start..]
+                    .find(|c: char| !c.is_alphanumeric() && c != '_')
+                    .map(|end| placeholder_start + end)
+                    .unwrap_or_else(|| s.len())
+            };
 
             if placeholder_start < placeholder_end {
-                let ref placeholder = s[placeholder_start..placeholder_end];
-                in_used = placeholder == "in";
-                let joined = placeholder_end < s.len() && s.chars().nth(placeholder_end) == Some('.');
-                if joined {
-                    chunks.push(TemplateChunk::JoinedPlaceholder(placeholder));
+                let placeholder = if curly_syntax {
+                    &s[placeholder_start + 1..placeholder_end]
                 } else {
-                    chunks.push(TemplateChunk::Placeholder(placeholder));
+                    &s[placeholder_start..placeholder_end]
+                };
+
+                in_used = placeholder == "in";
+                if placeholder_end < s.len() && s.as_bytes().get(placeholder_end) == Some(&b'.') {
+                    chunks.push(TemplateChunk::JoinedPlaceholder(placeholder))
+                } else {
+                    chunks.push(TemplateChunk::Placeholder(placeholder))
                 }
                 last_was_placeholder = true
             } else {
                 report!(loc, "empty placeholder")
             }
 
-            start = placeholder_end
+            start = placeholder_end;
+            if curly_syntax { start += 1 }
         }
 
         if start < s.len() {
