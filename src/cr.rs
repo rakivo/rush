@@ -52,6 +52,7 @@ pub struct CommandRunner<'a> {
     db_read: Option::<Db<'a>>,
     db_write: Db<'a>,
     context: &'a Processed<'a>,
+    default_job: DefaultJob<'a>,
     executed: StrDashSet::<'a>,
     metadata_cache: MetadataCache<'a>,
     transitive_deps: TransitiveDeps<'a>
@@ -67,7 +68,7 @@ impl<'a> CommandRunner<'a> {
         transitive_deps: TransitiveDeps<'a>
     ) -> Db<'a> {
         let (stdout, writer) = Self::stdout_thread();
-        let cr = Self::new(mode, stdout, graph, db, context, transitive_deps);
+        let cr = Self::new(mode, stdout, graph, db, default_job, context, transitive_deps);
 
         let levels = if let Some(job) = default_job {
             cr.run_target(job);
@@ -91,6 +92,7 @@ impl<'a> CommandRunner<'a> {
         stdout: Stdout,
         graph: Graph<'a>,
         db_read: Option::<Db<'a>>,
+        default_job: DefaultJob<'a>,
         context: &'a Processed<'a>,
         transitive_deps: TransitiveDeps<'a>
     ) -> Self {
@@ -101,6 +103,7 @@ impl<'a> CommandRunner<'a> {
             stdout,
             context,
             db_read,
+            default_job,
             db_write: Db::write(),
             executed: DashSet::with_capacity_and_hasher(n, FxBuildHasher::default()),
             metadata_cache: MetadataCache::new(n),
@@ -296,8 +299,14 @@ impl<'a> CommandRunner<'a> {
                 any_err = true
             }
 
-            if !any_err {
-                cr_print!(self, "{target} is already built\n", target = job.target);
+            if !any_err && self.mode.verbose() ||
+                self.default_job.as_ref().map_or(false, |def| {
+                    def.target == job.target || def.aliases().map_or(false, |aliases| {
+                        aliases.iter().any(|a| a == job.target)
+                    })
+                })
+            {
+                cr_print!(self, "{target} is already built\n", target = job.target)
             }
         } false
     }

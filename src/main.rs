@@ -19,16 +19,22 @@ use parser::{Parser, read_file};
 use graph::build_dependency_graph;
 use flager::{Flag, Parser as FlagParser, new_flag};
 
-use std::process::ExitCode;
+use std::process::{exit, ExitCode};
 use std::thread::available_parallelism;
 
 const CUSTOM_FILE_PATH: Flag::<String> = new_flag!("-f", "--file");
 const CUSTOM_PARALLELALISM: Flag::<i64> = new_flag!("-j", "--jobs");
+const CUSTOM_DEFAULT_TARGET: Flag::<String> = new_flag!("-t", "--target");
 
 fn main() -> ExitCode {
     let flag_parser = FlagParser::new();
     let rush_file_path = flag_parser.parse(&CUSTOM_FILE_PATH)
         .unwrap_or(Parser::RUSH_FILE_PATH.to_owned());
+
+    unsafe {
+        loc::RUSH_FILE_PATH_PTR = rush_file_path.as_ptr();
+        loc::RUSH_FILE_PATH_LEN = rush_file_path.len();
+    }
 
     let mode = Mode::new(&flag_parser);
 
@@ -61,12 +67,19 @@ fn main() -> ExitCode {
     let (escaped, escaped_indexes) = Parser::handle_newline_escapes(content);
     let processed = Parser::parse(&escaped, &escaped_indexes).into_processed();
 
+    let default_job = flag_parser.parse(&CUSTOM_DEFAULT_TARGET).map(|t| {
+        processed.jobs.get(t.as_str()).unwrap_or_else(|| {
+            eprintln!("no target: {t} found in {rush_file_path}");
+            exit(1)
+        })
+    });
+
     let mmap = Db::read_cache();
     let content = mmap.as_ref().map(|mmap| unsafe { std::str::from_utf8_unchecked(&mmap[..]) });
     let db = content.and_then(|content| Db::read(content).ok());
 
-    let (graph, default_target, transitive_deps) = build_dependency_graph(&processed);
-    _ = CommandRunner::run(&mode, &processed, graph, db, default_target, transitive_deps).write_finish();
+    let (graph, default_job, transitive_deps) = build_dependency_graph(&processed, default_job);
+    _ = CommandRunner::run(&mode, &processed, graph, db, default_job, transitive_deps).write_finish();
 
     ExitCode::SUCCESS
 }

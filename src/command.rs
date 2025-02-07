@@ -158,7 +158,9 @@ pub struct MetadataCache<'a> {
 impl<'a> MetadataCache<'a> {
     #[inline]
     pub fn new(files_count: usize) -> Self {
-        Self {files: DashMap::with_capacity_and_hasher(files_count, FxBuildHasher::default())}
+        Self {
+            files: DashMap::with_capacity_and_hasher(files_count, FxBuildHasher::default())
+        }
     }
 
     #[inline]

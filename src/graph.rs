@@ -12,7 +12,7 @@ pub type Graph<'a> = StrHashMap::<'a, Arc::<StrHashSet<'a>>>;
 pub type TransitiveDeps<'a> = StrHashMap::<'a, Arc::<StrHashSet<'a>>>;
 
 #[cfg_attr(feature = "dbg", tramer("nanos"))]
-pub fn build_dependency_graph<'a>(processed: &'a Processed) -> (Graph<'a>, DefaultJob<'a>, TransitiveDeps<'a>) {
+pub fn build_dependency_graph<'a>(processed: &'a Processed, default_job: DefaultJob<'a>) -> (Graph<'a>, DefaultJob<'a>, TransitiveDeps<'a>) {
     fn collect_deps<'a>(
         node: &'a str,
         parsed: &'a Processed,
@@ -98,25 +98,27 @@ pub fn build_dependency_graph<'a>(processed: &'a Processed) -> (Graph<'a>, Defau
         collect_deps(target, processed, &mut graph, &mut visited, &mut transitive_deps);
     }
 
-    let default_job = if let Some(ref dt) = processed.default_target {
-        processed.jobs.get(dt.as_str())
-    } else if graph.is_empty() {
-        processed.jobs.values().next()
-    } else {
-        let mut reverse_graph = StrHashMap::with_capacity(n);
-        for (node, deps) in graph.iter() {
-            for dep in deps.iter() {
-                reverse_graph.entry(*dep).or_insert_with(StrHashSet::default).insert(node);
+    let default_job = default_job.or({
+        if let Some(ref dt) = processed.default_target {
+            processed.jobs.get(dt.as_str())
+        } else if graph.is_empty() {
+            processed.jobs.values().next()
+        } else {
+            let mut reverse_graph = StrHashMap::with_capacity(n);
+            for (node, deps) in graph.iter() {
+                for dep in deps.iter() {
+                    reverse_graph.entry(*dep).or_insert_with(StrHashSet::default).insert(node);
+                }
             }
-        }
 
-        // find the jobs that does not act as an input anywhere,
-        // then sort those by their first appearance in the source code row-wise
-        processed.jobs.keys()
-            .filter(|job| !reverse_graph.contains_key(*job))
-            .map(|t| unsafe { processed.jobs.get(t).unwrap_unchecked() })
-            .min_by(|x, y| x.loc.0.cmp(&y.loc.0))
-    };
+            // find the jobs that does not act as an input anywhere,
+            // then sort those by their first appearance in the source code row-wise
+            processed.jobs.keys()
+                .filter(|job| !reverse_graph.contains_key(*job))
+                .map(|t| unsafe { processed.jobs.get(t).unwrap_unchecked() })
+                .min_by(|x, y| x.loc.0.cmp(&y.loc.0))
+        }
+    });
 
     (graph, default_job, transitive_deps)
 }

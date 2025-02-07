@@ -141,11 +141,13 @@ pub mod prep {
     }
 }
 
+pub type Aliases = Vec::<String>;
+
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub enum Phony<'a> {
     Phony {
         command: Option::<String>,
-        aliases: Vec::<String>
+        aliases: Aliases
     },
     NotPhony {
         rule: Option::<&'a str>,
@@ -167,6 +169,12 @@ pub struct Job<'a> {
 }
 
 impl<'a> Job<'a> {
+    #[inline(always)]
+    pub fn aliases(&self) -> Option::<&Aliases> {
+        if let Phony::Phony { aliases, .. } = &self.phony { Some(aliases) }
+        else { None }
+    }
+
     #[inline]
     #[cfg_attr(feature = "dbg", track_caller)]
     pub fn inputs_str(&self, panic: bool) -> &'a str {
@@ -515,6 +523,13 @@ impl<'a> Parser<'a> {
                 match first_token {
                     PHONY => {
                         let phony = line[first_space..].trim();
+                        if phony.as_bytes().last() == Some(&b':') {
+                            report!{
+                                Loc(self.cursor),
+                                "you can define phony job following way:\n  phony {target}\n  build {target}:\n    ...\n",
+                                target = &phony[..(phony.len() - 1).max(1)]
+                            }
+                        }
                         self.parsed.phonys.insert(phony);
                         if let Some(job) = self.parsed.jobs.get_mut(phony) {
                             job.phony = job.into_phony(None)
