@@ -1,8 +1,5 @@
 cflags = -std=gnu99 -lm -O2 -Wall -Wextra -DLUA_COMPAT_5_3
 
-phony all
-build all: lua
-
 rule cc
   depfile = $out.d
   command = gcc -MD -MF $out.d $cflags -o $out -c $in
@@ -43,9 +40,13 @@ build src/lundump.o: cc src/lundump.c
 build src/lutf8lib.o: cc src/lutf8lib.c
 build src/lvm.o: cc src/lvm.c
 build src/lzio.o: cc src/lzio.c
-build lua: link src/lapi.o src/lauxlib.o src/lbaselib.o src/lcode.o $
-  src/lcorolib.o src/lctype.o src/ldblib.o src/ldebug.o src/ldo.o src/ldump.o $
-  src/lfunc.o src/lgc.o src/linit.o src/liolib.o src/llex.o src/lmathlib.o $
+build lua: link src/lapi.o src/lauxlib.o src/lbaselib.o src/lcode.o                $
+  src/lcorolib.o src/lctype.o src/ldblib.o src/ldebug.o src/ldo.o src/ldump.o      $
+  src/lfunc.o src/lgc.o src/linit.o src/liolib.o src/llex.o src/lmathlib.o         $
   src/lmem.o src/loadlib.o src/lobject.o src/lopcodes.o src/loslib.o src/lparser.o $
-  src/lstate.o src/lstring.o src/lstrlib.o src/ltable.o src/ltablib.o src/ltm.o $
+  src/lstate.o src/lstring.o src/lstrlib.o src/ltable.o src/ltablib.o src/ltm.o    $
   src/lua.o src/lundump.o src/lutf8lib.o src/lvm.o src/lzio.o
+
+phony clean
+build clean:
+  command = rm -f lua ./src/*.o
