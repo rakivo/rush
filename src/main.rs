@@ -59,7 +59,7 @@ fn main() -> ExitCode {
 
     let content = unsafe { std::str::from_utf8_unchecked(&mmap[..]) };
     let (escaped, escaped_indexes) = Parser::handle_newline_escapes(content);
-    let context = Parser::parse(&escaped, &escaped_indexes).into_processed();
+    let context = Parser::parse(&escaped, &escaped_indexes).compile();
 
     let default_job = flags.default_target().map(|t| {
         context.jobs.get(t.as_str()).unwrap_or_else(|| {

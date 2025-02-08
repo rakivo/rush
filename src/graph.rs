@@ -1,6 +1,6 @@
 use crate::parser::comp::Phony;
+use crate::parser::{Compiled, DefaultJob};
 use crate::types::{StrHashMap, StrHashSet};
-use crate::parser::{Processed, DefaultJob};
 
 use std::fs;
 use std::sync::Arc;
@@ -13,10 +13,10 @@ pub type Levels<'a> = Vec::<Vec::<&'a str>>;
 pub type Graph<'a> = StrHashMap::<'a, Arc::<StrHashSet<'a>>>;
 
 #[cfg_attr(feature = "dbg", tramer("nanos"))]
-pub fn build_dependency_graph<'a>(processed: &'a Processed, default_job: DefaultJob<'a>) -> (Graph<'a>, DefaultJob<'a>, Graph<'a>) {
+pub fn build_dependency_graph<'a>(processed: &'a Compiled, default_job: DefaultJob<'a>) -> (Graph<'a>, DefaultJob<'a>, Graph<'a>) {
     fn collect_deps<'a>(
         node: &'a str,
-        parsed: &'a Processed,
+        parsed: &'a Compiled,
         graph: &mut Graph<'a>,
         visited: &mut StrHashSet<'a>,
         transitive_deps: &mut Graph<'a>

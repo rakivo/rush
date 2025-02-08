@@ -240,7 +240,7 @@ impl<'a> Parsed<'a> {
     }
 
     #[cfg_attr(feature = "dbg", tramer("nanos"))]
-    pub fn into_processed(self) -> Processed<'a> {
+    pub fn compile(self) -> Compiled<'a> {
         let Parsed { defs, jobs, rules, phonys, default_target } = self;
 
         let defs = defs.compile();
@@ -345,12 +345,12 @@ impl<'a> Parsed<'a> {
             Template::new(dt.t, dt.loc).compile_def(&defs)
         });
 
-        Processed {jobs, rules, defs, default_target}
+        Compiled {jobs, rules, defs, default_target}
     }
 }
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
-pub struct Processed<'a> {
+pub struct Compiled<'a> {
     pub defs: comp::Defs<'a>,
     pub default_target: DefaultTarget,
     pub rules: StrHashMap::<'a, Rule<'a>>,

@@ -3,7 +3,7 @@ use crate::types::StrDashSet;
 use crate::db::{Db, Metadata};
 use crate::consts::PHONY_TARGETS;
 use crate::parser::comp::{Job, Phony};
-use crate::parser::{Rule, Processed, DefaultJob};
+use crate::parser::{Rule, Compiled, DefaultJob};
 use crate::graph::{Graph, Levels, topological_sort};
 use crate::command::{Command, MetadataCache, CommandOutput};
 
@@ -57,7 +57,7 @@ impl From::<bool> for ExecutorFlow {
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct CommandRunner<'a> {
-    context: &'a Processed<'a>,
+    context: &'a Compiled<'a>,
 
     graph: Graph<'a>,
     transitive_deps: Graph<'a>,
@@ -108,7 +108,7 @@ impl<'a> CommandRunner<'a> {
 
     #[inline]
     fn new(
-        context: &'a Processed,
+        context: &'a Compiled,
         graph: Graph<'a>,
         transitive_deps: Graph<'a>,
         flags: &'a Flags,
@@ -136,7 +136,7 @@ impl<'a> CommandRunner<'a> {
 
     #[inline]
     pub fn run(
-        context: &'a Processed,
+        context: &'a Compiled,
         graph: Graph<'a>,
         transitive_deps: Graph<'a>,
         flags: &'a Flags,
