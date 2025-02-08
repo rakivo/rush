@@ -1,4 +1,4 @@
-use crate::mode::Mode;
+use crate::flags::Flags;
 use crate::types::StrDashSet;
 use crate::db::{Db, Metadata};
 use crate::consts::PHONY_TARGETS;
@@ -62,14 +62,13 @@ pub struct CommandRunner<'a> {
     graph: Graph<'a>,
     transitive_deps: Graph<'a>,
 
-    mode: &'a Mode,
+    flags: &'a Flags,
 
     stdout: Stdout,
     stdout_thread: StdoutThread,
 
     failed: AtomicBool,
     fail_count: AtomicUsize,
-    maximum_fails_count: Option::<usize>,
 
     db_read: Option::<Db<'a>>,
     db_write: Db<'a>,
@@ -109,18 +108,17 @@ impl<'a> CommandRunner<'a> {
 
     #[inline]
     fn new(
-        mode: &'a Mode,
+        context: &'a Processed,
         graph: Graph<'a>,
+        transitive_deps: Graph<'a>,
+        flags: &'a Flags,
         db_read: Option::<Db<'a>>,
         default_job: DefaultJob<'a>,
-        context: &'a Processed<'a>,
-        transitive_deps: Graph<'a>,
-        maximum_fails_count: Option::<usize>,
     ) -> Self {
         let n = context.jobs.len();
         let (stdout, stdout_thread) = Self::stdout_thread();
         Self {
-            mode,
+            flags,
             graph,
             stdout,
             context,
@@ -128,7 +126,6 @@ impl<'a> CommandRunner<'a> {
             default_job,
             stdout_thread,
             transitive_deps,
-            maximum_fails_count,
             db_write: Db::write(),
             failed: AtomicBool::new(false),
             fail_count: AtomicUsize::new(0),
@@ -139,15 +136,14 @@ impl<'a> CommandRunner<'a> {
 
     #[inline]
     pub fn run(
-        mode: &'a Mode,
         context: &'a Processed,
         graph: Graph<'a>,
-        db: Option::<Db<'a>>,
-        default_job: DefaultJob<'a>,
         transitive_deps: Graph<'a>,
-        maximum_fail_count: Option::<usize>,
+        flags: &'a Flags,
+        db_read: Option::<Db<'a>>,
+        default_job: DefaultJob<'a>,
     ) -> Db<'a> {
-        let cr = Self::new(mode, graph, db, default_job, context, transitive_deps, maximum_fail_count);
+        let cr = Self::new(context, graph, transitive_deps, flags, db_read, default_job);
 
         let levels = if let Some(job) = default_job {
             cr.run_target(job);
@@ -169,9 +165,9 @@ impl<'a> CommandRunner<'a> {
 
     #[inline]
     fn job_failed(&self) -> bool {
-        self.maximum_fails_count.map_or(false, |max| {
+        self.flags.max_fail_count().map_or(false, |max| {
             self.fail_count.fetch_add(1, Ordering::Relaxed);
-            if self.fail_count.load(Ordering::Relaxed) >= max {
+            if self.fail_count.load(Ordering::Relaxed) >= *max {
                 self.failed.store(true, Ordering::Relaxed);
                 true
             } else {
@@ -222,7 +218,7 @@ impl<'a> CommandRunner<'a> {
                         self,
                         "{output}",
                         output = match command_output {
-                            Ok((ok, ..)) => ok.to_string(&self.mode),
+                            Ok((ok, ..)) => ok.to_string(&self.flags),
                             Err(e) => e.to_string()
                         }
                     };
@@ -292,7 +288,7 @@ impl<'a> CommandRunner<'a> {
 
     #[inline]
     fn needs_rebuild(&self, job: &Job<'a>, command: &str) -> bool {
-        if self.mode.always_build() { return true }
+        if self.flags.always_build() { return true }
         self.db_read.as_ref().map_or(false, |db| {
             db.metadata_read(job.target).map_or(false, |md| {
                 md.command_hash != Self::hash(command)
@@ -338,7 +334,7 @@ impl<'a> CommandRunner<'a> {
                 // TODO: do something here
                 return ExecutorFlow::Ok
             };
-            let command_output = command_output.to_string(&self.mode);
+            let command_output = command_output.to_string(&self.flags);
             cr_print!(self, "{command_output}");
 
             return ExecutorFlow::from(failed)
@@ -354,7 +350,7 @@ impl<'a> CommandRunner<'a> {
                 any_err = true
             }
 
-            if !any_err && self.mode.verbose() ||
+            if !any_err && self.flags.verbose() ||
                 self.default_job.as_ref().map_or(false, |def| {
                     def.target == job.target || def.aliases().map_or(false, |aliases| {
                         aliases.iter().any(|a| a == job.target)

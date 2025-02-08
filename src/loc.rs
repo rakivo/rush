@@ -29,11 +29,11 @@ pub static mut RUSH_FILE_PATH_PTR: *const u8 = std::ptr::null();
 
 #[macro_export]
 macro_rules! report_fmt {
-    ($loc: expr, $($arg:tt)*) => {
+    ($loc: expr, $($arg: tt)*) => {
         format!{
             "{f}:{row}: {msg}",
             f = unsafe {
-                std::str::from_utf8_unchecked(std::slice::from_raw_parts(crate::loc::RUSH_FILE_PATH_PTR, crate::loc::RUSH_FILE_PATH_LEN))
+                std::str::from_utf8_unchecked(std::slice::from_raw_parts($crate::loc::RUSH_FILE_PATH_PTR, $crate::loc::RUSH_FILE_PATH_LEN))
             },
             row = $loc.0,
             msg = std::fmt::format(format_args!($($arg)*))
@@ -43,7 +43,7 @@ macro_rules! report_fmt {
         format!{
             "{f}:{row}: {msg}",
             f = unsafe {
-                std::str::from_utf8_unchecked(std::slice::from_raw_parts(crate::loc::RUSH_FILE_PATH_PTR, crate::loc::RUSH_FILE_PATH_LEN))
+                std::str::from_utf8_unchecked(std::slice::from_raw_parts($crate::loc::RUSH_FILE_PATH_PTR, $crate::loc::RUSH_FILE_PATH_LEN))
             },
             row = $loc.0,
             msg = $lit
@@ -53,5 +53,5 @@ macro_rules! report_fmt {
 
 #[macro_export]
 macro_rules! report {
-    ($loc: expr, $($arg:tt)*) => { crate::loc::Loc::report(&report_fmt!($loc, $($arg)*)) }
+    ($loc: expr, $($arg: tt)*) => { $crate::loc::Loc::report(&report_fmt!($loc, $($arg)*)) }
 }

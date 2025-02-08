@@ -1,4 +1,4 @@
-use crate::mode::Mode;
+use crate::flags::Mode;
 use crate::graph::Graph;
 use crate::types::StrDashMap;
 use crate::parser::comp::Job;

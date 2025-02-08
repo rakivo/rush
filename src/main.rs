@@ -3,7 +3,7 @@ mod loc;
 
 mod cr;
 mod db;
-mod mode;
+mod flags;
 mod types;
 mod graph;
 mod parser;
@@ -12,32 +12,26 @@ mod command;
 mod template;
 
 use db::Db;
-use mode::Mode;
+use flags::Flags;
 use cr::CommandRunner;
 use rayon::ThreadPoolBuilder;
 use parser::{Parser, read_file};
+use flager::Parser as FlagParser;
 use graph::build_dependency_graph;
-use flager::{Flag, Parser as FlagParser, new_flag};
 
 use std::process::{exit, ExitCode};
 use std::thread::available_parallelism;
 
-const CUSTOM_FILE_PATH: Flag::<String> = new_flag!("-f", "--file");
-const CUSTOM_PARALLELALISM: Flag::<i64> = new_flag!("-j", "--jobs");
-const CUSTOM_DEFAULT_TARGET: Flag::<String> = new_flag!("-t", "--target");
-const CUSTOM_FAILS_UNTIL_EXIT: Flag::<usize> = new_flag!("-k", "--keep-going");
-
 fn main() -> ExitCode {
     let flag_parser = FlagParser::new();
-    let mode = Mode::new(&flag_parser);
+    let flags = Flags::new(&flag_parser);
 
-    if mode.help() {
-        Mode::print_help();
+    if flags.help() {
+        Flags::print_help();
         return ExitCode::SUCCESS
     }
 
-    let rush_file_path = flag_parser.parse(&CUSTOM_FILE_PATH)
-        .unwrap_or(Parser::RUSH_FILE_PATH.to_owned());
+    let rush_file_path = flags.file_path().map(|s| s.as_str()).unwrap_or(Parser::RUSH_FILE_PATH);
 
     unsafe {
         loc::RUSH_FILE_PATH_PTR = rush_file_path.as_ptr();
@@ -50,13 +44,7 @@ fn main() -> ExitCode {
     };
 
     /* Handle custom parallelalism */ {
-        let parall = if flag_parser.passed(&CUSTOM_PARALLELALISM) {
-            flag_parser.parse(&CUSTOM_PARALLELALISM).or(Some(1))
-        } else {
-            None
-        };
-
-        if let Some(parall) = parall {
+        if let Some(&parall) = flags.parallelalism() {
             let max = available_parallelism().unwrap().get() as _;
             if parall < 0 || parall > max {
                 eprintln!("invalid amount of the maximum parallel jobs: {parall}");
@@ -71,27 +59,21 @@ fn main() -> ExitCode {
 
     let content = unsafe { std::str::from_utf8_unchecked(&mmap[..]) };
     let (escaped, escaped_indexes) = Parser::handle_newline_escapes(content);
-    let processed = Parser::parse(&escaped, &escaped_indexes).into_processed();
+    let context = Parser::parse(&escaped, &escaped_indexes).into_processed();
 
-    let default_job = flag_parser.parse(&CUSTOM_DEFAULT_TARGET).map(|t| {
-        processed.jobs.get(t.as_str()).unwrap_or_else(|| {
+    let default_job = flags.default_target().map(|t| {
+        context.jobs.get(t.as_str()).unwrap_or_else(|| {
             eprintln!("no target: {t} found in {rush_file_path}");
             exit(1)
         })
     });
 
-    let maximum_fail_count = if flag_parser.passed(&CUSTOM_FAILS_UNTIL_EXIT) {
-        flag_parser.parse(&CUSTOM_FAILS_UNTIL_EXIT).or(Some(1))
-    } else {
-        None
-    };
-
     let mmap = Db::read_cache();
     let content = mmap.as_ref().map(|mmap| unsafe { std::str::from_utf8_unchecked(&mmap[..]) });
     let db = content.and_then(|content| Db::read(content).ok());
 
-    let (graph, default_job, transitive_deps) = build_dependency_graph(&processed, default_job);
-    _ = CommandRunner::run(&mode, &processed, graph, db, default_job, transitive_deps, maximum_fail_count).write_finish();
+    let (graph, default_job, transitive_deps) = build_dependency_graph(&context, default_job);
+    _ = CommandRunner::run(&context, graph, transitive_deps, &flags, db, default_job).write_finish();
 
     ExitCode::SUCCESS
 }
