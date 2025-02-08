@@ -108,17 +108,17 @@ macro_rules! define_flags {
     Modes are flags that don't take any value, for example: `-v`, `-B`, `--help`.
 
     Flags are flags that may or may not take a value, if default is specified,
-    for example: `-j`, this is going to be the equivalent to `-j=1`, or `-j 1`,
+    for example: `-j`, this is going to be the equivalent of `-j=1`, or `-j 1`,
     the same goes for `-k` flag.
 */
 
 define_modes! {
-    ["h", "help",           help,                  "print this text and exit"],
-    ["u", "up-to-date",     check_is_up_to_date,   "check if up-to-date, without running anything"],
-    ["p", "print-commands", print_commands,        "only print commands, without running anything"],
-    ["q", "quiet",          quiet,                 "print commands only if stderr is not empty, else: stay quiet"],
-    ["v", "verbose",        verbose,               "print both command and description while executing job. Also print `already built` text for every job"],
-    ["B", "always-build",   always_build,          "always build job, no matter is it up-to-date or not"]
+    ["h", "help",           help,                   "print this text and exit"],
+    ["u", "up-to-date",     check_is_up_to_date,    "check if up-to-date, without running anything"],
+    ["p", "print-commands", print_commands,         "only print commands, without running anything"],
+    ["q", "quiet",          quiet,                  "print commands only if stderr is not empty, else: stay quiet"],
+    ["v", "verbose",        verbose,                "print both command and description while executing job. Also print `already built` text for every job"],
+    ["B", "always-build",   always_build,           "always build job, no matter is it up-to-date or not"]
 }
 
 define_flags! {
