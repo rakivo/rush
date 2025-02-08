@@ -29,21 +29,27 @@ impl Template<'_> {
         let mut start = 0;
         let mut in_used = false;
         let mut statics_len = 0;
-        let mut chunks = Vec::new();
+        let mut chunks = Vec::with_capacity(s.len() / 2);
         let mut last_was_placeholder_or_joined = false;
+
+        #[inline(always)]
+        fn is_joined(s: &str) -> bool {
+            s.as_bytes().first().map_or(false, |b| !b.is_ascii_whitespace())
+        }
 
         while let Some(i) = s[start..].find('$') {
             let i = start + i;
             if i > start {
-                let trimmed_static = &s[start..i];
-                if !trimmed_static.is_empty() {
-                    let chunk = if last_was_placeholder_or_joined && trimmed_static.chars().all(|c| !c.is_whitespace()) {
-                        TemplateChunk::JoinedStatic(trimmed_static)
+                let ref not_trimmed = s[start..i];
+                if !not_trimmed.is_empty() {
+                    let trimmed = not_trimmed.trim();
+                    let chunk = if last_was_placeholder_or_joined && is_joined(not_trimmed) {
+                        TemplateChunk::JoinedStatic(trimmed)
                     } else {
-                        TemplateChunk::Static(trimmed_static)
+                        TemplateChunk::Static(trimmed)
                     };
                     chunks.push(chunk);
-                    statics_len += trimmed_static.len();
+                    statics_len += trimmed.len();
                     last_was_placeholder_or_joined = false
                 }
             }
@@ -88,15 +94,16 @@ impl Template<'_> {
         }
 
         if start < s.len() {
-            let trimmed_static = s[start..].trim();
-            if !trimmed_static.is_empty() {
-                let chunk = if last_was_placeholder_or_joined && s[start..].chars().all(|c| !c.is_whitespace()) {
-                    TemplateChunk::JoinedStatic(trimmed_static)
+            let ref not_trimmed = s[start..];
+            if !not_trimmed.is_empty() {
+                let trimmed = not_trimmed.trim();
+                let chunk = if last_was_placeholder_or_joined && is_joined(not_trimmed) {
+                    TemplateChunk::JoinedStatic(trimmed)
                 } else {
-                    TemplateChunk::Static(trimmed_static)
+                    TemplateChunk::Static(trimmed)
                 };
-                statics_len += trimmed_static.len();
-                chunks.push(chunk)
+                chunks.push(chunk);
+                statics_len += trimmed.len();
             }
         }
 
