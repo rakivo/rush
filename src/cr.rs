@@ -12,7 +12,7 @@ use std::path::Path;
 use std::io::{self, Write};
 use std::hash::{Hash, Hasher};
 use std::thread::{self, JoinHandle};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{Ordering, AtomicU64, AtomicBool, AtomicUsize};
 
 use dashmap::DashSet;
 use rayon::prelude::*;
@@ -48,11 +48,33 @@ macro_rules! cr_report {
 
 #[derive(PartialEq)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
-enum ExecutorFlow { Ok, Failed }
+enum ExecutorFlow { Ok, Stop }
 
-impl From::<bool> for ExecutorFlow {
+#[cfg_attr(feature = "dbg", derive(Debug))]
+struct AtomicStr { ptr: AtomicU64, len: AtomicU64 }
+
+impl AtomicStr {
     #[inline(always)]
-    fn from(v: bool) -> Self { if v { Self::Failed } else { Self::Ok } }
+    fn empty() -> Self {
+        Self { ptr: AtomicU64::new(0), len: AtomicU64::new(0) }
+    }
+
+    #[inline(always)]
+    fn store(&self, s: &str, ordering: Ordering) {
+        self.ptr.store(s.as_ptr() as u64, ordering);
+        self.len.store(s.len() as u64, ordering);
+    }
+
+    #[inline]
+    fn load(&self, ordering: Ordering) -> Option::<&str> {
+        let ptr = self.ptr.load(ordering);
+        if ptr == 0 { return None }
+        let len = self.len.load(ordering);
+        let s = unsafe {
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr as *const _, len as _))
+        };
+        Some(s)
+    }
 }
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
@@ -67,8 +89,10 @@ pub struct CommandRunner<'a> {
     stdout: Stdout,
     stdout_thread: StdoutThread,
 
-    failed: AtomicBool,
+    stop: AtomicBool,
+
     fail_count: AtomicUsize,
+    not_up_to_date: AtomicStr,
 
     db_read: Option::<Db<'a>>,
     db_write: Db<'a>,
@@ -86,9 +110,9 @@ impl<'a> CommandRunner<'a> {
         for level in levels.into_iter() {
             if level.into_par_iter().filter_map(|t| self.context.jobs.get(t)).try_for_each(|job| {
                 self.resolve_and_run(job);
-                if self.failed.load(Ordering::Relaxed) { Err(()) } else { Ok(()) }
+                if self.stop.load(Ordering::Relaxed) { Err(()) } else { Ok(()) }
             }).is_err() {
-                cr_print!(self, "execution failed..");
+                cr_print!(self, "[execution failed]\n");
                 break
             }
         }
@@ -127,8 +151,9 @@ impl<'a> CommandRunner<'a> {
             stdout_thread,
             transitive_deps,
             db_write: Db::write(),
-            failed: AtomicBool::new(false),
+            stop: AtomicBool::new(false),
             fail_count: AtomicUsize::new(0),
+            not_up_to_date: AtomicStr::empty(),
             metadata_cache: MetadataCache::new(n),
             executed: DashSet::with_capacity_and_hasher(n, FxBuildHasher::default()),
         }
@@ -158,6 +183,13 @@ impl<'a> CommandRunner<'a> {
 
     #[inline]
     fn finish(self) -> Db<'a> {
+        if self.flags.check_is_up_to_date() {
+            let not_up_to_date = self.not_up_to_date.load(Ordering::Relaxed);
+            match not_up_to_date {
+                None => cr_print!(self, "[up to date]\n"),
+                Some(target) => cr_print!(self, "[{target} is not up to date]\n")
+            }
+        }
         drop(self.stdout);
         _ = self.stdout_thread.join();
         self.db_write
@@ -168,7 +200,7 @@ impl<'a> CommandRunner<'a> {
         self.flags.max_fail_count().map_or(false, |max| {
             self.fail_count.fetch_add(1, Ordering::Relaxed);
             if self.fail_count.load(Ordering::Relaxed) >= *max {
-                self.failed.store(true, Ordering::Relaxed);
+                self.stop.store(true, Ordering::Relaxed);
                 true
             } else {
                 false
@@ -178,8 +210,12 @@ impl<'a> CommandRunner<'a> {
 
     #[inline]
     fn execute_command(&self, command: Command, target: &str) -> io::Result::<(CommandOutput, bool)> {
+        if self.flags.print_commands() {
+            return Ok((command.print_command(), false))
+        }
+
         command.execute().map_err(|e| {
-            cr_print!(self, "could not execute job: {target}: {e}\n");
+            cr_print!(self, "[could not execute job: {target}: {e}]\n");
             e
         }).map(|command_output| {
             let failed = if command_output.status != 0 {
@@ -208,7 +244,7 @@ impl<'a> CommandRunner<'a> {
                     }
                 }).for_each(|job| self.resolve_and_run_target(job));
 
-                if let Some(command_output) = {
+                if let Some(Ok((command_output, _))) = {
                     command.as_ref().map(|c| {
                         let command = Command { command: c.to_owned(), description: None };  
                         self.execute_command(command, job.target)
@@ -217,10 +253,7 @@ impl<'a> CommandRunner<'a> {
                     cr_print!{
                         self,
                         "{output}",
-                        output = match command_output {
-                            Ok((ok, ..)) => ok.to_string(&self.flags),
-                            Err(e) => e.to_string()
-                        }
+                        output = command_output.to_string(&self.flags)
                     };
                 }
             },
@@ -316,10 +349,15 @@ impl<'a> CommandRunner<'a> {
         };
 
         if self.needs_rebuild(job, &command) {
+            if self.flags.check_is_up_to_date() {
+                self.not_up_to_date.store(job.target, Ordering::Relaxed);
+                return ExecutorFlow::Stop
+            }
+
             if let Err(e) = self.create_dirs_if_needed(job.target) {
                 cr_print!{
                     self,
-                    "could not create build directory for target: {target}: {e}\n",
+                    "[could not create build directory for target: {target}: {e}]\n",
                     target = job.target
                 };
                 return ExecutorFlow::Ok
@@ -331,13 +369,13 @@ impl<'a> CommandRunner<'a> {
 
             let command = Command { command, description };
             let Ok((command_output, failed)) = self.execute_command(command, job.target) else {
-                // TODO: do something here
                 return ExecutorFlow::Ok
             };
+
             let command_output = command_output.to_string(&self.flags);
             cr_print!(self, "{command_output}");
 
-            return ExecutorFlow::from(failed)
+            return if failed { ExecutorFlow::Stop } else { ExecutorFlow::Ok }
         } else {
             let mut any_err = false;
             if let Err(err) = rule.command.check(&job.shadows, &self.context.defs) {
@@ -355,9 +393,9 @@ impl<'a> CommandRunner<'a> {
                     def.target == job.target || def.aliases().map_or(false, |aliases| {
                         aliases.iter().any(|a| a == job.target)
                     })
-                })
+                }) && !self.flags.check_is_up_to_date()
             {
-                cr_print!(self, "{target} is already built\n", target = job.target)
+                cr_print!(self, "[{target} is already built]\n", target = job.target)
             }
         } ExecutorFlow::Ok
     }
@@ -383,7 +421,7 @@ impl<'a> CommandRunner<'a> {
                         break
                     } else {
                         #[cfg(feature = "dbg")] {
-                            cr_print!(self, "dependency {input} is assumed to exist\n");
+                            cr_print!(self, "[dependency {input} is assumed to exist]\n");
                         }
                     }
                 }
@@ -394,7 +432,7 @@ impl<'a> CommandRunner<'a> {
             let Some(ref job_rule) = rule else { continue };
             if let Some(rule) = self.context.rules.get(job_rule) {
                 self.executed.insert(job.target);
-                if self.execute_job(job, rule) == ExecutorFlow::Failed { break }
+                if self.execute_job(job, rule) == ExecutorFlow::Stop { break }
             } else {
                 cr_report!{
                     self,

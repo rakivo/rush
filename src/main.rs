@@ -63,7 +63,9 @@ fn main() -> ExitCode {
 
     let default_job = flags.default_target().map(|t| {
         context.jobs.get(t.as_str()).unwrap_or_else(|| {
+            let targets = context.pretty_print_targets();
             eprintln!("no target: {t} found in {rush_file_path}");
+            eprintln!("available targets: [{targets}]");
             exit(1)
         })
     });

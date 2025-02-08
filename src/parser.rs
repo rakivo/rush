@@ -357,6 +357,23 @@ pub struct Compiled<'a> {
     pub jobs: StrHashMap::<'a, comp::Job<'a>>,
 }
 
+impl Compiled<'_> {
+    #[inline]
+    pub fn pretty_print_targets(&self) -> String {
+        let mut buf = String::with_capacity(self.jobs.len() * 24);
+
+        let mut targets = self.jobs.iter().collect::<Vec::<_>>();
+        targets.sort_unstable_by(|(_, ja), (_, jb)| ja.loc.0.cmp(&jb.loc.0));
+
+        targets.first().map(|(t, _)| buf.push_str(t));
+        targets.iter().skip(1).for_each(|(t, _)| {
+            buf.push_str(", ");
+            buf.push_str(t);
+        });
+        buf
+    }
+}
+
 #[repr(packed)]
 #[derive(Copy, Clone)]
 #[cfg_attr(feature = "dbg", derive(Debug))]

@@ -35,6 +35,19 @@ impl Command {
         Ok((r, w))
     }
 
+    #[inline]
+    pub fn print_command(self) -> CommandOutput {
+        let Self { command, description } = self;
+        CommandOutput {
+            command,
+            description,
+
+            status: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }
+    }
+
     pub fn execute(self) -> io::Result::<CommandOutput> {
         let Self { command, description } = self;
 
@@ -100,8 +113,8 @@ impl Command {
 }
 
 pub struct CommandOutput {
-    pub stdout: String,
     pub status: i32,
+    pub stdout: String,
     pub stderr: String,
     pub command: String,
     pub description: Option::<String>
@@ -110,6 +123,13 @@ pub struct CommandOutput {
 impl CommandOutput {
     #[inline]
     pub fn to_string(&self, mode: &Mode) -> String {
+        if mode.print_commands() {
+            let mut buf = String::with_capacity(self.command.len());
+            buf.push_str(&self.command);
+            buf.push('\n');
+            return buf
+        }
+
         if mode.quiet() {
             let CommandOutput { stderr, command, description, .. } = self;
             if stderr.is_empty() { return const { String::new() } }
