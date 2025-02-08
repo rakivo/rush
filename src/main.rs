@@ -14,13 +14,15 @@ mod template;
 use db::Db;
 use flags::Flags;
 use cr::CommandRunner;
-use rayon::ThreadPoolBuilder;
 use parser::{Parser, read_file};
-use flager::Parser as FlagParser;
 use graph::build_dependency_graph;
 
 use std::process::{exit, ExitCode};
 use std::thread::available_parallelism;
+
+use bumpalo::Bump;
+use rayon::ThreadPoolBuilder;
+use flager::Parser as FlagParser;
 
 fn main() -> ExitCode {
     let flag_parser = FlagParser::new();
@@ -59,7 +61,19 @@ fn main() -> ExitCode {
 
     let content = unsafe { std::str::from_utf8_unchecked(&mmap[..]) };
     let (escaped, escaped_indexes) = Parser::handle_newline_escapes(content);
-    let context = Parser::parse(&escaped, &escaped_indexes).compile();
+    let context = Parser::parse(&escaped, &escaped_indexes);
+    let reserve = context.guess_preallocation();
+
+    #[cfg(feature = "dbg")] {
+        println!("guessed size: {reserve}")
+    }
+
+    let arena = Bump::with_capacity(reserve);
+    let context = context.compile(&arena);
+
+    #[cfg(feature = "dbg")] {
+        println!("real size: {size}", size = arena.allocated_bytes())
+    }
 
     let default_job = flags.default_target().map(|t| {
         context.jobs.get(t.as_str()).unwrap_or_else(|| {

@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::fs::{self, File};
 
 use memmap2::Mmap;
+use bumpalo::Bump;
 #[cfg(feature = "dbg")]
 use tramer::tramer;
 
@@ -224,7 +225,7 @@ pub struct Parsed<'a> {
     defs: prep::Defs<'a>,
     phonys: StrHashSet<'a>,
     default_target: prep::DefaultTarget<'a>,
-    jobs: StrHashMap::<'a, prep::Job<'a>>,
+    pub jobs: StrHashMap::<'a, prep::Job<'a>>,
     rules: StrHashMap::<'a, Rule<'a>>,
 }
 
@@ -239,8 +240,23 @@ impl<'a> Parsed<'a> {
         unsafe { self.rules.get_mut(name).unwrap_unchecked() }
     }
 
+    #[inline]
+    pub fn guess_preallocation(&self) -> usize {
+        self.jobs.values().map(|j| {
+            j.target_template.guess_compiled_size() + match &j.phony {
+                prep::Phony::Phony { .. } => 0,
+                prep::Phony::NotPhony { inputs_templates, deps_templates, .. } => {
+                    inputs_templates.iter()
+                        .chain(deps_templates.iter())
+                        .map(|t| t.guess_compiled_size())
+                        .sum::<usize>()
+                }
+            }
+        }).sum()
+    }
+
     #[cfg_attr(feature = "dbg", tramer("nanos"))]
-    pub fn compile(self) -> Compiled<'a> {
+    pub fn compile(self, arena: &'a Bump) -> Compiled<'a> {
         let Parsed { defs, jobs, rules, phonys, default_target } = self;
 
         let defs = defs.compile();
@@ -254,7 +270,7 @@ impl<'a> Parsed<'a> {
             }
 
             let target = match job.target_template.compile_prep(&job, &defs) {
-                Ok(ok) => ok.leak() as &_,
+                Ok(ok) => arena.alloc_str(&ok) as &_,
                 Err(e) => panic!("{e}\n")
             };
 
@@ -303,23 +319,22 @@ impl<'a> Parsed<'a> {
                         .map(|(template, ..)| {
                             match template.compile_prep(&job, &defs) {
                                 Ok(ok) => {
-                                    let compiled = ok.leak() as &_;
-                                    inputs_str.push_str(compiled);
+                                    inputs_str.push_str(&ok);
                                     inputs_str.push(' ');
-                                    compiled
+                                    arena.alloc_str(&ok) as &_
                                 },
                                 Err(e) => panic!("{e}\n")
                             }
                         }).collect::<Vec::<_>>();
 
                     if !inputs_str.is_empty() { _ = inputs_str.pop() }
-                    let inputs_str = inputs_str.leak();
+                    let inputs_str = arena.alloc_str(&inputs_str) as &_;
 
                     let deps = deps_templates.iter()
                         .zip(deps.iter())
                         .map(|(template, ..)| {
                             match template.compile_prep(&job, &defs) {
-                                Ok(ok) => ok.leak() as &_,
+                                Ok(ok) => arena.alloc_str(&ok) as &_,
                                 Err(e) => panic!("{e}\n")
                             }
                         }).collect::<Vec::<_>>();
@@ -412,8 +427,8 @@ type EscapedIndexes = Vec::<(usize, usize)>;
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct Parser<'a> {
     cursor: usize,
-    parsed: Parsed<'a>,
-    context: Context<'a>
+    context: Context<'a>,
+    pub parsed: Parsed<'a>,
 }
 
 impl<'a> Parser<'a> {

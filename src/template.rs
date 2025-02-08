@@ -21,6 +21,7 @@ pub struct Template<'a> {
 }
 
 impl Template<'_> {
+    const PLACEHOLDER_MULTIPLIER: usize = 7;
     const AVERAGE_COMPILED_CHUNK_SIZE: usize = 24;
     const CONSTANT_PLACEHOLDERS: &'static [&'static str] = &["in", "out"];
 
@@ -111,6 +112,18 @@ impl Template<'_> {
     }
 
     #[inline]
+    pub fn guess_compiled_size(&self) -> usize {
+        self.chunks.iter().map(|c| {
+            match c {
+                TemplateChunk::Static(s) => s.len() + 1,
+                TemplateChunk::JoinedStatic(s) => s.len(),
+                TemplateChunk::Placeholder(p) => Self::PLACEHOLDER_MULTIPLIER * p.len() + 1,
+                TemplateChunk::JoinedPlaceholder(p) => Self::PLACEHOLDER_MULTIPLIER * p.len()
+            }
+        }).sum::<usize>() + self.chunks.len() * 8
+    }
+
+    #[inline]
     pub fn check(&self, shadows: &Shadows, defs: &Defs) -> Result::<(), String> {
         for placeholder in self.chunks.iter().filter_map(|c| {
             match c {
@@ -125,14 +138,13 @@ impl Template<'_> {
         } Ok(())
     }
 
+    #[inline(always)]
     fn allocate_result(&self) -> String {
         String::with_capacity(self.statics_len + self.chunks.len() * Self::AVERAGE_COMPILED_CHUNK_SIZE)
     }
 
-    #[inline]
-    fn _compile(&self, output_str: &str, input_str: &str, shadows: &Shadows, defs: &Defs) -> Result::<String, String> {
+    fn _compile(&self, target_str: &str, input_str: &str, shadows: &Shadows, defs: &Defs) -> Result::<String, String> {
         let mut ret = self.allocate_result();
-
         for chunk in self.chunks.iter() {
             match chunk {
                 TemplateChunk::Static(s) => {
@@ -143,7 +155,7 @@ impl Template<'_> {
                 TemplateChunk::Placeholder(placeholder) => {
                     let compiled = match *placeholder {
                         "in" => Ok(input_str),
-                        "out" => Ok(output_str),
+                        "out" => Ok(target_str),
                         _ => shadows
                             .as_ref()
                             .and_then(|shadows| shadows.get(placeholder).map(|shadow| *shadow))
@@ -157,7 +169,7 @@ impl Template<'_> {
                 TemplateChunk::JoinedPlaceholder(placeholder) => {
                     ret.push_str(match *placeholder {
                         "in" => Ok(input_str),
-                        "out" => Ok(output_str),
+                        "out" => Ok(target_str),
                         _ => shadows
                             .as_ref()
                             .and_then(|shadows| shadows.get(placeholder).map(|shadow| *shadow))
@@ -166,9 +178,7 @@ impl Template<'_> {
                     }?);
                 }
             }
-        }
-
-        Ok(ret)
+        } Ok(ret)
     }
 
     #[inline(always)]
