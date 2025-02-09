@@ -15,6 +15,7 @@ use std::collections::HashSet;
 use std::os::fd::{AsFd, AsRawFd};
 use std::thread::{self, JoinHandle};
 use std::sync::atomic::{Ordering, AtomicU64, AtomicBool, AtomicUsize};
+use std::time::Duration;
 
 use fxhash::FxBuildHasher;
 use dashmap::{DashMap, DashSet};
@@ -97,6 +98,9 @@ pub struct CommandRunner<'a> {
     fd_to_command: Arc::<DashMap::<i32, String>>,
 
     stop: Arc::<AtomicBool>,
+    job_done: Arc::<AtomicUsize>,
+
+    executed_jobs: AtomicUsize,
 
     fail_count: AtomicUsize,
     not_up_to_date: AtomicStr,
@@ -114,19 +118,34 @@ pub struct CommandRunner<'a> {
 impl<'a> CommandRunner<'a> {
     #[inline]
     fn run_levels(&self, levels: &Levels<'a>) {
-        for level in levels.into_iter() {
-            if level.into_iter().filter_map(|t| self.context.jobs.get(t)).try_for_each(|job| {
-                self.resolve_and_run(job);
-                if self.stop.load(Ordering::Relaxed) { Err(()) } else { Ok(()) }
-            }).is_err() {
-                cr_print!(self, "[execution failed]\n");
-                break
+        'outer: for level in levels.into_iter() {
+            #[cfg(feature = "dbg")] {
+                cr_print!(self, "RUNNING LEVEL: {level:#?}\n")
             }
+
+            self.job_done.store(0, Ordering::Relaxed);
+            self.executed_jobs.store(0, Ordering::Relaxed);
+            for job in level.into_iter().filter_map(|t| self.context.jobs.get(t)) {
+                self.resolve_and_run(job);
+                if self.stop.load(Ordering::Relaxed) { break 'outer }
+            }
+            let executed = self.executed_jobs.load(Ordering::Relaxed);
+            loop {
+                let jobs_done = self.job_done.load(Ordering::Relaxed);
+                if jobs_done >= executed {
+                    break
+                } else {
+                    thread::sleep(Duration::from_millis(50))
+                }
+            }
+            self.executed_jobs.store(0, Ordering::Relaxed);
+            self.job_done.store(0, Ordering::Relaxed);
         }
     }
 
     fn stdout_thread(
         stop: Arc<AtomicBool>,
+        job_done: Arc::<AtomicUsize>,
         active_fds: Arc<AtomicUsize>,
         fd_to_command: Arc<DashMap<i32, String>>,
     ) -> (FdSender, Stdout, StdoutThread) {
@@ -149,12 +168,11 @@ impl<'a> CommandRunner<'a> {
                         Err(TryRecvError::Disconnected) => stdout_recv_dropped = true,
                         _ => {}
                     }
-                    // Exit condition
+
                     if stdout_recv_dropped && done.load(Ordering::Relaxed) && active_fds.load(Ordering::Relaxed) == 0 {
                         break;
                     }
 
-                    // Add new FDs to poll_fds
                     while let Ok(poll_fd) = poll_fd_recv.try_recv() {
                         let fd = poll_fd.as_fd().as_raw_fd();
                         if !seen_fds.contains(&fd) {
@@ -177,7 +195,7 @@ impl<'a> CommandRunner<'a> {
                         if let Some(revents) = poll_fds[i].revents() {
                             let fd = poll_fds[i].as_fd().as_raw_fd();
 
-                            #[cfg(feature = "dbg")] {
+                            #[cfg(feature = "dbg_hardcore")] {
                                 _ = write!(stdout, "polled: FD: {}, revents={:?}\n", fd, revents);
                             }
 
@@ -192,23 +210,27 @@ impl<'a> CommandRunner<'a> {
                                         _ = write!(stdout, "command output is not valid utf8\n");
                                         continue;
                                     };
-                                    if i & 1 == 0 {
-                                        _ = write!(stdout, "command: {cmd}, stdout:\n{data}");
-                                    } else {
-                                        _ = write!(stdout, "command: {cmd}, stderr:\n{data}");
-                                    }
+                                    // TODO: print command before waiting till its end
+                                    _ = write!(stdout, "{cmd}\n{data}");
+                                    // if i & 1 == 0 {
+                                    //     _ = write!(stdout, "command: {cmd}, stdout:\n{data}");
+                                    // } else {
+                                    //     _ = write!(stdout, "command: {cmd}, stderr:\n{data}");
+                                    // }
                                 }
                             } else if revents.contains(PollFlags::POLLHUP) {
                                 // Check if this FD has never produced POLLIN
                                 if !fds_with_output.contains(&fd) {
+                                    job_done.fetch_add(1, Ordering::Relaxed);
                                     let cmd = fd_to_command.get(&fd).unwrap().to_owned();
-                                    _ = write!(stdout, "command: {cmd} (no output)\n");
+                                    _ = write!(stdout, "{cmd}\n");
                                 }
 
                                 // Clean up the FD
                                 poll_fds.remove(i);
                                 fd_to_command.remove(&fd);
                                 active_fds.fetch_sub(1, Ordering::Relaxed);
+
                                 continue;
                             }
                         }
@@ -231,10 +253,12 @@ impl<'a> CommandRunner<'a> {
     ) -> Self {
         let n = context.jobs.len();
         let stop = Arc::new(AtomicBool::new(false));
+        let job_done = Arc::new(AtomicUsize::new(0));
         let active_fds = Arc::new(AtomicUsize::new(0));
         let fd_to_command = Arc::new(DashMap::new());
         let (fd_sender, stdout, stdout_thread) = Self::stdout_thread(
             Arc::clone(&stop),
+            Arc::clone(&job_done),
             Arc::clone(&active_fds),
             Arc::clone(&fd_to_command)
         );
@@ -245,6 +269,7 @@ impl<'a> CommandRunner<'a> {
             stdout,
             context,
             db_read,
+            job_done,
             fd_sender,
             active_fds,
             default_job,
@@ -253,6 +278,7 @@ impl<'a> CommandRunner<'a> {
             transitive_deps,
             db_write: Db::write(),
             fail_count: AtomicUsize::new(0),
+            executed_jobs: AtomicUsize::new(0),
             not_up_to_date: AtomicStr::empty(),
             metadata_cache: MetadataCache::new(n),
             executed: DashSet::with_capacity_and_hasher(n, FxBuildHasher::default()),
@@ -314,6 +340,8 @@ impl<'a> CommandRunner<'a> {
         if self.flags.print_commands() {
             return Ok(())
         }
+
+        self.executed_jobs.fetch_add(1, Ordering::Relaxed);
 
         command.execute(
             #[cfg(feature = "dbg")] self.stdout.clone(),

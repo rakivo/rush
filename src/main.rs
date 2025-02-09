@@ -18,7 +18,6 @@ use parser::{Parser, read_file};
 use graph::build_dependency_graph;
 
 use std::process::{exit, ExitCode};
-// use std::thread::available_parallelism;
 
 use bumpalo::Bump;
 use flager::Parser as FlagParser;

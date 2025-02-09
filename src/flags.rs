@@ -124,6 +124,5 @@ define_modes! {
 define_flags! {
     [; "f",  "file",        file_path:      String, "specify custom file path to `rush` script"],
     [; "t",  "target",      default_target: String, "specify custom default target"],
-    [1; "j", "jobs",        parallelalism:  i64,    "specify custom maximum amount of jobs can be executed in parallel"],
     [1; "k", "keep-going",  max_fail_count: usize,  "specify custom count of fails until exit"]
 }

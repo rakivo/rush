@@ -140,31 +140,35 @@ impl Command {
 
         fd_to_command.insert(stdout_reader_fd, self.command.to_owned());
         // fd_to_command.insert(stderr_reader_fd, self.command.to_owned());
+
         active_fds.fetch_add(1, Ordering::Relaxed);
 
         let stdout_reader_fd: &'static _ = Box::leak(Box::new(stdout_reader));
-        let stderr_reader_fd: &'static _ = Box::leak(Box::new(stderr_reader));
+        // let stderr_reader_fd: &'static _ = Box::leak(Box::new(stderr_reader));
 
         let stdout_pollfd = PollFd::new(stdout_reader_fd.as_fd(), PollFlags::POLLIN);
-        let stderr_pollfd = PollFd::new(stderr_reader_fd.as_fd(), PollFlags::POLLIN);
+        // let stderr_pollfd = PollFd::new(stderr_reader_fd.as_fd(), PollFlags::POLLIN);
 
-        #[cfg(feature = "dbg")] {
-            let mut stdout_ = format!("sending: FD: {stdout_pollfd:?} ");
-            if let Some(revents) = stdout_pollfd.revents() {
-                let revents = format!("revents: {revents:?}");
-                stdout_.push_str(&revents)
+        #[cfg(feature = "dbg_hardcore")] {
+            {
+                let mut stdout_ = format!("sending: FD: {stdout_pollfd:?} ");
+                if let Some(revents) = stdout_pollfd.revents() {
+                    let revents = format!("revents: {revents:?}");
+                    stdout_.push_str(&revents)
+                }
+                stdout_.push('\n');
+                Self::print(&stdout, stdout_);
             }
-            stdout_.push('\n');
 
-            let mut stderr = format!("sending: FD: {stdout_pollfd:?} ");
-            if let Some(revents) = stdout_pollfd.revents() {
-                let revents = format!("revents: {revents:?}");
-                stderr.push_str(&revents)
+            {
+                // let mut stderr = format!("sending: FD: {stdout_pollfd:?} ");
+                // if let Some(revents) = stdout_pollfd.revents() {
+                //     let revents = format!("revents: {revents:?}");
+                //     stderr.push_str(&revents)
+                // }
+                // stderr.push('\n');
+                // Self::print(&stdout, stderr);
             }
-            stderr.push('\n');
-
-            Self::print(&stdout, stdout_);
-            Self::print(&stdout, stderr);
         }
 
         poll_fds_sender.send(stdout_pollfd).unwrap();
