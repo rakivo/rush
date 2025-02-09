@@ -3,24 +3,27 @@ use crate::types::StrDashSet;
 use crate::db::{Db, Metadata};
 use crate::consts::PHONY_TARGETS;
 use crate::parser::comp::{Job, Phony};
+use crate::command::{Command, MetadataCache};
 use crate::parser::{Rule, Compiled, DefaultJob};
 use crate::graph::{Graph, Levels, topological_sort};
-use crate::command::{Command, MetadataCache, CommandOutput};
 
 use std::sync::Arc;
 use std::path::Path;
 use std::io::{self, Write};
 use std::hash::{Hash, Hasher};
+use std::collections::HashSet;
+use std::os::fd::{AsFd, AsRawFd};
 use std::thread::{self, JoinHandle};
 use std::sync::atomic::{Ordering, AtomicU64, AtomicBool, AtomicUsize};
 
-use dashmap::DashSet;
-use rayon::prelude::*;
 use fxhash::FxBuildHasher;
-use crossbeam_channel::{unbounded, Sender};
+use dashmap::{DashMap, DashSet};
+use crossbeam_channel::{Sender, unbounded, TryRecvError};
+use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 
-type Stdout = Sender::<String>;
+pub type Stdout = Sender::<String>;
 type StdoutThread = JoinHandle::<()>;
+type FdSender = Sender::<PollFd<'static>>;
 
 macro_rules! cr_print {
     ($self: expr, $($arg:tt)*) => {{
@@ -89,7 +92,11 @@ pub struct CommandRunner<'a> {
     stdout: Stdout,
     stdout_thread: StdoutThread,
 
-    stop: AtomicBool,
+    fd_sender: FdSender,
+    active_fds: Arc::<AtomicUsize>,
+    fd_to_command: Arc::<DashMap::<i32, String>>,
+
+    stop: Arc::<AtomicBool>,
 
     fail_count: AtomicUsize,
     not_up_to_date: AtomicStr,
@@ -108,7 +115,7 @@ impl<'a> CommandRunner<'a> {
     #[inline]
     fn run_levels(&self, levels: &Levels<'a>) {
         for level in levels.into_iter() {
-            if level.into_par_iter().filter_map(|t| self.context.jobs.get(t)).try_for_each(|job| {
+            if level.into_iter().filter_map(|t| self.context.jobs.get(t)).try_for_each(|job| {
                 self.resolve_and_run(job);
                 if self.stop.load(Ordering::Relaxed) { Err(()) } else { Ok(()) }
             }).is_err() {
@@ -118,16 +125,99 @@ impl<'a> CommandRunner<'a> {
         }
     }
 
-    #[inline]
-    fn stdout_thread() -> (Stdout, StdoutThread) {
+    fn stdout_thread(
+        stop: Arc<AtomicBool>,
+        active_fds: Arc<AtomicUsize>,
+        fd_to_command: Arc<DashMap<i32, String>>,
+    ) -> (FdSender, Stdout, StdoutThread) {
         let (stdout, stdout_recv) = unbounded::<String>();
-        let writer = thread::spawn(move || {
-            let mut stdout_handle = io::stdout().lock();
-            for s in stdout_recv {
-                _ = stdout_handle.write_all(s.as_bytes())
+        let (fd_sender, poll_fd_recv) = unbounded::<PollFd>();
+        let writer = thread::spawn({
+            let done = Arc::clone(&stop);
+            let active_fds = Arc::clone(&active_fds);
+            let fd_to_command = Arc::clone(&fd_to_command);
+            move || {
+                let mut poll_fds = Vec::new();
+                let mut seen_fds = HashSet::new(); // Track seen FDs
+                let mut fds_with_output = HashSet::new(); // Track FDs that have produced POLLIN
+                let mut stdout = io::stdout().lock();
+                let mut stdout_recv_dropped = false;
+                loop {
+                    // Process messages from the main thread
+                    match stdout_recv.try_recv() {
+                        Ok(s) => _ = stdout.write_all(s.as_bytes()),
+                        Err(TryRecvError::Disconnected) => stdout_recv_dropped = true,
+                        _ => {}
+                    }
+                    // Exit condition
+                    if stdout_recv_dropped && done.load(Ordering::Relaxed) && active_fds.load(Ordering::Relaxed) == 0 {
+                        break;
+                    }
+
+                    // Add new FDs to poll_fds
+                    while let Ok(poll_fd) = poll_fd_recv.try_recv() {
+                        let fd = poll_fd.as_fd().as_raw_fd();
+                        if !seen_fds.contains(&fd) {
+                            poll_fds.push(poll_fd);
+                            seen_fds.insert(fd);
+                        }
+                    }
+
+                    if poll_fds.is_empty() {
+                        continue
+                    }
+
+                    if let Err(e) = poll(&mut poll_fds, PollTimeout::MAX) {
+                        _ = write!(stdout, "poll failed: {e}\n");
+                        break
+                    }
+
+                    let mut i = 0;
+                    while i < poll_fds.len() {
+                        if let Some(revents) = poll_fds[i].revents() {
+                            let fd = poll_fds[i].as_fd().as_raw_fd();
+
+                            #[cfg(feature = "dbg")] {
+                                _ = write!(stdout, "polled: FD: {}, revents={:?}\n", fd, revents);
+                            }
+
+                            if revents.contains(PollFlags::POLLIN) {
+                                fds_with_output.insert(fd);
+
+                                let mut buf = [0; 4096];
+                                let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut _, buf.len()) };
+                                if n > 0 {
+                                    let cmd = fd_to_command.get(&fd).unwrap().to_owned();
+                                    let Ok(data) = std::str::from_utf8(&buf[..n as usize]) else {
+                                        _ = write!(stdout, "command output is not valid utf8\n");
+                                        continue;
+                                    };
+                                    if i & 1 == 0 {
+                                        _ = write!(stdout, "command: {cmd}, stdout:\n{data}");
+                                    } else {
+                                        _ = write!(stdout, "command: {cmd}, stderr:\n{data}");
+                                    }
+                                }
+                            } else if revents.contains(PollFlags::POLLHUP) {
+                                // Check if this FD has never produced POLLIN
+                                if !fds_with_output.contains(&fd) {
+                                    let cmd = fd_to_command.get(&fd).unwrap().to_owned();
+                                    _ = write!(stdout, "command: {cmd} (no output)\n");
+                                }
+
+                                // Clean up the FD
+                                poll_fds.remove(i);
+                                fd_to_command.remove(&fd);
+                                active_fds.fetch_sub(1, Ordering::Relaxed);
+                                continue;
+                            }
+                        }
+                        i += 1;
+                    }
+                }
             }
-            _ = stdout_handle.flush();
-        }); (stdout, writer)
+        });
+        (fd_sender, stdout, writer)
     }
 
     #[inline]
@@ -140,18 +230,28 @@ impl<'a> CommandRunner<'a> {
         default_job: DefaultJob<'a>,
     ) -> Self {
         let n = context.jobs.len();
-        let (stdout, stdout_thread) = Self::stdout_thread();
+        let stop = Arc::new(AtomicBool::new(false));
+        let active_fds = Arc::new(AtomicUsize::new(0));
+        let fd_to_command = Arc::new(DashMap::new());
+        let (fd_sender, stdout, stdout_thread) = Self::stdout_thread(
+            Arc::clone(&stop),
+            Arc::clone(&active_fds),
+            Arc::clone(&fd_to_command)
+        );
         Self {
+            stop,
             flags,
             graph,
             stdout,
             context,
             db_read,
+            fd_sender,
+            active_fds,
             default_job,
             stdout_thread,
+            fd_to_command,
             transitive_deps,
             db_write: Db::write(),
-            stop: AtomicBool::new(false),
             fail_count: AtomicUsize::new(0),
             not_up_to_date: AtomicStr::empty(),
             metadata_cache: MetadataCache::new(n),
@@ -190,6 +290,7 @@ impl<'a> CommandRunner<'a> {
                 Some(target) => cr_print!(self, "[{target} is not up to date]\n")
             }
         }
+        self.stop.store(true, Ordering::Relaxed);
         drop(self.stdout);
         _ = self.stdout_thread.join();
         self.db_write
@@ -209,20 +310,26 @@ impl<'a> CommandRunner<'a> {
     }
 
     #[inline]
-    fn execute_command(&self, command: Command, target: &str) -> io::Result::<(CommandOutput, bool)> {
+    fn execute_command(&self, command: &Command, target: &str) -> io::Result::<()> {
         if self.flags.print_commands() {
-            return Ok((command.print_command(), false))
+            return Ok(())
         }
 
-        command.execute().map_err(|e| {
+        command.execute(
+            #[cfg(feature = "dbg")] self.stdout.clone(),
+            self.fd_sender.clone(),
+            &self.fd_to_command,
+            &self.active_fds
+        ).map_err(|e| {
             cr_print!(self, "[could not execute job: {target}: {e}]\n");
             e
         }).map(|command_output| {
-            let failed = if command_output.status != 0 {
-                self.job_failed()
-            } else {
-                false
-            }; (command_output, failed)
+            // let failed = if command_output.status != 0 {
+            //     self.job_failed()
+            // } else {
+            //     false
+            // }; (command_output, failed)
+            command_output
         })
     }
 
@@ -244,18 +351,10 @@ impl<'a> CommandRunner<'a> {
                     }
                 }).for_each(|job| self.resolve_and_run_target(job));
 
-                if let Some(Ok((command_output, _))) = {
-                    command.as_ref().map(|c| {
-                        let command = Command { command: c.to_owned(), description: None };  
-                        self.execute_command(command, job.target)
-                    })
-                } {
-                    cr_print!{
-                        self,
-                        "{output}",
-                        output = command_output.to_string(&self.flags)
-                    };
-                }
+                _ = command.as_ref().map(|c| {
+                    let command = Command { command: c.to_owned(), description: None };  
+                    self.execute_command(&command, job.target)
+                });
             },
             Phony::NotPhony { .. } => unreachable!()
         }
@@ -368,14 +467,7 @@ impl<'a> CommandRunner<'a> {
             }).ok());
 
             let command = Command { command, description };
-            let Ok((command_output, failed)) = self.execute_command(command, job.target) else {
-                return ExecutorFlow::Ok
-            };
-
-            let command_output = command_output.to_string(&self.flags);
-            cr_print!(self, "{command_output}");
-
-            return if failed { ExecutorFlow::Stop } else { ExecutorFlow::Ok }
+            _ = self.execute_command(&command, job.target);
         } else {
             let mut any_err = false;
             if let Err(err) = rule.command.check(&job.shadows, &self.context.defs) {
