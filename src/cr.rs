@@ -315,7 +315,6 @@ impl<'a> CommandRunner<'a> {
 
         command.execute(
             &mut self.curr_subprocess_id,
-            #[cfg(feature = "dbg")] self.stdout.clone(),
             self.fd_sender.clone(),
             &self.fd_to_subprocess,
             &self.active_fds

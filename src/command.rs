@@ -1,5 +1,3 @@
-#[cfg(feature = "dbg")]
-use crate::cr::Stdout;
 use crate::flags::Mode;
 use crate::graph::Graph;
 use crate::parser::comp::Job;
@@ -23,22 +21,6 @@ use dashmap::DashMap;
 use fxhash::FxBuildHasher;
 use crossbeam_channel::Sender;
 use nix::poll::{PollFd, PollFlags};
-
-#[cfg(feature = "dbg")]
-macro_rules! cmd_print {
-    ($stdout: expr, $($arg:tt)*) => {{
-        #[cfg(feature = "dbg")] {
-            _ = $crate::command::Command::print(&$stdout, format!{
-                "{f}:{l}:{c}:\n",
-                f = file!(), l = line!(), c = column!()
-            });
-        }
-        _ = $crate::command::Command::print(
-            &$stdout,
-            std::fmt::format(format_args!($($arg)*))
-        );
-    }};
-}
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct Command {
@@ -71,20 +53,9 @@ impl Command {
         }
     }
 
-    #[inline(always)]
-    #[cfg(feature = "dbg")]
-    fn print(stdout: &Stdout, s: String) {
-        #[cfg(feature = "dbg")] {
-            stdout.send(s).unwrap()
-        } #[cfg(not(feature = "dbg"))] {
-            _ = stdout.send(s)
-        }
-    }
-
     pub fn execute(
         &self,
         curr_subprocess_id: &mut usize,
-        #[cfg(feature = "dbg")] stdout: Stdout,
         poll_fds_sender: Sender::<PollFd>,
         fd_to_command: &Arc::<SubprocessMap>,
         active_fds: &Arc::<AtomicUsize>,
@@ -163,23 +134,23 @@ impl Command {
 
         #[cfg(feature = "dbg_hardcore")] {
             {
-                let mut stdout_ = format!("sending: FD: {stdout_pollfd:?} ");
+                let stdout_fd = stdout_pollfd.as_fd().as_raw_fd();
+                let mut stdout_ = format!("sending: FD: {stdout_fd:?} ");
                 if let Some(revents) = stdout_pollfd.revents() {
                     let revents = format!("revents: {revents:?}");
                     stdout_.push_str(&revents)
                 }
-                stdout_.push('\n');
-                Self::print(&stdout, stdout_);
+                println!("{stdout_}");
             }
 
             {
-                let mut stderr = format!("sending: FD: {stdout_pollfd:?} ");
+                let stderr_fd = stderr_pollfd.as_fd().as_raw_fd();
+                let mut stderr = format!("sending: FD: {stderr_fd:?} ");
                 if let Some(revents) = stdout_pollfd.revents() {
                     let revents = format!("revents: {revents:?}");
                     stderr.push_str(&revents)
                 }
-                stderr.push('\n');
-                Self::print(&stdout, stderr);
+                println!("{stderr}");
             }
         }
 
