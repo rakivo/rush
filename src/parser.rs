@@ -238,7 +238,6 @@ impl<'a> Parsed<'a> {
 
     #[inline(always)]
     fn rule_mut(&mut self, name: &str) -> &mut Rule<'a> {
-        println!("{name:?}");
         self.rules.get_mut(name).unwrap_dbg()
     }
 
