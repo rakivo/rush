@@ -205,7 +205,7 @@ impl<'a> CommandRunner<'a> {
         }
 
         command.execute(&self.poller, self.fd_sender.clone()).map_err(|e| {
-            print!("[could not execute job: {target}: {e}]\n");
+            println!("[could not execute job: {target}: {e}]");
             e
         }).map(|_| self.executed_jobs += 1)
     }
@@ -242,10 +242,10 @@ impl<'a> CommandRunner<'a> {
         #[inline]
         fn compile_command<'a>(_self: &CommandRunner<'a>, job: &Job<'a>, rule: &Rule) -> Option::<String> {
             rule.command.compile(job, &_self.context.defs).map_err(|e| {
-                print!("{e}\n");
+                println!("{e}");
                 rule.description.as_ref()
                     .and_then(|d| d.check(&job.shadows, &_self.context.defs).err())
-                    .map(|err| print!("{err}\n"));
+                    .map(|err| println!("{err}"));
             }).map(|command| {
                 _self.db_write.metadata_write(job.target, Metadata {
                     command_hash: hash(&command)
@@ -287,8 +287,8 @@ impl<'a> CommandRunner<'a> {
             }
 
             if let Err(e) = create_dirs_if_needed(job.target) {
-                print!{
-                    "[could not create build directory for target: {target}: {e}]\n",
+                println!{
+                    "[could not create build directory for target: {target}: {e}]",
                     target = job.target
                 };
                 return ExecutorFlow::Ok

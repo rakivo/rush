@@ -252,7 +252,10 @@ impl<'a> Parsed<'a> {
                         .sum::<usize>()
                 }
             }
-        }).sum()
+        }).sum::<usize>() + self.rules.values().map(|r| {
+            r.command.guess_compiled_size() +
+                r.description.as_ref().map_or(0, |d| d.guess_compiled_size())
+        }).sum::<usize>()
     }
 
     #[cfg_attr(feature = "dbg", tramer("nanos"))]

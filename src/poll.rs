@@ -85,21 +85,26 @@ impl Poller {
     fn start_polling(&self) {
         let mut jobs_failed = 0;
         let mut poll_fds = Vec::new();
-        let mut seen_fds = HashSet::new();
         let mut handled_pids = HashSet::new();
         let mut printed_pids = HashSet::new();
-        let mut fds_with_output = HashSet::new();
+
+        let print_job = |command: &Box::<str>, description: &Option::<Box::<str>>| {
+            if !self.flags.quiet() {
+                let output = Command {
+                    command: &command,
+                    description: description.as_deref()
+                }.to_string(&self.flags);
+                println!("{output}");
+            }
+        };
+
         loop {
             if self.stop.load(Ordering::Relaxed) && self.active_fds.load(Ordering::Relaxed) == 0 {
                 break
             }
 
             while let Ok(poll_fd) = self.poll_fd_recv.try_recv() {
-                let fd = poll_fd.as_fd().as_raw_fd();
-                if !seen_fds.contains(&fd) {
-                    poll_fds.push(poll_fd);
-                    _ = seen_fds.insert(fd)
-                }
+                poll_fds.push(poll_fd);
             }
 
             if poll_fds.is_empty() {
@@ -122,26 +127,20 @@ impl Poller {
                     }
 
                     if revents.contains(PollFlags::POLLIN) {
-                        fds_with_output.insert(fd);
-
                         let mut buf = [0; 4096];
                         let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut _, buf.len()) };
                         if n > 0 {
-                            let subprocess = self.fd_to_subprocess.get(&fd).unwrap_dbg();
-                            let Subprocess { pid, command, description } = subprocess.value().as_ref();
                             let Ok(data) = std::str::from_utf8(&buf[..n as usize]) else {
                                 println!("command output is not valid utf8");
                                 continue
                             };
-                            if !printed_pids.contains(pid) {
-                                if !self.flags.quiet() {
-                                    let output = Command {
-                                        command: &command,
-                                        description: description.as_deref()
-                                    }.to_string(&self.flags);
-                                    println!("{output}");
+                            {
+                                let subprocess = self.fd_to_subprocess.get(&fd).unwrap_dbg();
+                                let Subprocess { pid, command, description } = subprocess.value().as_ref();
+                                if !printed_pids.contains(pid) {
+                                    print_job(command, description);
+                                    _ = printed_pids.insert(*pid)
                                 }
-                                _ = printed_pids.insert(*pid)
                             }
                             print!("{data}")
                         }
@@ -150,19 +149,13 @@ impl Poller {
                             let subprocess = self.fd_to_subprocess.get(&fd).unwrap_dbg();
                             let Subprocess { pid, command, description } = subprocess.value().as_ref();
 
-                            if self.flags.rush() && !handled_pids.contains(pid) {
-                                self.job_is_done()
+                            if !printed_pids.contains(pid) {
+                                print_job(command, description);
+                                _ = printed_pids.insert(*pid)
                             }
 
-                            if !fds_with_output.contains(&fd) && !printed_pids.contains(pid) {
-                                if !self.flags.quiet() {
-                                    let output = Command {
-                                        command: &command,
-                                        description: description.as_deref()
-                                    }.to_string(&self.flags);
-                                    println!("{output}");
-                                }
-                                _ = printed_pids.insert(*pid);
+                            if self.flags.rush() && !handled_pids.contains(pid) {
+                                self.job_is_done()
                             }
 
                             if !handled_pids.contains(pid) {
