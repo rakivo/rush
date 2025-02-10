@@ -238,6 +238,7 @@ impl<'a> Parsed<'a> {
 
     #[inline(always)]
     fn rule_mut(&mut self, name: &str) -> &mut Rule<'a> {
+        println!("{name:?}");
         self.rules.get_mut(name).unwrap_dbg()
     }
 
@@ -438,6 +439,12 @@ pub struct Parser<'a> {
 impl<'a> Parser<'a> {
     pub const RUSH_FILE_PATH: &'static str = "build.rush";
 
+    #[inline(always)]
+    fn finish_rule(&mut self) {
+        // do something here in case of rule not having `command` property.
+    }
+
+    #[inline]
     fn finish_job(&mut self) {
         match &mut self.context {
             Context::Job { target, shadows } => {
@@ -458,6 +465,7 @@ impl<'a> Parser<'a> {
                 }).map_or(false, |(_, first_token)| matches!(first_token, BUILD | PHONY | RULE))
             {
                 self.finish_job();
+                self.finish_rule();
                 self.context = Context::Global
             }
         }
@@ -550,9 +558,9 @@ impl<'a> Parser<'a> {
                         } else {
                             self.context = Context::Rule {
                                 name,
-                                already_inserted: true,
-                                description: *description,
                                 depfile: Some(depfile),
+                                description: *description,
+                                already_inserted: *already_inserted
                             }
                         }
                     },
@@ -566,9 +574,9 @@ impl<'a> Parser<'a> {
                         } else {
                             self.context = Context::Rule {
                                 name,
-                                description: Some(description),
                                 depfile: *depfile,
-                                already_inserted: *already_inserted,
+                                description: Some(description),
+                                already_inserted: *already_inserted
                             }
                         }
                     },
@@ -762,6 +770,8 @@ impl<'a> Parser<'a> {
         }
 
         parser.finish_job();
+        parser.finish_rule();
+
         parser.parsed
     }
 }
