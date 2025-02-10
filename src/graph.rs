@@ -1,7 +1,7 @@
 use crate::parser::comp::Phony;
 use crate::dbg_unwrap::DbgUnwrap;
 use crate::parser::{Compiled, DefaultJob};
-use crate::types::{StrHashMap, StrHashSet};
+use crate::types::{StrHashMap, StrHashSet, StrIndexSet};
 
 use std::fs;
 use std::sync::Arc;
@@ -11,17 +11,20 @@ use std::collections::VecDeque;
 use tramer::tramer;
 
 pub type Levels<'a> = Vec::<Vec::<&'a str>>;
-pub type Graph<'a> = StrHashMap::<'a, Arc::<StrHashSet<'a>>>;
+pub type Graph<'a> = StrHashMap::<'a, Arc::<StrIndexSet<'a>>>;
 
 #[cfg_attr(feature = "dbg", tramer("nanos"))]
-pub fn build_dependency_graph<'a>(processed: &'a Compiled, default_job: DefaultJob<'a>) -> (Graph<'a>, DefaultJob<'a>, Graph<'a>) {
+pub fn build_dependency_graph<'a>(
+    processed: &'a Compiled,
+    default_job: DefaultJob<'a>
+) -> (Graph<'a>, DefaultJob<'a>, Graph<'a>) {
     fn collect_deps<'a>(
         node: &'a str,
         parsed: &'a Compiled,
         graph: &mut Graph<'a>,
         visited: &mut StrHashSet<'a>,
         transitive_deps: &mut Graph<'a>
-    ) -> Arc::<StrHashSet<'a>> {
+    ) -> Arc::<StrIndexSet<'a>> {
         if visited.contains(node) {
             return transitive_deps.get(node).cloned().unwrap_or_default();
         }
@@ -30,12 +33,12 @@ pub fn build_dependency_graph<'a>(processed: &'a Compiled, default_job: DefaultJ
 
         let mut deps = parsed.jobs.get(node).map(|job| {
             match &job.phony {
-                Phony::Phony { .. } => { StrHashSet::default() },
+                Phony::Phony { .. } => { StrIndexSet::default() },
                 Phony::NotPhony { deps, inputs, .. } => {
                     inputs.iter()
                         .chain(deps.iter())
                         .cloned()
-                        .collect::<StrHashSet>()
+                        .collect::<StrIndexSet>()
                 } 
             }
         }).unwrap_or_default();
@@ -88,9 +91,9 @@ pub fn build_dependency_graph<'a>(processed: &'a Compiled, default_job: DefaultJ
     }
 
     let n = processed.jobs.len();
-    let mut graph = StrHashMap::with_capacity(n);
+    let mut graph = Graph::with_capacity(n);
     let mut visited = StrHashSet::with_capacity(n);
-    let mut transitive_deps = StrHashMap::with_capacity(n);
+    let mut transitive_deps = Graph::with_capacity(n);
 
     for target in processed.jobs.keys() {
         collect_deps(target, processed, &mut graph, &mut visited, &mut transitive_deps);
