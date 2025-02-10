@@ -199,7 +199,7 @@ impl Template<'_> {
         for chunk in self.chunks.iter() {
             match chunk {
                 TemplateChunk::Static(s) => {
-                    if !(ret.is_empty() && s.is_empty()) { ret.push(' ') }
+                    if !ret.is_empty() && !s.is_empty() { ret.push(' ') }
                     ret.push_str(s)
                 },
                 TemplateChunk::JoinedStatic(s) => ret.push_str(s),
@@ -212,7 +212,7 @@ impl Template<'_> {
                         })
                     };
 
-                    if !(ret.is_empty() && placeholder.is_empty()) { ret.push(' ') }
+                    if !ret.is_empty() && !placeholder.is_empty() { ret.push(' ') }
                     ret.push_str(compiled)
                 },
                 TemplateChunk::JoinedPlaceholder(placeholder) => {

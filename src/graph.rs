@@ -101,9 +101,13 @@ pub fn build_dependency_graph<'a>(
 
     let default_job = default_job.or({
         if let Some(ref dt) = processed.default_target {
-            processed.jobs.get(dt.as_str())
+            let job = processed.jobs.get(dt.as_str());
+            debug_assert!(job.is_some());
+            job
         } else if graph.is_empty() {
-            processed.jobs.values().next()
+            let job = processed.jobs.values().next();
+            debug_assert!(job.is_some());
+            job
         } else {
             let mut reverse_graph = StrHashMap::with_capacity(n);
             for (node, deps) in graph.iter() {
