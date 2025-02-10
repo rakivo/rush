@@ -55,6 +55,14 @@ macro_rules! cr_report {
 enum ExecutorFlow { Ok, Stop }
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
+pub struct Subprocess {
+    pub id: usize,
+    pub command: String,
+}
+
+pub type SubprocessMap = DashMap::<i32, Subprocess>;
+
+#[cfg_attr(feature = "dbg", derive(Debug))]
 struct AtomicStr { ptr: AtomicU64, len: AtomicU64 }
 
 impl AtomicStr {
@@ -95,12 +103,12 @@ pub struct CommandRunner<'a> {
 
     fd_sender: FdSender,
     active_fds: Arc::<AtomicUsize>,
-    fd_to_command: Arc::<DashMap::<i32, String>>,
+    fd_to_subprocess: Arc::<SubprocessMap>,
 
     stop: Arc::<AtomicBool>,
-    job_done: Arc::<AtomicUsize>,
-
-    executed_jobs: AtomicUsize,
+    jobs_done: Arc::<AtomicUsize>,
+    executed_jobs: Arc::<AtomicUsize>,
+    curr_subprocess_id: Arc::<AtomicUsize>,
 
     fail_count: AtomicUsize,
     not_up_to_date: AtomicStr,
@@ -123,7 +131,7 @@ impl<'a> CommandRunner<'a> {
                 cr_print!(self, "RUNNING LEVEL: {level:#?}\n")
             }
 
-            self.job_done.store(0, Ordering::Relaxed);
+            self.jobs_done.store(0, Ordering::Relaxed);
             self.executed_jobs.store(0, Ordering::Relaxed);
             for job in level.into_iter().filter_map(|t| self.context.jobs.get(t)) {
                 self.resolve_and_run(job);
@@ -131,115 +139,121 @@ impl<'a> CommandRunner<'a> {
             }
             let executed = self.executed_jobs.load(Ordering::Relaxed);
             loop {
-                let jobs_done = self.job_done.load(Ordering::Relaxed);
+                let jobs_done = self.jobs_done.load(Ordering::Relaxed);
                 if jobs_done >= executed {
                     break
                 } else {
+                    #[cfg(feature = "dbg")] {
+                        println!("{jobs_done} < {executed}");
+                    }
                     thread::sleep(Duration::from_millis(50))
                 }
             }
             self.executed_jobs.store(0, Ordering::Relaxed);
-            self.job_done.store(0, Ordering::Relaxed);
+            self.jobs_done.store(0, Ordering::Relaxed);
         }
     }
 
     fn stdout_thread(
         stop: Arc<AtomicBool>,
-        job_done: Arc::<AtomicUsize>,
+        jobs_done: Arc::<AtomicUsize>,
         active_fds: Arc<AtomicUsize>,
-        fd_to_command: Arc<DashMap<i32, String>>,
+        fd_to_subprocess: Arc<SubprocessMap>,
     ) -> (FdSender, Stdout, StdoutThread) {
         let (stdout, stdout_recv) = unbounded::<String>();
         let (fd_sender, poll_fd_recv) = unbounded::<PollFd>();
-        let writer = thread::spawn({
-            let done = Arc::clone(&stop);
-            let active_fds = Arc::clone(&active_fds);
-            let fd_to_command = Arc::clone(&fd_to_command);
-            move || {
-                let mut poll_fds = Vec::new();
-                let mut seen_fds = HashSet::new(); // Track seen FDs
-                let mut fds_with_output = HashSet::new(); // Track FDs that have produced POLLIN
-                let mut stdout = io::stdout().lock();
-                let mut stdout_recv_dropped = false;
-                loop {
-                    // Process messages from the main thread
-                    match stdout_recv.try_recv() {
-                        Ok(s) => _ = stdout.write_all(s.as_bytes()),
-                        Err(TryRecvError::Disconnected) => stdout_recv_dropped = true,
-                        _ => {}
-                    }
+        let writer = thread::spawn(move || {
+            let mut poll_fds = Vec::new();
+            let mut seen_fds = HashSet::new();
+            let mut stdout_recv_dropped = false;
+            let mut fds_with_output = HashSet::new();
 
-                    if stdout_recv_dropped && done.load(Ordering::Relaxed) && active_fds.load(Ordering::Relaxed) == 0 {
-                        break;
-                    }
+            let mut hung_ids = HashSet::<usize>::new();
+            let mut printed_ids = HashSet::<usize>::new();
+            loop {
+                // Process messages from the main thread
+                match stdout_recv.try_recv() {
+                    Ok(s) => print!("{s}"),
+                    Err(TryRecvError::Disconnected) => stdout_recv_dropped = true,
+                    _ => {}
+                }
 
-                    while let Ok(poll_fd) = poll_fd_recv.try_recv() {
-                        let fd = poll_fd.as_fd().as_raw_fd();
-                        if !seen_fds.contains(&fd) {
-                            poll_fds.push(poll_fd);
-                            seen_fds.insert(fd);
-                        }
-                    }
+                if stdout_recv_dropped && stop.load(Ordering::Relaxed) && active_fds.load(Ordering::Relaxed) == 0 {
+                    break
+                }
 
-                    if poll_fds.is_empty() {
-                        continue
-                    }
-
-                    if let Err(e) = poll(&mut poll_fds, PollTimeout::MAX) {
-                        _ = write!(stdout, "poll failed: {e}\n");
-                        break
-                    }
-
-                    let mut i = 0;
-                    while i < poll_fds.len() {
-                        if let Some(revents) = poll_fds[i].revents() {
-                            let fd = poll_fds[i].as_fd().as_raw_fd();
-
-                            #[cfg(feature = "dbg_hardcore")] {
-                                _ = write!(stdout, "polled: FD: {}, revents={:?}\n", fd, revents);
-                            }
-
-                            if revents.contains(PollFlags::POLLIN) {
-                                fds_with_output.insert(fd);
-
-                                let mut buf = [0; 4096];
-                                let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut _, buf.len()) };
-                                if n > 0 {
-                                    let cmd = fd_to_command.get(&fd).unwrap().to_owned();
-                                    let Ok(data) = std::str::from_utf8(&buf[..n as usize]) else {
-                                        _ = write!(stdout, "command output is not valid utf8\n");
-                                        continue;
-                                    };
-                                    // TODO: print command before waiting till its end
-                                    _ = write!(stdout, "{cmd}\n{data}");
-                                    // if i & 1 == 0 {
-                                    //     _ = write!(stdout, "command: {cmd}, stdout:\n{data}");
-                                    // } else {
-                                    //     _ = write!(stdout, "command: {cmd}, stderr:\n{data}");
-                                    // }
-                                }
-                            } else if revents.contains(PollFlags::POLLHUP) {
-                                // Check if this FD has never produced POLLIN
-                                if !fds_with_output.contains(&fd) {
-                                    job_done.fetch_add(1, Ordering::Relaxed);
-                                    let cmd = fd_to_command.get(&fd).unwrap().to_owned();
-                                    _ = write!(stdout, "{cmd}\n");
-                                }
-
-                                // Clean up the FD
-                                poll_fds.remove(i);
-                                fd_to_command.remove(&fd);
-                                active_fds.fetch_sub(1, Ordering::Relaxed);
-
-                                continue;
-                            }
-                        }
-                        i += 1;
+                while let Ok(poll_fd) = poll_fd_recv.try_recv() {
+                    let fd = poll_fd.as_fd().as_raw_fd();
+                    if !seen_fds.contains(&fd) {
+                        poll_fds.push(poll_fd);
+                        seen_fds.insert(fd);
                     }
                 }
+
+                if poll_fds.is_empty() {
+                    continue
+                }
+
+                if let Err(e) = poll(&mut poll_fds, PollTimeout::MAX) {
+                    _ = print!("poll failed: {e}\n");
+                    break
+                }
+
+                let mut i = 0;
+                while i < poll_fds.len() {
+                    if let Some(revents) = poll_fds[i].revents() {
+                        let fd = poll_fds[i].as_fd().as_raw_fd();
+
+                        #[cfg(feature = "dbg_hardcore")] {
+                            _ = print!("polled: FD: {}, revents={:?}\n", fd, revents);
+                        }
+
+                        if revents.contains(PollFlags::POLLIN) {
+                            fds_with_output.insert(fd);
+
+                            let mut buf = [0; 4096];
+                            let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut _, buf.len()) };
+                            if n > 0 {
+                                let subprocess = fd_to_subprocess.get(&fd).unwrap();
+                                let Subprocess { id, command } = subprocess.value();
+                                let Ok(data) = std::str::from_utf8(&buf[..n as usize]) else {
+                                    _ = print!("command output is not valid utf8\n");
+                                    continue;
+                                };
+                                if !printed_ids.contains(&id) {
+                                    // TODO: print command before waiting till its end
+                                    _ = print!("{command}\n{data}");
+                                    printed_ids.insert(*id);
+                                }
+                            }
+                        } else if revents.contains(PollFlags::POLLHUP) {
+                            {
+                                let subprocess = fd_to_subprocess.get(&fd).unwrap();
+                                let Subprocess { id, command } = subprocess.value();
+                                if !hung_ids.contains(id) {
+                                    jobs_done.fetch_add(1, Ordering::Relaxed);
+                                    hung_ids.insert(*id);
+                                }
+
+                                if !fds_with_output.contains(&fd) && !printed_ids.contains(id) {
+                                    printed_ids.insert(*id);
+                                    _ = print!("{command}\n")
+                                }
+                            }
+
+                            poll_fds.remove(i);
+                            fd_to_subprocess.remove(&fd);
+
+                            if active_fds.load(Ordering::Relaxed) > 0 {
+                                active_fds.fetch_sub(1, Ordering::Relaxed);
+                            }
+
+                            continue
+                        }
+                    } i += 1
+                }
             }
-        });
-        (fd_sender, stdout, writer)
+        }); (fd_sender, stdout, writer)
     }
 
     #[inline]
@@ -253,14 +267,15 @@ impl<'a> CommandRunner<'a> {
     ) -> Self {
         let n = context.jobs.len();
         let stop = Arc::new(AtomicBool::new(false));
-        let job_done = Arc::new(AtomicUsize::new(0));
+        let jobs_done = Arc::new(AtomicUsize::new(0));
         let active_fds = Arc::new(AtomicUsize::new(0));
-        let fd_to_command = Arc::new(DashMap::new());
+        let executed_jobs = Arc::new(AtomicUsize::new(0));
+        let fd_to_subprocess = Arc::new(DashMap::new());
         let (fd_sender, stdout, stdout_thread) = Self::stdout_thread(
             Arc::clone(&stop),
-            Arc::clone(&job_done),
+            Arc::clone(&jobs_done),
             Arc::clone(&active_fds),
-            Arc::clone(&fd_to_command)
+            Arc::clone(&fd_to_subprocess),
         );
         Self {
             stop,
@@ -269,18 +284,19 @@ impl<'a> CommandRunner<'a> {
             stdout,
             context,
             db_read,
-            job_done,
+            jobs_done,
             fd_sender,
             active_fds,
             default_job,
             stdout_thread,
-            fd_to_command,
+            executed_jobs,
             transitive_deps,
+            fd_to_subprocess,
             db_write: Db::write(),
             fail_count: AtomicUsize::new(0),
-            executed_jobs: AtomicUsize::new(0),
             not_up_to_date: AtomicStr::empty(),
             metadata_cache: MetadataCache::new(n),
+            curr_subprocess_id: Arc::new(AtomicUsize::new(0)),
             executed: DashSet::with_capacity_and_hasher(n, FxBuildHasher::default()),
         }
     }
@@ -344,20 +360,14 @@ impl<'a> CommandRunner<'a> {
         self.executed_jobs.fetch_add(1, Ordering::Relaxed);
 
         command.execute(
+            Arc::clone(&self.curr_subprocess_id),
             #[cfg(feature = "dbg")] self.stdout.clone(),
             self.fd_sender.clone(),
-            &self.fd_to_command,
+            &self.fd_to_subprocess,
             &self.active_fds
         ).map_err(|e| {
             cr_print!(self, "[could not execute job: {target}: {e}]\n");
             e
-        }).map(|command_output| {
-            // let failed = if command_output.status != 0 {
-            //     self.job_failed()
-            // } else {
-            //     false
-            // }; (command_output, failed)
-            command_output
         })
     }
 

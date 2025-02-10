@@ -2,26 +2,27 @@
 use crate::cr::Stdout;
 use crate::flags::Mode;
 use crate::graph::Graph;
-use crate::types::StrDashMap;
 use crate::parser::comp::Job;
+use crate::types::StrDashMap;
+use crate::cr::{Subprocess, SubprocessMap};
 
 use std::io;
 use std::ptr;
 use std::mem;
 use std::ops::Add;
 use std::fs::File;
+use std::sync::Arc;
 use std::path::Path;
 use std::ffi::CString;
 use std::time::SystemTime;
+use std::os::fd::{AsFd, AsRawFd};
 use std::os::fd::{IntoRawFd, FromRawFd};
+use std::sync::atomic::{Ordering, AtomicUsize};
 
-use std::sync::Arc;
 use dashmap::DashMap;
 use fxhash::FxBuildHasher;
 use crossbeam_channel::Sender;
-use std::os::fd::{AsFd, AsRawFd};
 use nix::poll::{PollFd, PollFlags};
-use std::sync::atomic::{Ordering, AtomicUsize};
 
 #[cfg(feature = "dbg")]
 macro_rules! cmd_print {
@@ -82,9 +83,10 @@ impl Command {
 
     pub fn execute(
         &self,
+        curr_subprocess_id: Arc::<AtomicUsize>,
         #[cfg(feature = "dbg")] stdout: Stdout,
         poll_fds_sender: Sender::<PollFd>,
-        fd_to_command: &Arc::<DashMap<i32, String>>,
+        fd_to_command: &Arc::<SubprocessMap>,
         active_fds: &Arc::<AtomicUsize>,
     ) -> io::Result::<()> {
         let cmd = CString::new(self.command.as_bytes())?;
@@ -138,16 +140,27 @@ impl Command {
             libc::close(stderr_writer_fd);
         }
 
-        fd_to_command.insert(stdout_reader_fd, self.command.to_owned());
-        // fd_to_command.insert(stderr_reader_fd, self.command.to_owned());
+        let id = curr_subprocess_id.load(Ordering::Relaxed);
+
+        fd_to_command.insert(stdout_reader_fd, Subprocess {
+            id,
+            command: self.command.to_owned()
+        });
+
+        fd_to_command.insert(stderr_reader_fd, Subprocess {
+            id,
+            command: self.command.to_owned()
+        });
+
+        curr_subprocess_id.fetch_add(1, Ordering::Relaxed);
 
         active_fds.fetch_add(1, Ordering::Relaxed);
 
         let stdout_reader_fd: &'static _ = Box::leak(Box::new(stdout_reader));
-        // let stderr_reader_fd: &'static _ = Box::leak(Box::new(stderr_reader));
+        let stderr_reader_fd: &'static _ = Box::leak(Box::new(stderr_reader));
 
         let stdout_pollfd = PollFd::new(stdout_reader_fd.as_fd(), PollFlags::POLLIN);
-        // let stderr_pollfd = PollFd::new(stderr_reader_fd.as_fd(), PollFlags::POLLIN);
+        let stderr_pollfd = PollFd::new(stderr_reader_fd.as_fd(), PollFlags::POLLIN);
 
         #[cfg(feature = "dbg_hardcore")] {
             {
@@ -161,18 +174,18 @@ impl Command {
             }
 
             {
-                // let mut stderr = format!("sending: FD: {stdout_pollfd:?} ");
-                // if let Some(revents) = stdout_pollfd.revents() {
-                //     let revents = format!("revents: {revents:?}");
-                //     stderr.push_str(&revents)
-                // }
-                // stderr.push('\n');
-                // Self::print(&stdout, stderr);
+                let mut stderr = format!("sending: FD: {stdout_pollfd:?} ");
+                if let Some(revents) = stdout_pollfd.revents() {
+                    let revents = format!("revents: {revents:?}");
+                    stderr.push_str(&revents)
+                }
+                stderr.push('\n');
+                Self::print(&stdout, stderr);
             }
         }
 
         poll_fds_sender.send(stdout_pollfd).unwrap();
-        // poll_fds_sender.send(stderr_pollfd).unwrap();
+        poll_fds_sender.send(stderr_pollfd).unwrap();
 
         Ok(())
     }
