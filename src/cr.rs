@@ -212,7 +212,7 @@ impl<'a> CommandRunner<'a> {
                                 }
                                 _ = printed_pids.insert(*pid)
                             }
-                            print!("{data}");
+                            print!("{data}")
                         }
                     } else if revents.contains(PollFlags::POLLHUP) {
                         /* drop reference into `fd_to_subprocess` before calling `fd_to_subprocess.remove` */ {
@@ -232,12 +232,15 @@ impl<'a> CommandRunner<'a> {
                             }
 
                             if !handled_pids.contains(pid) {
-                                let exit_code = Self::get_process_exit_code(*pid);
-                                if exit_code.map_or(false, |code| code != 0) {
-                                    jobs_failed += 1;
-                                    if flags.max_fail_count().map_or(false, |max| jobs_failed >= *max) {
-                                        stop.store(true, Ordering::Relaxed);
-                                        break 'outer
+                                // wait on process only if `-k` flag is specified to achieve maximum speed
+                                if let Some(max) = flags.max_fail_count() {
+                                    let exit_code = Self::get_process_exit_code(*pid);
+                                    if exit_code.map_or(false, |code| code != 0) {
+                                        jobs_failed += 1;
+                                        if jobs_failed >= *max {
+                                            stop.store(true, Ordering::Relaxed);
+                                            break 'outer
+                                        }
                                     }
                                 }
                                 _ = handled_pids.insert(*pid)
@@ -249,9 +252,7 @@ impl<'a> CommandRunner<'a> {
 
                         if active_fds.load(Ordering::Relaxed) > 0 {
                             _ = active_fds.fetch_sub(1, Ordering::Relaxed)
-                        }
-
-                        continue
+                        } continue
                     }
                 } i += 1
             }
@@ -336,7 +337,15 @@ impl<'a> CommandRunner<'a> {
         db_read: Option::<Db<'a>>,
         default_job: DefaultJob<'a>,
     ) -> Db<'a> {
-        let mut cr = Self::new(arena, context, graph, transitive_deps, flags, db_read, default_job);
+        let mut cr = Self::new(
+            arena,
+            context,
+            graph,
+            transitive_deps,
+            flags,
+            db_read,
+            default_job
+        );
 
         let levels = if let Some(job) = default_job {
             cr.run_target(job);
