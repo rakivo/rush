@@ -1,43 +1,27 @@
 use crate::flags::Flags;
 use crate::types::StrHashSet;
 use crate::db::{Db, Metadata};
-use crate::dbg_unwrap::DbgUnwrap;
 use crate::consts::PHONY_TARGETS;
 use crate::parser::comp::{Job, Phony};
 use crate::command::{Command, MetadataCache};
 use crate::parser::{Rule, Compiled, DefaultJob};
 use crate::graph::{Graph, Levels, topological_sort};
+use crate::poll::{Poller, FdSender, PollingThread};
 
 use std::io;
+use std::thread;
 use std::sync::Arc;
 use std::path::Path;
 use std::time::Duration;
 use std::hash::{Hash, Hasher};
-use std::collections::HashSet;
-use std::os::fd::{AsFd, AsRawFd};
-use std::thread::{self, JoinHandle};
 use std::sync::atomic::{Ordering, AtomicBool, AtomicUsize};
 
 use bumpalo::Bump;
 use dashmap::DashMap;
-use crossbeam_channel::{unbounded, Receiver, Sender};
-use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
-
-type PollingThread = JoinHandle::<()>;
-type FdSender = Sender::<PollFd<'static>>;
 
 #[derive(PartialEq)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 enum ExecutorFlow { Ok, Stop }
-
-#[cfg_attr(feature = "dbg", derive(Debug))]
-pub struct Subprocess {
-    pub pid: libc::pid_t,
-    pub command: Box::<str>,
-    pub description: Option::<Box::<str>>,
-}
-
-pub type SubprocessMap = DashMap::<i32, Arc::<Subprocess>>;
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct CommandRunner<'a> {
@@ -48,19 +32,12 @@ pub struct CommandRunner<'a> {
     graph: Graph<'a>,
     transitive_deps: Graph<'a>,
 
-    flags: Arc::<Flags>,
-
+    poller: Arc::<Poller>,
     polling_thread: PollingThread,
 
     fd_sender: FdSender,
-    active_fds: Arc::<AtomicUsize>,
-    fd_to_subprocess: Arc::<SubprocessMap>,
-
-    stop: Arc::<AtomicBool>,
-    jobs_done: Arc::<AtomicUsize>,
 
     executed_jobs: usize,
-    curr_subprocess_id: usize, 
 
     not_up_to_date: Option::<&'a str>,
 
@@ -72,6 +49,12 @@ pub struct CommandRunner<'a> {
     executed: StrHashSet<'a>,
 
     metadata_cache: MetadataCache<'a>,
+}
+
+impl std::ops::Deref for CommandRunner<'_> {
+    type Target = Poller;
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target { &self.poller }
 }
 
 impl<'a> CommandRunner<'a> {
@@ -107,166 +90,6 @@ impl<'a> CommandRunner<'a> {
         }
     }
 
-    #[inline]
-    fn get_process_exit_code(pid: libc::pid_t) -> Option::<i32> {
-        let mut status = 0;
-        unsafe {
-            let ret = libc::waitpid(pid, &mut status, 0);
-            if ret == -1 { return None }
-            if libc::WIFEXITED(status) {
-                Some(libc::WEXITSTATUS(status))
-            } else {
-                None
-            }
-        }
-    }
-
-    fn poll(
-        flags: Arc::<Flags>,
-        stop: Arc::<AtomicBool>,
-        jobs_done: Arc::<AtomicUsize>,
-        active_fds: Arc::<AtomicUsize>,
-        poll_fd_recv: Receiver::<PollFd>,
-        fd_to_subprocess: Arc::<SubprocessMap>,
-    ) {
-        let job_is_done = || { _ = jobs_done.fetch_add(1, Ordering::Relaxed) };
-
-        let mut jobs_failed = 0;
-
-        let mut poll_fds = Vec::new();
-        let mut seen_fds = HashSet::new();
-        let mut fds_with_output = HashSet::new();
-
-        let mut handled_pids = HashSet::new();
-        let mut printed_pids = HashSet::new();
-
-        let poll_timeout = PollTimeout::try_from(Duration::from_millis(15)).unwrap_dbg();
-
-        loop {
-            if stop.load(Ordering::Relaxed) && active_fds.load(Ordering::Relaxed) == 0 {
-                break
-            }
-
-            while let Ok(poll_fd) = poll_fd_recv.try_recv() {
-                let fd = poll_fd.as_fd().as_raw_fd();
-                if !seen_fds.contains(&fd) {
-                    poll_fds.push(poll_fd);
-                    _ = seen_fds.insert(fd)
-                }
-            }
-
-            if poll_fds.is_empty() {
-                thread::sleep(Duration::from_millis(25));
-                continue
-            }
-
-            if let Err(e) = poll(&mut poll_fds, poll_timeout) {
-                _ = println!("poll failed: {e}");
-                break
-            }
-
-            let mut i = 0;
-            'outer: while i < poll_fds.len() {
-                if let Some(revents) = poll_fds[i].revents() {
-                    let fd = poll_fds[i].as_fd().as_raw_fd();
-
-                    #[cfg(feature = "dbg_hardcore")] {
-                        println!("polled: FD: {}, revents={:?}", fd, revents);
-                    }
-
-                    if revents.contains(PollFlags::POLLIN) {
-                        fds_with_output.insert(fd);
-
-                        let mut buf = [0; 4096];
-                        let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut _, buf.len()) };
-                        if n > 0 {
-                            let subprocess = fd_to_subprocess.get(&fd).unwrap_dbg();
-                            let Subprocess { pid, command, description } = subprocess.value().as_ref();
-                            let Ok(data) = std::str::from_utf8(&buf[..n as usize]) else {
-                                println!("command output is not valid utf8");
-                                continue
-                            };
-                            if !printed_pids.contains(pid) {
-                                if !flags.quiet() {
-                                    let output = Command {
-                                        command: &command,
-                                        description: description.as_deref()
-                                    }.to_string(&flags);
-                                    println!("{output}");
-                                }
-                                _ = printed_pids.insert(*pid)
-                            }
-                            print!("{data}")
-                        }
-                    } else if revents.contains(PollFlags::POLLHUP) {
-                        /* drop reference into `fd_to_subprocess` before calling `fd_to_subprocess.remove` */ {
-                            let subprocess = fd_to_subprocess.get(&fd).unwrap_dbg();
-                            let Subprocess { pid, command, description } = subprocess.value().as_ref();
-
-                            if flags.rush() && !handled_pids.contains(pid) {
-                                job_is_done()
-                            }
-
-                            if !fds_with_output.contains(&fd) && !printed_pids.contains(pid) {
-                                if !flags.quiet() {
-                                    let output = Command {
-                                        command: &command,
-                                        description: description.as_deref()
-                                    }.to_string(&flags);
-                                    println!("{output}");
-                                }
-                                _ = printed_pids.insert(*pid);
-                            }
-
-                            if !handled_pids.contains(pid) {
-                                if !flags.rush() {
-                                    // wait on process only if `-k` flag is specified to achieve maximum speed
-                                    let exit_code = Self::get_process_exit_code(*pid);
-                                    if exit_code.map_or(false, |code| code != 0) {
-                                        jobs_failed += 1;
-                                        if flags.max_fail_count().map_or(false, |&max| jobs_failed >= max) {
-                                            stop.store(true, Ordering::Relaxed);
-                                            break 'outer
-                                        }
-                                    } job_is_done();
-                                }
-                                _ = handled_pids.insert(*pid)
-                            }
-                        }
-
-                        poll_fds.remove(i);
-                        fd_to_subprocess.remove(&fd);
-
-                        if active_fds.load(Ordering::Relaxed) > 0 {
-                            _ = active_fds.fetch_sub(1, Ordering::Relaxed)
-                        } continue
-                    }
-                } i += 1
-            }
-        }
-    }
-
-    #[inline]
-    fn polling_thread(
-        flags: Arc::<Flags>,
-        stop: Arc::<AtomicBool>,
-        jobs_done: Arc::<AtomicUsize>,
-        active_fds: Arc::<AtomicUsize>,
-        fd_to_subprocess: Arc::<SubprocessMap>,
-    ) -> (FdSender, PollingThread) {
-        let (fd_sender, poll_fd_recv) = unbounded();
-        let polling = thread::spawn(move || {
-            Self::poll(
-                flags,
-                stop,
-                jobs_done,
-                active_fds,
-                poll_fd_recv,
-                fd_to_subprocess
-            )
-        }); (fd_sender, polling)
-    }
-
     fn new(
         arena: &'a Bump,
         context: &'a Compiled,
@@ -277,36 +100,26 @@ impl<'a> CommandRunner<'a> {
         default_job: DefaultJob<'a>,
     ) -> Self {
         let n = context.jobs.len();
-        let flags = Arc::new(flags);
-        let stop = Arc::new(AtomicBool::new(false));
-        let jobs_done = Arc::new(AtomicUsize::new(0));
-        let active_fds = Arc::new(AtomicUsize::new(0));
-        let fd_to_subprocess = Arc::new(DashMap::new());
-        let (fd_sender, polling_thread) = Self::polling_thread(
-            Arc::clone(&flags),
-            Arc::clone(&stop),
-            Arc::clone(&jobs_done),
-            Arc::clone(&active_fds),
-            Arc::clone(&fd_to_subprocess),
+        let (poller, fd_sender, polling_thread) = Poller::spawn(
+            Arc::new(flags),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(DashMap::new())
         );
         Self {
-            stop,
-            flags,
             graph,
             arena,
+            poller,
             context,
             db_read,
-            jobs_done,
             fd_sender,
-            active_fds,
             default_job,
             polling_thread,
             transitive_deps,
-            fd_to_subprocess,
 
             executed_jobs: 0,
             not_up_to_date: None,
-            curr_subprocess_id: 0,
             db_write: Db::write(),
             metadata_cache: MetadataCache::new(n),
             executed: StrHashSet::with_capacity(n),
@@ -391,12 +204,7 @@ impl<'a> CommandRunner<'a> {
             return Ok(())
         }
 
-        command.execute(
-            &mut self.curr_subprocess_id,
-            self.fd_sender.clone(),
-            &self.fd_to_subprocess,
-            &self.active_fds
-        ).map_err(|e| {
+        command.execute(&self.poller, self.fd_sender.clone()).map_err(|e| {
             print!("[could not execute job: {target}: {e}]\n");
             e
         }).map(|_| self.executed_jobs += 1)

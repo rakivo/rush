@@ -3,6 +3,7 @@ mod loc;
 
 mod cr;
 mod db;
+mod poll;
 mod flags;
 mod types;
 mod graph;

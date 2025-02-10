@@ -2,7 +2,7 @@ use crate::flags::Flags;
 use crate::graph::Graph;
 use crate::parser::comp::Job;
 use crate::types::StrDashMap;
-use crate::cr::{Subprocess, SubprocessMap};
+use crate::poll::{Poller, Subprocess};
 
 use std::io;
 use std::ptr;
@@ -13,8 +13,8 @@ use std::path::Path;
 use std::ffi::CString;
 use std::time::SystemTime;
 use std::os::fd::{AsFd, AsRawFd};
+use std::sync::atomic::{Ordering};
 use std::os::fd::{IntoRawFd, FromRawFd};
-use std::sync::atomic::{Ordering, AtomicUsize};
 
 use dashmap::DashMap;
 use fxhash::FxBuildHasher;
@@ -64,10 +64,8 @@ impl<'a> Command<'a> {
 
     pub fn execute(
         &self,
-        curr_subprocess_id: &mut usize,
+        poller: &Poller,
         poll_fds_sender: Sender::<PollFd>,
-        fd_to_command: &Arc::<SubprocessMap>,
-        active_fds: &Arc::<AtomicUsize>,
     ) -> io::Result::<()> {
         let cmd = CString::new(self.command.as_bytes())?;
         let args = [
@@ -125,12 +123,12 @@ impl<'a> Command<'a> {
             let description = self.description.map(Box::from);
             let subprocess = Arc::new(Subprocess {pid, command, description});
             
-            fd_to_command.insert(stdout_reader_fd, Arc::clone(&subprocess));
-            fd_to_command.insert(stderr_reader_fd, subprocess);
+            poller.fd_to_subprocess.insert(stdout_reader_fd, Arc::clone(&subprocess));
+            poller.fd_to_subprocess.insert(stderr_reader_fd, subprocess);
         }
 
-        *curr_subprocess_id += 1;
-        active_fds.fetch_add(1, Ordering::Relaxed);
+        poller.active_fds.fetch_add(1, Ordering::Relaxed);
+        poller.curr_subprocess_id.fetch_add(1, Ordering::Relaxed);
 
         // TODO: dont leak here
         let stdout_poll_fd = {
