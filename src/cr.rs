@@ -267,7 +267,6 @@ impl<'a> CommandRunner<'a> {
         }); (fd_sender, polling)
     }
 
-    #[inline]
     fn new(
         arena: &'a Bump,
         context: &'a Compiled,
@@ -315,37 +314,6 @@ impl<'a> CommandRunner<'a> {
     }
 
     #[inline]
-    pub fn run(
-        arena: &'a Bump,
-        context: &'a Compiled,
-        graph: Graph<'a>,
-        transitive_deps: Graph<'a>,
-        flags: Flags,
-        db_read: Option::<Db<'a>>,
-        default_job: DefaultJob<'a>,
-    ) -> Db<'a> {
-        let mut cr = Self::new(
-            arena,
-            context,
-            graph,
-            transitive_deps,
-            flags,
-            db_read,
-            default_job
-        );
-
-        let levels = if let Some(job) = default_job {
-            cr.run_target(job);
-            return cr.finish()
-        } else {
-            topological_sort(&cr.graph)
-        };
-
-        _ = cr.run_levels(&levels);
-        cr.finish()
-    }
-
-    #[inline]
     fn finish(self) -> Db<'a> {
         if self.flags.check_is_up_to_date() {
             match self.not_up_to_date {
@@ -356,50 +324,6 @@ impl<'a> CommandRunner<'a> {
         self.stop.store(true, Ordering::Relaxed);
         _ = self.polling_thread.join();
         self.db_write
-    }
-
-    #[inline]
-    fn execute_command(&mut self, command: &Command<'a>, target: &str) -> io::Result::<()> {
-        if self.flags.print_commands() {
-            let output = command.to_string(&self.flags);
-            println!("{output}");
-            return Ok(())
-        }
-
-        command.execute(
-            &mut self.curr_subprocess_id,
-            self.fd_sender.clone(),
-            &self.fd_to_subprocess,
-            &self.active_fds
-        ).map_err(|e| {
-            print!("[could not execute job: {target}: {e}]\n");
-            e
-        }).map(|_| self.executed_jobs += 1)
-    }
-
-    fn run_phony(&mut self, job: &'a Job<'a>) {
-        match &job.phony {
-            Phony::Phony { command, aliases, .. } => {
-                aliases.iter().filter_map(|_job| {
-                    match self.context.jobs.get(_job.as_str()) {
-                        Some(j) => Some(j),
-                        None => {
-                            report_panic!{
-                                job.loc,
-                                "undefined job: {target}\nNOTE: in phony jobs you can only alias jobs\n",
-                                target = _job
-                            };
-                        }
-                    }
-                }).for_each(|job| self.resolve_and_run_target(job));
-
-                _ = command.as_ref().map(|command| {
-                    let command = Command { command, description: None };
-                    self.execute_command(&command, job.target)
-                });
-            },
-            Phony::NotPhony { .. } => unreachable!()
-        }
     }
 
     #[inline]
@@ -421,76 +345,140 @@ impl<'a> CommandRunner<'a> {
             let subgraph = self.build_subgraph(job.target);
             topological_sort(&subgraph)
         };
-
         _ = self.run_levels(&levels)
     }
 
     #[inline]
-    fn run_target(&mut self, job: &'a Job<'a>) {
-        if PHONY_TARGETS.contains(&job.target) {
-            self.run_phony(job);
-            return
+    pub fn run(
+        arena: &'a Bump,
+        context: &'a Compiled,
+        graph: Graph<'a>,
+        transitive_deps: Graph<'a>,
+        flags: Flags,
+        db_read: Option::<Db<'a>>,
+        default_job: DefaultJob<'a>,
+    ) -> Db<'a> {
+        let mut cr = Self::new(
+            arena,
+            context,
+            graph,
+            transitive_deps,
+            flags,
+            db_read,
+            default_job
+        );
+
+        let levels = if let Some(job) = default_job {
+            if PHONY_TARGETS.contains(&job.target) {
+                cr.run_phony(job);
+            } else {
+                cr.resolve_and_run_target(job);
+            }
+            return cr.finish()
+        } else {
+            topological_sort(&cr.graph)
+        };
+
+        _ = cr.run_levels(&levels);
+        cr.finish()
+    }
+
+    #[inline]
+    fn execute_command(&mut self, command: &Command<'a>, target: &str) -> io::Result::<()> {
+        if self.flags.print_commands() {
+            let output = command.to_string(&self.flags);
+            println!("{output}");
+            return Ok(())
         }
 
-        _ = self.resolve_and_run_target(job)
+        command.execute(
+            &mut self.curr_subprocess_id,
+            self.fd_sender.clone(),
+            &self.fd_to_subprocess,
+            &self.active_fds
+        ).map_err(|e| {
+            print!("[could not execute job: {target}: {e}]\n");
+            e
+        }).map(|_| self.executed_jobs += 1)
     }
 
     #[inline]
-    fn create_dirs_if_needed(&self, path: &str) -> io::Result::<()> {
-        let path: &Path = path.as_ref();
-        if let Some(parent) = path.parent() {
-            if parent.exists() { return Ok(()) }
-            std::fs::create_dir_all(parent)?
-        } Ok(())
-    }
+    fn run_phony(&mut self, job: &'a Job<'a>) {
+        let Phony::Phony { command, aliases, .. } = &job.phony else { unreachable!() };
 
-    #[inline]
-    fn hash(command: &str) -> u64 {
-        let mut hasher = fnv::FnvHasher::default();
-        command.hash(&mut hasher);
-        hasher.finish()
-    }
+        aliases.iter().filter_map(|_job| {
+            match self.context.jobs.get(_job.as_str()) {
+                Some(j) => Some(j),
+                None => report_panic!{
+                    job.loc,
+                    "undefined job: {target}\nNOTE: in phony jobs you can only alias jobs\n",
+                    target = _job
+                }
+            }
+        }).for_each(|job| self.resolve_and_run_target(job));
 
-    #[inline]
-    fn needs_rebuild(&self, job: &Job<'a>, command: &str) -> bool {
-        // in `check_is_up_to_date` mode `always_build` is disabled
-        // TODO: make that happen in the `Mode` struct
-        if self.flags.always_build() && !self.flags.check_is_up_to_date() {
-            return true
-        }
-        self.db_read.as_ref().map_or(false, |db| {
-            db.metadata_read(job.target).map_or(false, |md| {
-                md.command_hash != Self::hash(command)
-            })
-        }) || self.metadata_cache.needs_rebuild(job, &self.transitive_deps)
-    }
-
-    #[inline]
-    fn compile_command(&self, job: &Job<'a>, rule: &Rule) -> Option::<String> {
-        rule.command.compile(job, &self.context.defs).map_err(|e| {
-            print!("{e}\n");
-            rule.description.as_ref().and_then(|d| d.check(&job.shadows, &self.context.defs).err()).map(|err| {
-                print!("{err}\n");
-            });
-        }).map(|command| {
-            self.db_write.metadata_write(job.target, Metadata {
-                command_hash: Self::hash(&command)
-            }); command
-        }).ok()
+        _ = command.as_ref().map(|command| {
+            let command = Command { command, description: None };
+            self.execute_command(&command, job.target)
+        });
     }
 
     fn execute_job(&mut self, job: &Job<'a>, rule: &Rule) -> ExecutorFlow {
-        let Some(command) = self.compile_command(job, rule) else {
+        #[inline(always)]
+        fn hash(command: &str) -> u64 {
+            let mut hasher = fnv::FnvHasher::default();
+            command.hash(&mut hasher);
+            hasher.finish()
+        }
+
+        #[inline]
+        fn compile_command<'a>(_self: &CommandRunner<'a>, job: &Job<'a>, rule: &Rule) -> Option::<String> {
+            rule.command.compile(job, &_self.context.defs).map_err(|e| {
+                print!("{e}\n");
+                rule.description.as_ref()
+                    .and_then(|d| d.check(&job.shadows, &_self.context.defs).err())
+                    .map(|err| print!("{err}\n"));
+            }).map(|command| {
+                _self.db_write.metadata_write(job.target, Metadata {
+                    command_hash: hash(&command)
+                }); command
+            }).ok()
+        }
+
+        #[inline]
+        fn needs_rebuild<'a>(_self: &CommandRunner<'a>, job: &Job<'a>, command: &str) -> bool {
+            // in `check_is_up_to_date` mode `always_build` is disabled
+            // TODO: make that happen in the `Mode` struct
+            if _self.flags.always_build() && !_self.flags.check_is_up_to_date() {
+                return true
+            }
+            _self.db_read.as_ref().map_or(false, |db| {
+                db.metadata_read(job.target).map_or(false, |md| {
+                    md.command_hash != hash(command)
+                })
+            }) || _self.metadata_cache.needs_rebuild(job, &_self.transitive_deps)
+        }
+
+        #[inline]
+        fn create_dirs_if_needed(path: &str) -> io::Result::<()> {
+            let path: &Path = path.as_ref();
+            if let Some(parent) = path.parent() {
+                if parent.exists() { return Ok(()) }
+                std::fs::create_dir_all(parent)?
+            } Ok(())
+        }
+
+        let Some(command) = compile_command(self, job, rule) else {
             return ExecutorFlow::Ok
         };
 
-        if self.needs_rebuild(job, &command) {
+        if needs_rebuild(self, job, &command) {
             if self.flags.check_is_up_to_date() {
                 self.not_up_to_date = Some(job.target);
                 return ExecutorFlow::Stop
             }
 
-            if let Err(e) = self.create_dirs_if_needed(job.target) {
+            if let Err(e) = create_dirs_if_needed(job.target) {
                 print!{
                     "[could not create build directory for target: {target}: {e}]\n",
                     target = job.target
@@ -498,9 +486,13 @@ impl<'a> CommandRunner<'a> {
                 return ExecutorFlow::Ok
             }
 
-            let description = rule.description.as_ref().and_then(|d| d.compile(&job, &self.context.defs).map_err(|e| {
-                println!("{e}");
-            }).ok());
+            let description = rule.description.as_ref()
+                .and_then(|d| {
+                    d.compile(&job, &self.context.defs)
+                        .map_err(|e| {
+                            println!("{e}");
+                        }).ok()
+                });
 
             let command = self.arena.alloc_str(&command);
             let description = description.as_ref().map(|d| self.arena.alloc_str(d) as &_);
