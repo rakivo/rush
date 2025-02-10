@@ -106,7 +106,7 @@ pub mod prep {
         pub fn inputs_str(&self, panic: bool) -> &'a str {
             match self.phony {
                 Phony::Phony { .. } => if panic {
-                    report!(self.loc, "$in is not supported in phony jobs yet")
+                    report_panic!(self.loc, "$in is not supported in phony jobs yet")
                 } else {
                     ""
                 },
@@ -196,7 +196,7 @@ pub mod comp {
         pub fn inputs_str(&self, panic: bool) -> &'a str {
             match self.phony {
                 Phony::Phony { .. } => if panic {
-                    report!(self.loc, "$in is not supported in phony jobs yet")
+                    report_panic!(self.loc, "$in is not supported in phony jobs yet")
                 } else {
                     ""
                 },
@@ -264,7 +264,7 @@ impl<'a> Parsed<'a> {
             if let prep::Phony::NotPhony { rule, .. } = &job.phony {
                 if let Some(ref rule) = rule {
                     if !rules.contains_key(rule) {
-                        report!(job.loc, "undefined rule: {rule}")
+                        report_panic!(job.loc, "undefined rule: {rule}")
                     }
                 }
             }
@@ -277,7 +277,7 @@ impl<'a> Parsed<'a> {
             let job = match &job.phony {
                 prep::Phony::Phony { command, aliases_templates, aliases } => {
                     if  !phonys.contains(job.target) {
-                        report!{
+                        report_panic!{
                             job.loc,
                             "mark {target} as phony for it to have a command\n",
                             target = job.target
@@ -466,7 +466,7 @@ impl<'a> Parser<'a> {
         });
 
         let Some((first_space, first_token)) = first else {
-            report!(Loc(self.cursor), "undefined token: {line}")
+            report_panic!(Loc(self.cursor), "undefined token: {line}")
         };
 
         let Some(second_space) = line[first_space..].find(|c: char| !c.is_ascii_whitespace())
@@ -478,7 +478,7 @@ impl<'a> Parser<'a> {
             let check_start = first_space;
             let check_end = (second_space + 1 + 1).min(line.len());
             if !line[check_start..check_end].contains('=') {
-                report!(Loc(self.cursor), "expected `=` in variable definition")
+                report_panic!(Loc(self.cursor), "expected `=` in variable definition")
             }
             line[second_space + 1..].trim()
         };
@@ -569,7 +569,7 @@ impl<'a> Parser<'a> {
                         }
                     },
                     _ => if line.chars().next() != Some(COMMENT) {
-                        report!{
+                        report_panic!{
                             Loc(self.cursor),
                             "undefined property: `{first_token}`, existing properties are: `command`, `description`"
                         }
@@ -581,7 +581,7 @@ impl<'a> Parser<'a> {
                     PHONY => {
                         let phony = line[first_space..].trim();
                         if phony.as_bytes().last() == Some(&b':') {
-                            report!{
+                            report_panic!{
                                 Loc(self.cursor),
                                 "you can define phony job following way:\n  phony {target}\n  build {target}:\n    ...\n",
                                 target = &phony[..(phony.len() - 1).max(1)]
@@ -608,7 +608,7 @@ impl<'a> Parser<'a> {
                     },
                     BUILD => {
                         let Some(colon_idx) = line.find(':') else {
-                            report!(Loc(self.cursor), "expected colon after build target")
+                            report_panic!(Loc(self.cursor), "expected colon after build target")
                         };
                         let post_colon = line[colon_idx + 1..].trim();
                         let or_idx = post_colon.find('|');

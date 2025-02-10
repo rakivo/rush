@@ -46,7 +46,7 @@ pub fn build_dependency_graph<'a>(processed: &'a Compiled, default_job: DefaultJ
                 if let Some(ref depfile_template) = rule.depfile {
                     let depfile_path = match depfile_template.compile(job, &parsed.defs) {
                         Ok(ok) => ok,
-                        Err(e) => report!(job.loc, "{e}")
+                        Err(e) => report_panic!(job.loc, "{e}")
                     };
                     if let Ok(depfile) = fs::read_to_string(&depfile_path) {
                         let depfile = Box::leak(depfile.into_boxed_str());

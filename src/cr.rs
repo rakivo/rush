@@ -332,7 +332,7 @@ impl<'a> CommandRunner<'a> {
                     match self.context.jobs.get(_job.as_str()) {
                         Some(j) => Some(j),
                         None => {
-                            report!{
+                            report_panic!{
                                 job.loc,
                                 "undefined job: {target}\nNOTE: in phony jobs you can only alias jobs\n",
                                 target = _job
@@ -390,15 +390,6 @@ impl<'a> CommandRunner<'a> {
             if parent.exists() { return Ok(()) }
             std::fs::create_dir_all(parent)?
         } Ok(())
-    }
-
-    #[inline(always)]
-    fn print(&self, s: String) {
-        #[cfg(feature = "dbg")] {
-            self.stdout.send(s).unwrap()
-        } #[cfg(not(feature = "dbg"))] {
-            _ = self.stdout.send(s)
-        }
     }
 
     #[inline]
@@ -514,7 +505,7 @@ impl<'a> CommandRunner<'a> {
                 self.executed.insert(job.target);
                 if self.execute_job(job, rule) == ExecutorFlow::Stop { break }
             } else {
-                report!{
+                report_panic!{
                     job.loc,
                     "no rule named: {rule} found for job {target}\n",
                     rule = job_rule,

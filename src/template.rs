@@ -61,7 +61,7 @@ impl Template<'_> {
                 s[placeholder_start + 1..]
                     .find('}')
                     .map(|end| placeholder_start + 1 + end)
-                    .unwrap_or_else(|| report!(loc, "missing closing brace for placeholder"))
+                    .unwrap_or_else(|| report_panic!(loc, "missing closing brace for placeholder"))
             } else {
                 s[placeholder_start..]
                     .find(|c: char| !c.is_alphanumeric() && c != '_')
@@ -87,7 +87,7 @@ impl Template<'_> {
                 chunks.push(chunk);
                 last_was_placeholder_or_joined = true
             } else {
-                report!(loc, "empty placeholder")
+                report_panic!(loc, "empty placeholder")
             }
 
             start = placeholder_end;
@@ -204,10 +204,10 @@ impl Template<'_> {
                 TemplateChunk::JoinedStatic(s) => ret.push_str(s),
                 TemplateChunk::Placeholder(placeholder) => {
                     let compiled = match *placeholder {
-                        "in" => report!(self.loc, "$in is not allowed in variables definitions"),
-                        "out" => report!(self.loc, "$out is not allowed in variables definitions"),
+                        "in" => report_panic!(self.loc, "$in is not allowed in variables definitions"),
+                        "out" => report_panic!(self.loc, "$out is not allowed in variables definitions"),
                         _ => defs.get(placeholder).map(|def| def.0.as_str()).unwrap_or_else(|| {
-                            report!(self.loc, "undefined variable: {placeholder}")
+                            report_panic!(self.loc, "undefined variable: {placeholder}")
                         })
                     };
 
@@ -216,10 +216,10 @@ impl Template<'_> {
                 },
                 TemplateChunk::JoinedPlaceholder(placeholder) => {
                     ret.push_str(match *placeholder {
-                        "in" => report!(self.loc, "$in is not allowed in variables definitions"),
-                        "out" => report!(self.loc, "$out is not allowed in variables definitions"),
+                        "in" => report_panic!(self.loc, "$in is not allowed in variables definitions"),
+                        "out" => report_panic!(self.loc, "$out is not allowed in variables definitions"),
                         _ => defs.get(placeholder).map(|def| def.0.as_str()).unwrap_or_else(|| {
-                            report!(self.loc, "undefined variable: {placeholder}")
+                            report_panic!(self.loc, "undefined variable: {placeholder}")
                         })
                     })
                 }

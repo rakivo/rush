@@ -52,6 +52,6 @@ macro_rules! report_fmt {
 }
 
 #[macro_export]
-macro_rules! report {
+macro_rules! report_panic {
     ($loc: expr, $($arg: tt)*) => { $crate::loc::Loc::report(&report_fmt!($loc, $($arg)*)) }
 }
