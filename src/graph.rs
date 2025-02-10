@@ -1,4 +1,5 @@
 use crate::parser::comp::Phony;
+use crate::dbg_unwrap::DbgUnwrap;
 use crate::parser::{Compiled, DefaultJob};
 use crate::types::{StrHashMap, StrHashSet};
 
@@ -50,11 +51,7 @@ pub fn build_dependency_graph<'a>(processed: &'a Compiled, default_job: DefaultJ
                     };
                     if let Ok(depfile) = fs::read_to_string(&depfile_path) {
                         let depfile = Box::leak(depfile.into_boxed_str());
-                        let colon_idx = depfile.find(':');
-                        let colon_idx = {
-                            #[cfg(feature = "dbg")] { colon_idx.unwrap() }
-                            #[cfg(not(feature = "dbg"))] unsafe { colon_idx.unwrap_unchecked() }
-                        };
+                        let colon_idx = depfile.find(':').unwrap_dbg();
                         let depfile_deps = depfile[colon_idx + 1..]
                             .split_ascii_whitespace()
                             .filter(|f| *f != "\\");

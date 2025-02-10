@@ -1,5 +1,6 @@
 use crate::loc::Loc;
 use crate::types::StrHashSet;
+use crate::dbg_unwrap::DbgUnwrap;
 use crate::parser::comp::{Job, Defs};
 use crate::parser::{prep, comp, Shadows};
 
@@ -262,7 +263,7 @@ impl Template<'_> {
                             if !compiled_defs.contains_key(placeholder) {
                                 Template::compile_def_recursive(placeholder, def, defs, compiling, compiled_defs);
                             }
-                            compiled_defs.get(placeholder).unwrap().0.as_str()
+                            compiled_defs.get(placeholder).unwrap_dbg().0.as_str()
                         }
                         None => panic!("Undefined variable: {placeholder}")
                     };
@@ -279,7 +280,7 @@ impl Template<'_> {
                             if !compiled_defs.contains_key(placeholder) {
                                 Template::compile_def_recursive(placeholder, def, defs, compiling, compiled_defs);
                             }
-                            compiled_defs.get(placeholder).unwrap().0.as_str()
+                            compiled_defs.get(placeholder).unwrap_dbg().0.as_str()
                         }
                         None => panic!("Undefined variable: {placeholder}")
                     };

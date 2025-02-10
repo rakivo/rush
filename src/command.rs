@@ -1,4 +1,3 @@
-use crate::flags::Mode;
 use crate::graph::Graph;
 use crate::parser::comp::Job;
 use crate::types::StrDashMap;
@@ -7,7 +6,6 @@ use crate::cr::{Subprocess, SubprocessMap};
 use std::io;
 use std::ptr;
 use std::mem;
-use std::ops::Add;
 use std::fs::File;
 use std::sync::Arc;
 use std::path::Path;
@@ -23,13 +21,13 @@ use crossbeam_channel::Sender;
 use nix::poll::{PollFd, PollFlags};
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
-pub struct Command {
-    pub command: String,
-    pub description: Option::<String>
+pub struct Command<'a> {
+    pub command: &'a str,
+    pub description: Option::<&'a str>
 }
 
 // Custom implementation of `Command` to avoid fork + exec overhead
-impl Command {
+impl<'a> Command<'a> {
     fn create_pipe() -> io::Result::<(File, File)> {
         let mut fds = [0; 2];
         if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
@@ -38,19 +36,6 @@ impl Command {
         let r = unsafe { File::from_raw_fd(fds[0]) };
         let w = unsafe { File::from_raw_fd(fds[1]) };
         Ok((r, w))
-    }
-
-    #[inline]
-    pub fn print_command(self) -> CommandOutput {
-        let Self { command, description } = self;
-        CommandOutput {
-            command,
-            description,
-
-            status: 0,
-            stdout: String::new(),
-            stderr: String::new(),
-        }
     }
 
     pub fn execute(
@@ -111,42 +96,44 @@ impl Command {
             libc::close(stderr_writer_fd);
         }
 
-        let id = *curr_subprocess_id;
-        fd_to_command.insert(stdout_reader_fd, Subprocess {
-            id,
-            command: self.command.to_owned()
-        });
-
-        fd_to_command.insert(stderr_reader_fd, Subprocess {
-            id,
-            command: self.command.to_owned()
-        });
+        {
+            let command = Box::from(self.command);
+            let description = self.description.map(Box::from);
+            let subprocess = Arc::new(Subprocess {pid, command, description});
+            
+            fd_to_command.insert(stdout_reader_fd, Arc::clone(&subprocess));
+            fd_to_command.insert(stderr_reader_fd, subprocess);
+        }
 
         *curr_subprocess_id += 1;
-
         active_fds.fetch_add(1, Ordering::Relaxed);
 
-        let stdout_reader_fd: &'static _ = Box::leak(Box::new(stdout_reader));
-        let stderr_reader_fd: &'static _ = Box::leak(Box::new(stderr_reader));
+        // TODO: dont leak here
+        let stdout_poll_fd = {
+            let stdout_reader_fd: &'static _ = Box::leak(Box::new(stdout_reader));
+            PollFd::new(stdout_reader_fd.as_fd(), PollFlags::POLLIN)
+        };
 
-        let stdout_pollfd = PollFd::new(stdout_reader_fd.as_fd(), PollFlags::POLLIN);
-        let stderr_pollfd = PollFd::new(stderr_reader_fd.as_fd(), PollFlags::POLLIN);
+        let stderr_poll_fd = {
+            let stderr_reader_fd: &'static _ = Box::leak(Box::new(stderr_reader));
+            PollFd::new(stderr_reader_fd.as_fd(), PollFlags::POLLIN)
+        };
 
         #[cfg(feature = "dbg_hardcore")] {
             {
-                let stdout_fd = stdout_pollfd.as_fd().as_raw_fd();
-                let mut stdout_ = format!("sending: FD: {stdout_fd:?} ");
-                if let Some(revents) = stdout_pollfd.revents() {
+                let stdout_fd = stdout_poll_fd.as_fd().as_raw_fd();
+                let mut stdout = format!("sending: FD: {stdout_fd:?} ");
+                if let Some(revents) = stdout_poll_fd.revents() {
                     let revents = format!("revents: {revents:?}");
-                    stdout_.push_str(&revents)
+                    stdout.push_str(&revents)
                 }
-                println!("{stdout_}");
+                println!("{stdout}");
             }
 
             {
-                let stderr_fd = stderr_pollfd.as_fd().as_raw_fd();
+                let stderr_fd = stderr_poll_fd.as_fd().as_raw_fd();
                 let mut stderr = format!("sending: FD: {stderr_fd:?} ");
-                if let Some(revents) = stdout_pollfd.revents() {
+                if let Some(revents) = stdout_poll_fd.revents() {
                     let revents = format!("revents: {revents:?}");
                     stderr.push_str(&revents)
                 }
@@ -154,69 +141,10 @@ impl Command {
             }
         }
 
-        poll_fds_sender.send(stdout_pollfd).unwrap();
-        poll_fds_sender.send(stderr_pollfd).unwrap();
+        _ = poll_fds_sender.send(stdout_poll_fd);
+        _ = poll_fds_sender.send(stderr_poll_fd);
 
         Ok(())
-    }
-}
-
-pub struct CommandOutput {
-    pub status: i32,
-    pub stdout: String,
-    pub stderr: String,
-    pub command: String,
-    pub description: Option::<String>
-}
-
-impl CommandOutput {
-    #[inline]
-    pub fn to_string(&self, mode: &Mode) -> String {
-        if mode.print_commands() {
-            let mut buf = String::with_capacity(self.command.len());
-            buf.push_str(&self.command);
-            buf.push('\n');
-            return buf
-        }
-
-        if mode.quiet() {
-            let CommandOutput { stderr, command, description, .. } = self;
-            if stderr.is_empty() { return const { String::new() } }
-            let command = description.as_ref().unwrap_or(command);
-            let mut buf = String::with_capacity(command.len() + stderr.len());
-            buf.push_str(command);
-            buf.push_str(stderr);
-            return buf
-        }
-
-        let CommandOutput { stdout, stderr, command, description, .. } = self;
-        let n = description.as_ref().map_or(0, |d| 1 + d.len() + 1)
-            .add(command.len())
-            .add(1)
-            .add(stdout.len())
-            .add(stderr.len());
-
-        let mut buf = String::with_capacity(n);
-        if mode.verbose() {
-            if let Some(ref d) = description {
-                buf.push('[');
-                buf.push_str(d);
-                buf.push(']');
-                buf.push('\n');
-            }
-            buf.push_str(&command)
-        } else if let Some(ref d) = description {
-            buf.push('[');
-            buf.push_str(d);
-            buf.push(']');
-        } else {
-            buf.push_str(&command)
-        }
-
-        buf.push('\n');
-        buf.push_str(&stdout);
-        buf.push_str(&stderr);
-        buf
     }
 }
 

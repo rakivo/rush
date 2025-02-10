@@ -10,6 +10,7 @@ mod parser;
 mod consts;
 mod command;
 mod template;
+mod dbg_unwrap;
 
 use db::Db;
 use flags::Flags;
@@ -73,7 +74,7 @@ fn main() -> ExitCode {
     let db = content.and_then(|content| Db::read(content).ok());
 
     let (graph, default_job, transitive_deps) = build_dependency_graph(&context, default_job);
-    _ = CommandRunner::run(&context, graph, transitive_deps, &flags, db, default_job).write_finish();
+    _ = CommandRunner::run(&arena, &context, graph, transitive_deps, flags, db, default_job).write_finish();
 
     ExitCode::SUCCESS
 }

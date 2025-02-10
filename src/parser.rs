@@ -449,7 +449,7 @@ impl<'a> Parser<'a> {
     fn parse_line(&mut self, not_trimmed: &'a str, trimmed: &'a str) {
         if matches!(&self.context, Context::Job { .. } | Context::Rule { .. }) {
             if (trimmed.is_empty() || not_trimmed.as_bytes().first().map_or(false, |c| c.is_ascii_alphanumeric()))
- || not_trimmed.find(|c: char| c.is_ascii_whitespace()).map(|first_space| {
+                || not_trimmed.find(|c: char| c.is_ascii_whitespace()).map(|first_space| {
                     (first_space, &not_trimmed[..first_space])
                 }).map_or(false, |(_, first_token)| matches!(first_token, BUILD | PHONY | RULE))
             {

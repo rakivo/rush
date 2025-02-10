@@ -1,6 +1,7 @@
 use crate::flags::Flags;
 use crate::types::StrHashSet;
 use crate::db::{Db, Metadata};
+use crate::dbg_unwrap::DbgUnwrap;
 use crate::consts::PHONY_TARGETS;
 use crate::parser::comp::{Job, Phony};
 use crate::command::{Command, MetadataCache};
@@ -10,19 +11,19 @@ use crate::graph::{Graph, Levels, topological_sort};
 use std::io;
 use std::sync::Arc;
 use std::path::Path;
+use std::time::Duration;
 use std::hash::{Hash, Hasher};
 use std::collections::HashSet;
 use std::os::fd::{AsFd, AsRawFd};
 use std::thread::{self, JoinHandle};
 use std::sync::atomic::{Ordering, AtomicBool, AtomicUsize};
-use std::time::Duration;
 
+use bumpalo::Bump;
 use dashmap::DashMap;
-use crossbeam_channel::{Sender, unbounded, TryRecvError};
+use crossbeam_channel::{unbounded, Receiver, Sender};
 use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 
-pub type Stdout = Sender::<String>;
-type StdoutThread = JoinHandle::<()>;
+type PollingThread = JoinHandle::<()>;
 type FdSender = Sender::<PollFd<'static>>;
 
 #[derive(PartialEq)]
@@ -31,23 +32,25 @@ enum ExecutorFlow { Ok, Stop }
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct Subprocess {
-    pub id: usize,
-    pub command: String,
+    pub pid: libc::pid_t,
+    pub command: Box::<str>,
+    pub description: Option::<Box::<str>>,
 }
 
-pub type SubprocessMap = DashMap::<i32, Subprocess>;
+pub type SubprocessMap = DashMap::<i32, Arc::<Subprocess>>;
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct CommandRunner<'a> {
+    arena: &'a Bump,
+
     context: &'a Compiled<'a>,
 
     graph: Graph<'a>,
     transitive_deps: Graph<'a>,
 
-    flags: &'a Flags,
+    flags: Arc::<Flags>,
 
-    stdout: Stdout,
-    stdout_thread: StdoutThread,
+    polling_thread: PollingThread,
 
     fd_sender: FdSender,
     active_fds: Arc::<AtomicUsize>,
@@ -57,9 +60,8 @@ pub struct CommandRunner<'a> {
     jobs_done: Arc::<AtomicUsize>,
 
     executed_jobs: usize,
-    curr_subprocess_id: usize,
+    curr_subprocess_id: usize, 
 
-    fail_count: usize,
     not_up_to_date: Option::<&'a str>,
 
     db_read: Option::<Db<'a>>,
@@ -77,7 +79,7 @@ impl<'a> CommandRunner<'a> {
     fn run_levels(&mut self, levels: &Levels<'a>) {
         'outer: for level in levels.into_iter() {
             #[cfg(feature = "dbg")] {
-                print!("RUNNING LEVEL: {level:#?}\n")
+                println!("RUNNING LEVEL: {level:#?}")
             }
 
             {
@@ -90,17 +92,12 @@ impl<'a> CommandRunner<'a> {
                 if self.stop.load(Ordering::Relaxed) { break 'outer }
             }
 
-            let executed = self.executed_jobs;
             loop {
                 let jobs_done = self.jobs_done.load(Ordering::Relaxed);
-                if jobs_done >= executed {
-                    break
-                } else {
-                    #[cfg(feature = "dbg")] {
-                        println!("{jobs_done} < {executed}")
-                    }
-                    thread::sleep(Duration::from_millis(50))
-                }
+                if jobs_done >= self.executed_jobs { break }
+                #[cfg(feature = "dbg")] {
+                    println!("{jobs_done} < {e}", e = self.executed_jobs)
+                } thread::sleep(Duration::from_millis(50))
             }
 
             {
@@ -110,122 +107,196 @@ impl<'a> CommandRunner<'a> {
         }
     }
 
-    fn stdout_thread(
-        stop: Arc<AtomicBool>,
+    #[inline]
+    fn get_process_exit_code(pid: libc::pid_t) -> Option::<i32> {
+        let mut status = 0;
+        unsafe {
+            let ret = libc::waitpid(pid, &mut status, 0);
+            if ret == -1 { return None }
+            if libc::WIFEXITED(status) {
+                Some(libc::WEXITSTATUS(status))
+            } else {
+                None
+            }
+        }
+    }
+
+    #[inline]
+    fn output_to_string(flags: &Flags, command: &str, description: Option::<&str>) -> String {
+        let n = description.as_ref().map_or(0, |d| 1 + d.len() + 1) + command.len() + 1;
+        let mut buf = String::with_capacity(n);
+        if flags.verbose() {
+            if let Some(ref d) = description {
+                buf.push('[');
+                buf.push_str(d);
+                buf.push(']');
+                buf.push('\n');
+            }
+            buf.push_str(&command)
+        } else if let Some(ref d) = description {
+            buf.push('[');
+            buf.push_str(d);
+            buf.push(']');
+        } else {
+            buf.push_str(&command)
+        } buf
+    }
+
+    fn poll(
+        flags: Arc::<Flags>,
+        stop: Arc::<AtomicBool>,
         jobs_done: Arc::<AtomicUsize>,
-        active_fds: Arc<AtomicUsize>,
-        fd_to_subprocess: Arc<SubprocessMap>,
-    ) -> (FdSender, Stdout, StdoutThread) {
-        let (stdout, stdout_recv) = unbounded::<String>();
-        let (fd_sender, poll_fd_recv) = unbounded::<PollFd>();
-        let writer = thread::spawn(move || {
-            let mut poll_fds = Vec::new();
-            let mut seen_fds = HashSet::new();
-            let mut stdout_recv_dropped = false;
-            let mut fds_with_output = HashSet::new();
+        active_fds: Arc::<AtomicUsize>,
+        poll_fd_recv: Receiver::<PollFd>,
+        fd_to_subprocess: Arc::<SubprocessMap>,
+    ) {
+        let mut jobs_failed = 0;
 
-            let mut hung_ids = HashSet::<usize>::new();
-            let mut printed_ids = HashSet::<usize>::new();
-            loop {
-                // Process messages from the main thread
-                match stdout_recv.try_recv() {
-                    Ok(s) => print!("{s}"),
-                    Err(TryRecvError::Disconnected) => stdout_recv_dropped = true,
-                    _ => {}
-                }
+        let mut poll_fds = Vec::new();
+        let mut seen_fds = HashSet::new();
+        let mut fds_with_output = HashSet::new();
 
-                if stdout_recv_dropped && stop.load(Ordering::Relaxed) && active_fds.load(Ordering::Relaxed) == 0 {
-                    break
-                }
+        let mut handled_pids = HashSet::new();
+        let mut printed_pids = HashSet::new();
 
-                while let Ok(poll_fd) = poll_fd_recv.try_recv() {
-                    let fd = poll_fd.as_fd().as_raw_fd();
-                    if !seen_fds.contains(&fd) {
-                        poll_fds.push(poll_fd);
-                        seen_fds.insert(fd);
-                    }
-                }
+        let poll_timeout = PollTimeout::try_from(Duration::from_millis(15)).unwrap_dbg();
 
-                if poll_fds.is_empty() {
-                    continue
-                }
+        loop {
+            if stop.load(Ordering::Relaxed) && active_fds.load(Ordering::Relaxed) == 0 {
+                break
+            }
 
-                if let Err(e) = poll(&mut poll_fds, PollTimeout::MAX) {
-                    _ = print!("poll failed: {e}\n");
-                    break
-                }
-
-                let mut i = 0;
-                while i < poll_fds.len() {
-                    if let Some(revents) = poll_fds[i].revents() {
-                        let fd = poll_fds[i].as_fd().as_raw_fd();
-
-                        #[cfg(feature = "dbg_hardcore")] {
-                            print!("polled: FD: {}, revents={:?}\n", fd, revents);
-                        }
-
-                        if revents.contains(PollFlags::POLLIN) {
-                            fds_with_output.insert(fd);
-
-                            let mut buf = [0; 4096];
-                            let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut _, buf.len()) };
-                            if n > 0 {
-                                let subprocess = fd_to_subprocess.get(&fd).unwrap();
-                                let Subprocess { id, command } = subprocess.value();
-                                let Ok(data) = std::str::from_utf8(&buf[..n as usize]) else {
-                                    print!("command output is not valid utf8\n");
-                                    continue
-                                };
-                                if !printed_ids.contains(&id) {
-                                    // TODO: print command before waiting till its end
-                                    print!("{command}\n");
-                                    _ = printed_ids.insert(*id)
-                                }
-                                print!("{data}");
-                            }
-                        } else if revents.contains(PollFlags::POLLHUP) {
-                            /* drop reference into `fd_to_subprocess` before calling `fd_to_subprocess.remove` */ {
-                                let subprocess = fd_to_subprocess.get(&fd).unwrap();
-                                let Subprocess { id, command } = subprocess.value();
-                                if !hung_ids.contains(id) {
-                                    jobs_done.fetch_add(1, Ordering::Relaxed);
-                                    _ = hung_ids.insert(*id)
-                                }
-
-                                if !fds_with_output.contains(&fd) && !printed_ids.contains(id) {
-                                    printed_ids.insert(*id);
-                                    print!("{command}\n")
-                                }
-                            }
-
-                            poll_fds.remove(i);
-                            fd_to_subprocess.remove(&fd);
-
-                            if active_fds.load(Ordering::Relaxed) > 0 {
-                                _ = active_fds.fetch_sub(1, Ordering::Relaxed)
-                            } continue
-                        }
-                    } i += 1
+            while let Ok(poll_fd) = poll_fd_recv.try_recv() {
+                let fd = poll_fd.as_fd().as_raw_fd();
+                if !seen_fds.contains(&fd) {
+                    poll_fds.push(poll_fd);
+                    _ = seen_fds.insert(fd)
                 }
             }
-        }); (fd_sender, stdout, writer)
+
+            if poll_fds.is_empty() {
+                thread::sleep(Duration::from_millis(25));
+                continue
+            }
+
+            if let Err(e) = poll(&mut poll_fds, poll_timeout) {
+                _ = println!("poll failed: {e}");
+                break
+            }
+
+            let mut i = 0;
+            'outer: while i < poll_fds.len() {
+                if let Some(revents) = poll_fds[i].revents() {
+                    let fd = poll_fds[i].as_fd().as_raw_fd();
+
+                    #[cfg(feature = "dbg_hardcore")] {
+                        println!("polled: FD: {}, revents={:?}", fd, revents);
+                    }
+
+                    if revents.contains(PollFlags::POLLIN) {
+                        fds_with_output.insert(fd);
+
+                        let mut buf = [0; 4096];
+                        let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut _, buf.len()) };
+                        if n > 0 {
+                            let subprocess = fd_to_subprocess.get(&fd).unwrap_dbg();
+                            let Subprocess { pid, command, description } = subprocess.value().as_ref();
+                            let Ok(data) = std::str::from_utf8(&buf[..n as usize]) else {
+                                println!("command output is not valid utf8");
+                                continue
+                            };
+                            if !printed_pids.contains(pid) {
+                                if !flags.quiet() {
+                                    let output = Self::output_to_string(&flags, &command, description.as_deref());
+                                    println!("{output}");
+                                }
+                                _ = printed_pids.insert(*pid)
+                            }
+                            print!("{data}");
+                        }
+                    } else if revents.contains(PollFlags::POLLHUP) {
+                        /* drop reference into `fd_to_subprocess` before calling `fd_to_subprocess.remove` */ {
+                            let subprocess = fd_to_subprocess.get(&fd).unwrap_dbg();
+                            let Subprocess { pid, command, description } = subprocess.value().as_ref();
+
+                            if !handled_pids.contains(pid) {
+                                _ = jobs_done.fetch_add(1, Ordering::Relaxed)
+                            }
+
+                            if !fds_with_output.contains(&fd) && !printed_pids.contains(pid) {
+                                if !flags.quiet() {
+                                    let output = Self::output_to_string(&flags, &command, description.as_deref());
+                                    println!("{output}");
+                                }
+                                _ = printed_pids.insert(*pid);
+                            }
+
+                            if !handled_pids.contains(pid) {
+                                let exit_code = Self::get_process_exit_code(*pid);
+                                if exit_code.map_or(false, |code| code != 0) {
+                                    jobs_failed += 1;
+                                    if flags.max_fail_count().map_or(false, |max| jobs_failed >= *max) {
+                                        stop.store(true, Ordering::Relaxed);
+                                        break 'outer
+                                    }
+                                }
+                                _ = handled_pids.insert(*pid)
+                            }
+                        }
+
+                        poll_fds.remove(i);
+                        fd_to_subprocess.remove(&fd);
+
+                        if active_fds.load(Ordering::Relaxed) > 0 {
+                            _ = active_fds.fetch_sub(1, Ordering::Relaxed)
+                        }
+
+                        continue
+                    }
+                } i += 1
+            }
+        }
+    }
+
+    #[inline]
+    fn polling_thread(
+        flags: Arc::<Flags>,
+        stop: Arc::<AtomicBool>,
+        jobs_done: Arc::<AtomicUsize>,
+        active_fds: Arc::<AtomicUsize>,
+        fd_to_subprocess: Arc::<SubprocessMap>,
+    ) -> (FdSender, PollingThread) {
+        let (fd_sender, poll_fd_recv) = unbounded();
+        let polling = thread::spawn(move || {
+            Self::poll(
+                flags,
+                stop,
+                jobs_done,
+                active_fds,
+                poll_fd_recv,
+                fd_to_subprocess
+            )
+        }); (fd_sender, polling)
     }
 
     #[inline]
     fn new(
+        arena: &'a Bump,
         context: &'a Compiled,
         graph: Graph<'a>,
         transitive_deps: Graph<'a>,
-        flags: &'a Flags,
+        flags: Flags,
         db_read: Option::<Db<'a>>,
         default_job: DefaultJob<'a>,
     ) -> Self {
         let n = context.jobs.len();
+        let flags = Arc::new(flags);
         let stop = Arc::new(AtomicBool::new(false));
         let jobs_done = Arc::new(AtomicUsize::new(0));
         let active_fds = Arc::new(AtomicUsize::new(0));
         let fd_to_subprocess = Arc::new(DashMap::new());
-        let (fd_sender, stdout, stdout_thread) = Self::stdout_thread(
+        let (fd_sender, polling_thread) = Self::polling_thread(
+            Arc::clone(&flags),
             Arc::clone(&stop),
             Arc::clone(&jobs_done),
             Arc::clone(&active_fds),
@@ -235,37 +306,37 @@ impl<'a> CommandRunner<'a> {
             stop,
             flags,
             graph,
-            stdout,
+            arena,
             context,
             db_read,
             jobs_done,
             fd_sender,
             active_fds,
             default_job,
-            stdout_thread,
+            polling_thread,
             transitive_deps,
             fd_to_subprocess,
 
-            fail_count: 0,
             executed_jobs: 0,
-            db_write: Db::write(),
             not_up_to_date: None,
             curr_subprocess_id: 0,
-            executed: StrHashSet::with_capacity(n),
+            db_write: Db::write(),
             metadata_cache: MetadataCache::new(n),
+            executed: StrHashSet::with_capacity(n),
         }
     }
 
     #[inline]
     pub fn run(
+        arena: &'a Bump,
         context: &'a Compiled,
         graph: Graph<'a>,
         transitive_deps: Graph<'a>,
-        flags: &'a Flags,
+        flags: Flags,
         db_read: Option::<Db<'a>>,
         default_job: DefaultJob<'a>,
     ) -> Db<'a> {
-        let mut cr = Self::new(context, graph, transitive_deps, flags, db_read, default_job);
+        let mut cr = Self::new(arena, context, graph, transitive_deps, flags, db_read, default_job);
 
         let levels = if let Some(job) = default_job {
             cr.run_target(job);
@@ -282,36 +353,20 @@ impl<'a> CommandRunner<'a> {
     fn finish(self) -> Db<'a> {
         if self.flags.check_is_up_to_date() {
             match self.not_up_to_date {
-                None => print!("[up to date]\n"),
-                Some(target) => print!("[{target} is not up to date]\n")
+                None => println!("[up to date]"),
+                Some(target) => println!("[{target} is not up to date]")
             }
         }
         self.stop.store(true, Ordering::Relaxed);
-        drop(self.stdout);
-        _ = self.stdout_thread.join();
+        _ = self.polling_thread.join();
         self.db_write
     }
 
     #[inline]
-    fn job_failed(&mut self) -> bool {
-        self.flags.max_fail_count().map_or(false, |max| {
-            self.fail_count += 1;
-            if self.fail_count >= *max {
-                self.stop.store(true, Ordering::Relaxed);
-                true
-            } else {
-                false
-            }
-        })
-    }
-
-    #[inline]
-    fn execute_command(&mut self, command: &Command, target: &str) -> io::Result::<()> {
+    fn execute_command(&mut self, command: &Command<'a>, target: &str) -> io::Result::<()> {
         if self.flags.print_commands() {
             return Ok(())
         }
-
-        self.executed_jobs += 1;
 
         command.execute(
             &mut self.curr_subprocess_id,
@@ -321,10 +376,10 @@ impl<'a> CommandRunner<'a> {
         ).map_err(|e| {
             print!("[could not execute job: {target}: {e}]\n");
             e
-        })
+        }).map(|_| self.executed_jobs += 1)
     }
 
-    fn run_phony(&mut self, job: &Job<'a>) {
+    fn run_phony(&mut self, job: &'a Job<'a>) {
         match &job.phony {
             Phony::Phony { command, aliases, .. } => {
                 aliases.iter().filter_map(|_job| {
@@ -340,8 +395,8 @@ impl<'a> CommandRunner<'a> {
                     }
                 }).for_each(|job| self.resolve_and_run_target(job));
 
-                _ = command.as_ref().map(|c| {
-                    let command = Command { command: c.to_owned(), description: None };  
+                _ = command.as_ref().map(|command| {
+                    let command = Command { command, description: None };
                     self.execute_command(&command, job.target)
                 });
             },
@@ -373,7 +428,7 @@ impl<'a> CommandRunner<'a> {
     }
 
     #[inline]
-    fn run_target(&mut self, job: &Job<'a>) {
+    fn run_target(&mut self, job: &'a Job<'a>) {
         if PHONY_TARGETS.contains(&job.target) {
             self.run_phony(job);
             return
@@ -400,7 +455,11 @@ impl<'a> CommandRunner<'a> {
 
     #[inline]
     fn needs_rebuild(&self, job: &Job<'a>, command: &str) -> bool {
-        if self.flags.always_build() { return true }
+        // in `check_is_up_to_date` mode `always_build` is disabled
+        // TODO: make that happen in the `Mode` struct
+        if self.flags.always_build() && !self.flags.check_is_up_to_date() {
+            return true
+        }
         self.db_read.as_ref().map_or(false, |db| {
             db.metadata_read(job.target).map_or(false, |md| {
                 md.command_hash != Self::hash(command)
@@ -434,27 +493,31 @@ impl<'a> CommandRunner<'a> {
             }
 
             if let Err(e) = self.create_dirs_if_needed(job.target) {
-                print!{                    "[could not create build directory for target: {target}: {e}]\n",
+                print!{
+                    "[could not create build directory for target: {target}: {e}]\n",
                     target = job.target
                 };
                 return ExecutorFlow::Ok
             }
 
             let description = rule.description.as_ref().and_then(|d| d.compile(&job, &self.context.defs).map_err(|e| {
-                print!("{e}\n");
+                println!("{e}");
             }).ok());
+
+            let command = self.arena.alloc_str(&command);
+            let description = description.as_ref().map(|d| self.arena.alloc_str(d) as &_);
 
             let command = Command { command, description };
             _ = self.execute_command(&command, job.target);
         } else {
             let mut any_err = false;
             if let Err(err) = rule.command.check(&job.shadows, &self.context.defs) {
-                print!("{err}\n");
+                println!("{err}");
                 any_err = true
             }
 
             if let Some(Err(err)) = rule.description.as_ref().map(|d| d.check(&job.shadows, &self.context.defs)) {
-                print!("{err}\n");
+                println!("{err}");
                 any_err = true
             }
 
@@ -465,12 +528,12 @@ impl<'a> CommandRunner<'a> {
                     })
                 }) && !self.flags.check_is_up_to_date()
             {
-                print!("[{target} is already built]\n", target = job.target)
+                println!("[{target} is already built]", target = job.target)
             }
         } ExecutorFlow::Ok
     }
 
-    fn resolve_and_run(&mut self, job: &Job<'a>) {
+    fn resolve_and_run(&mut self, job: &'a Job<'a>) {
         // TODO: reserve total amount of jobs here
         let mut stack = vec![job];
         while let Some(job) = stack.pop() {
@@ -491,7 +554,7 @@ impl<'a> CommandRunner<'a> {
                         break
                     } else {
                         #[cfg(feature = "dbg")] {
-                            print!("[dependency {input} is assumed to exist]\n");
+                            println!("[dependency {input} is assumed to exist]")
                         }
                     }
                 }
