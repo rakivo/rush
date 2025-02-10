@@ -25,6 +25,7 @@ pub struct Subprocess {
 
 pub type SubprocessMap = DashMap::<i32, Arc::<Subprocess>>;
 
+#[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct Poller {
     pub flags: Arc::<Flags>,
     pub stop: Arc::<AtomicBool>,
