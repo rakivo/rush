@@ -1,6 +1,7 @@
 use crate::parser::comp::Phony;
+use crate::dbg_unwrap::DbgUnwrap;
 use crate::parser::{Compiled, DefaultJob};
-use crate::types::{StrHashMap, StrHashSet};
+use crate::types::{StrHashMap, StrHashSet, StrIndexSet};
 
 use std::fs;
 use std::sync::Arc;
@@ -10,17 +11,20 @@ use std::collections::VecDeque;
 use tramer::tramer;
 
 pub type Levels<'a> = Vec::<Vec::<&'a str>>;
-pub type Graph<'a> = StrHashMap::<'a, Arc::<StrHashSet<'a>>>;
+pub type Graph<'a> = StrHashMap::<'a, Arc::<StrIndexSet<'a>>>;
 
 #[cfg_attr(feature = "dbg", tramer("nanos"))]
-pub fn build_dependency_graph<'a>(processed: &'a Compiled, default_job: DefaultJob<'a>) -> (Graph<'a>, DefaultJob<'a>, Graph<'a>) {
+pub fn build_dependency_graph<'a>(
+    processed: &'a Compiled,
+    default_job: DefaultJob<'a>
+) -> (Graph<'a>, DefaultJob<'a>, Graph<'a>) {
     fn collect_deps<'a>(
         node: &'a str,
         parsed: &'a Compiled,
         graph: &mut Graph<'a>,
         visited: &mut StrHashSet<'a>,
         transitive_deps: &mut Graph<'a>
-    ) -> Arc::<StrHashSet<'a>> {
+    ) -> Arc::<StrIndexSet<'a>> {
         if visited.contains(node) {
             return transitive_deps.get(node).cloned().unwrap_or_default();
         }
@@ -29,12 +33,12 @@ pub fn build_dependency_graph<'a>(processed: &'a Compiled, default_job: DefaultJ
 
         let mut deps = parsed.jobs.get(node).map(|job| {
             match &job.phony {
-                Phony::Phony { .. } => { StrHashSet::default() },
+                Phony::Phony { .. } => { StrIndexSet::default() },
                 Phony::NotPhony { deps, inputs, .. } => {
                     inputs.iter()
                         .chain(deps.iter())
                         .cloned()
-                        .collect::<StrHashSet>()
+                        .collect::<StrIndexSet>()
                 } 
             }
         }).unwrap_or_default();
@@ -46,15 +50,11 @@ pub fn build_dependency_graph<'a>(processed: &'a Compiled, default_job: DefaultJ
                 if let Some(ref depfile_template) = rule.depfile {
                     let depfile_path = match depfile_template.compile(job, &parsed.defs) {
                         Ok(ok) => ok,
-                        Err(e) => report!(job.loc, "{e}")
+                        Err(e) => report_panic!(job.loc, "{e}")
                     };
                     if let Ok(depfile) = fs::read_to_string(&depfile_path) {
                         let depfile = Box::leak(depfile.into_boxed_str());
-                        let colon_idx = depfile.find(':');
-                        let colon_idx = {
-                            #[cfg(feature = "dbg")] { colon_idx.unwrap() }
-                            #[cfg(not(feature = "dbg"))] unsafe { colon_idx.unwrap_unchecked() }
-                        };
+                        let colon_idx = depfile.find(':').unwrap_dbg();
                         let depfile_deps = depfile[colon_idx + 1..]
                             .split_ascii_whitespace()
                             .filter(|f| *f != "\\");
@@ -91,9 +91,9 @@ pub fn build_dependency_graph<'a>(processed: &'a Compiled, default_job: DefaultJ
     }
 
     let n = processed.jobs.len();
-    let mut graph = StrHashMap::with_capacity(n);
+    let mut graph = Graph::with_capacity(n);
     let mut visited = StrHashSet::with_capacity(n);
-    let mut transitive_deps = StrHashMap::with_capacity(n);
+    let mut transitive_deps = Graph::with_capacity(n);
 
     for target in processed.jobs.keys() {
         collect_deps(target, processed, &mut graph, &mut visited, &mut transitive_deps);
@@ -101,9 +101,13 @@ pub fn build_dependency_graph<'a>(processed: &'a Compiled, default_job: DefaultJ
 
     let default_job = default_job.or({
         if let Some(ref dt) = processed.default_target {
-            processed.jobs.get(dt.as_str())
+            let job = processed.jobs.get(dt.as_str());
+            debug_assert!(job.is_some());
+            job
         } else if graph.is_empty() {
-            processed.jobs.values().next()
+            let job = processed.jobs.values().next();
+            debug_assert!(job.is_some());
+            job
         } else {
             let mut reverse_graph = StrHashMap::with_capacity(n);
             for (node, deps) in graph.iter() {

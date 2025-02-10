@@ -1,264 +1,142 @@
 use crate::flags::Flags;
-use crate::types::StrDashSet;
+use crate::types::StrHashSet;
 use crate::db::{Db, Metadata};
 use crate::consts::PHONY_TARGETS;
 use crate::parser::comp::{Job, Phony};
+use crate::command::{Command, MetadataCache};
 use crate::parser::{Rule, Compiled, DefaultJob};
 use crate::graph::{Graph, Levels, topological_sort};
-use crate::command::{Command, MetadataCache, CommandOutput};
+use crate::poll::{Poller, FdSender, PollingThread};
 
+use std::io;
+use std::thread;
 use std::sync::Arc;
 use std::path::Path;
-use std::io::{self, Write};
+use std::time::Duration;
 use std::hash::{Hash, Hasher};
-use std::thread::{self, JoinHandle};
-use std::sync::atomic::{Ordering, AtomicU64, AtomicBool, AtomicUsize};
+use std::sync::atomic::{Ordering, AtomicBool, AtomicUsize};
 
-use dashmap::DashSet;
-use rayon::prelude::*;
-use fxhash::FxBuildHasher;
-use crossbeam_channel::{unbounded, Sender};
-
-type Stdout = Sender::<String>;
-type StdoutThread = JoinHandle::<()>;
-
-macro_rules! cr_print {
-    ($self: expr, $($arg:tt)*) => {{
-        #[cfg(feature = "dbg")] {
-            _ = $self.print(format!{
-                "{f}:{l}:{c}:\n",
-                f = file!(), l = line!(), c = column!()
-            });
-        }
-        _ = $self.print(std::fmt::format(format_args!($($arg)*)));
-    }};
-}
-
-macro_rules! cr_report {
-    ($self: expr, $($arg:tt)*) => {{
-        #[cfg(feature = "dbg")] {
-            _ = $self.print(format!{
-                "{f}:{l}:{c}:\n",
-                f = file!(), l = line!(), c = column!()
-            });
-        }
-        _ = $self.print(report_fmt!($($arg)*));
-    }};
-}
+use bumpalo::Bump;
+use dashmap::DashMap;
 
 #[derive(PartialEq)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 enum ExecutorFlow { Ok, Stop }
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
-struct AtomicStr { ptr: AtomicU64, len: AtomicU64 }
-
-impl AtomicStr {
-    #[inline(always)]
-    fn empty() -> Self {
-        Self { ptr: AtomicU64::new(0), len: AtomicU64::new(0) }
-    }
-
-    #[inline(always)]
-    fn store(&self, s: &str, ordering: Ordering) {
-        self.ptr.store(s.as_ptr() as u64, ordering);
-        self.len.store(s.len() as u64, ordering);
-    }
-
-    #[inline]
-    fn load(&self, ordering: Ordering) -> Option::<&str> {
-        let ptr = self.ptr.load(ordering);
-        if ptr == 0 { return None }
-        let len = self.len.load(ordering);
-        let s = unsafe {
-            std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr as *const _, len as _))
-        };
-        Some(s)
-    }
-}
-
-#[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct CommandRunner<'a> {
+    arena: &'a Bump,
+
     context: &'a Compiled<'a>,
 
     graph: Graph<'a>,
     transitive_deps: Graph<'a>,
 
-    flags: &'a Flags,
+    poller: Arc::<Poller>,
+    polling_thread: PollingThread,
 
-    stdout: Stdout,
-    stdout_thread: StdoutThread,
+    fd_sender: FdSender,
 
-    stop: AtomicBool,
+    executed_jobs: usize,
 
-    fail_count: AtomicUsize,
-    not_up_to_date: AtomicStr,
+    not_up_to_date: Option::<&'a str>,
 
     db_read: Option::<Db<'a>>,
     db_write: Db<'a>,
 
     default_job: DefaultJob<'a>,
 
-    executed: StrDashSet<'a>,
+    executed: StrHashSet<'a>,
 
     metadata_cache: MetadataCache<'a>,
 }
 
+impl std::ops::Deref for CommandRunner<'_> {
+    type Target = Poller;
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target { &self.poller }
+}
+
 impl<'a> CommandRunner<'a> {
     #[inline]
-    fn run_levels(&self, levels: &Levels<'a>) {
-        for level in levels.into_iter() {
-            if level.into_par_iter().filter_map(|t| self.context.jobs.get(t)).try_for_each(|job| {
+    fn run_levels(&mut self, levels: &Levels<'a>) {
+        'outer: for level in levels.into_iter() {
+            #[cfg(feature = "dbg")] {
+                println!("RUNNING LEVEL: {level:#?}")
+            }
+
+            {
+                self.jobs_done.store(0, Ordering::Relaxed);
+                self.executed_jobs = 0
+            }
+
+            for job in level.into_iter().filter_map(|t| self.context.jobs.get(t)) {
                 self.resolve_and_run(job);
-                if self.stop.load(Ordering::Relaxed) { Err(()) } else { Ok(()) }
-            }).is_err() {
-                cr_print!(self, "[execution failed]\n");
-                break
+                if self.stop.load(Ordering::Relaxed) { break 'outer }
+            }
+
+            loop {
+                let jobs_done = self.jobs_done.load(Ordering::Relaxed);
+                if jobs_done >= self.executed_jobs { break }
+                #[cfg(feature = "dbg")] {
+                    println!("{jobs_done} < {e}", e = self.executed_jobs)
+                } thread::sleep(Duration::from_millis(50))
+            }
+
+            {
+                self.executed_jobs = 0;
+                self.jobs_done.store(0, Ordering::Relaxed)
             }
         }
     }
 
-    #[inline]
-    fn stdout_thread() -> (Stdout, StdoutThread) {
-        let (stdout, stdout_recv) = unbounded::<String>();
-        let writer = thread::spawn(move || {
-            let mut stdout_handle = io::stdout().lock();
-            for s in stdout_recv {
-                _ = stdout_handle.write_all(s.as_bytes())
-            }
-            _ = stdout_handle.flush();
-        }); (stdout, writer)
-    }
-
-    #[inline]
     fn new(
+        arena: &'a Bump,
         context: &'a Compiled,
         graph: Graph<'a>,
         transitive_deps: Graph<'a>,
-        flags: &'a Flags,
+        flags: Flags,
         db_read: Option::<Db<'a>>,
         default_job: DefaultJob<'a>,
     ) -> Self {
         let n = context.jobs.len();
-        let (stdout, stdout_thread) = Self::stdout_thread();
+        let (poller, fd_sender, polling_thread) = Poller::spawn(
+            Arc::new(flags),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(DashMap::new())
+        );
         Self {
-            flags,
             graph,
-            stdout,
+            arena,
+            poller,
             context,
             db_read,
+            fd_sender,
             default_job,
-            stdout_thread,
+            polling_thread,
             transitive_deps,
+
+            executed_jobs: 0,
+            not_up_to_date: None,
             db_write: Db::write(),
-            stop: AtomicBool::new(false),
-            fail_count: AtomicUsize::new(0),
-            not_up_to_date: AtomicStr::empty(),
             metadata_cache: MetadataCache::new(n),
-            executed: DashSet::with_capacity_and_hasher(n, FxBuildHasher::default()),
+            executed: StrHashSet::with_capacity(n),
         }
-    }
-
-    #[inline]
-    pub fn run(
-        context: &'a Compiled,
-        graph: Graph<'a>,
-        transitive_deps: Graph<'a>,
-        flags: &'a Flags,
-        db_read: Option::<Db<'a>>,
-        default_job: DefaultJob<'a>,
-    ) -> Db<'a> {
-        let cr = Self::new(context, graph, transitive_deps, flags, db_read, default_job);
-
-        let levels = if let Some(job) = default_job {
-            cr.run_target(job);
-            return cr.finish()
-        } else {
-            topological_sort(&cr.graph)
-        };
-
-        _ = cr.run_levels(&levels);
-        cr.finish()
     }
 
     #[inline]
     fn finish(self) -> Db<'a> {
         if self.flags.check_is_up_to_date() {
-            let not_up_to_date = self.not_up_to_date.load(Ordering::Relaxed);
-            match not_up_to_date {
-                None => cr_print!(self, "[up to date]\n"),
-                Some(target) => cr_print!(self, "[{target} is not up to date]\n")
+            match self.not_up_to_date {
+                None => println!("[up to date]"),
+                Some(target) => println!("[{target} is not up to date]")
             }
         }
-        drop(self.stdout);
-        _ = self.stdout_thread.join();
+        self.stop.store(true, Ordering::Relaxed);
+        _ = self.polling_thread.join();
         self.db_write
-    }
-
-    #[inline]
-    fn job_failed(&self) -> bool {
-        self.flags.max_fail_count().map_or(false, |max| {
-            self.fail_count.fetch_add(1, Ordering::Relaxed);
-            if self.fail_count.load(Ordering::Relaxed) >= *max {
-                self.stop.store(true, Ordering::Relaxed);
-                true
-            } else {
-                false
-            }
-        })
-    }
-
-    #[inline]
-    fn execute_command(&self, command: Command, target: &str) -> io::Result::<(CommandOutput, bool)> {
-        if self.flags.print_commands() {
-            return Ok((command.print_command(), false))
-        }
-
-        command.execute().map_err(|e| {
-            cr_print!(self, "[could not execute job: {target}: {e}]\n");
-            e
-        }).map(|command_output| {
-            let failed = if command_output.status != 0 {
-                self.job_failed()
-            } else {
-                false
-            }; (command_output, failed)
-        })
-    }
-
-    fn run_phony(&self, job: &Job<'a>) {
-        match &job.phony {
-            Phony::Phony { command, aliases, .. } => {
-                aliases.iter().filter_map(|_job| {
-                    match self.context.jobs.get(_job.as_str()) {
-                        Some(j) => Some(j),
-                        None => {
-                            cr_report!{
-                                self,
-                                job.loc,
-                                "undefined job: {target}\nNOTE: in phony jobs you can only alias jobs\n",
-                                target = _job
-                            };
-                            None
-                        }
-                    }
-                }).for_each(|job| self.resolve_and_run_target(job));
-
-                if let Some(Ok((command_output, _))) = {
-                    command.as_ref().map(|c| {
-                        let command = Command { command: c.to_owned(), description: None };  
-                        self.execute_command(command, job.target)
-                    })
-                } {
-                    cr_print!{
-                        self,
-                        "{output}",
-                        output = command_output.to_string(&self.flags)
-                    };
-                }
-            },
-            Phony::NotPhony { .. } => unreachable!()
-        }
     }
 
     #[inline]
@@ -275,116 +153,169 @@ impl<'a> CommandRunner<'a> {
     }
 
     #[inline]
-    fn resolve_and_run_target(&self, job: &Job<'a>) {
+    fn resolve_and_run_target(&mut self, job: &Job<'a>) {
         let levels = {
             let subgraph = self.build_subgraph(job.target);
             topological_sort(&subgraph)
         };
-
         _ = self.run_levels(&levels)
     }
 
     #[inline]
-    fn run_target(&self, job: &Job<'a>) {
-        if PHONY_TARGETS.contains(&job.target) {
-            self.run_phony(job);
-            return
+    pub fn run(
+        arena: &'a Bump,
+        context: &'a Compiled,
+        graph: Graph<'a>,
+        transitive_deps: Graph<'a>,
+        flags: Flags,
+        db_read: Option::<Db<'a>>,
+        default_job: DefaultJob<'a>,
+    ) -> Db<'a> {
+        let mut cr = Self::new(
+            arena,
+            context,
+            graph,
+            transitive_deps,
+            flags,
+            db_read,
+            default_job
+        );
+
+        let levels = if let Some(job) = default_job {
+            if PHONY_TARGETS.contains(&job.target) {
+                cr.run_phony(job);
+            } else {
+                cr.resolve_and_run_target(job);
+            }
+            return cr.finish()
+        } else {
+            topological_sort(&cr.graph)
+        };
+
+        _ = cr.run_levels(&levels);
+        cr.finish()
+    }
+
+    #[inline]
+    fn execute_command(&mut self, command: &Command<'a>, target: &str) -> io::Result::<()> {
+        if self.flags.print_commands() {
+            let output = command.to_string(&self.flags);
+            println!("{output}");
+            return Ok(())
         }
 
-        _ = self.resolve_and_run_target(job)
+        command.execute(&self.poller, self.fd_sender.clone()).map_err(|e| {
+            println!("[could not execute job: {target}: {e}]");
+            e
+        }).map(|_| self.executed_jobs += 1)
     }
 
     #[inline]
-    fn create_dirs_if_needed(&self, path: &str) -> io::Result::<()> {
-        let path: &Path = path.as_ref();
-        if let Some(parent) = path.parent() {
-            if parent.exists() { return Ok(()) }
-            std::fs::create_dir_all(parent)?
-        } Ok(())
+    fn run_phony(&mut self, job: &'a Job<'a>) {
+        let Phony::Phony { command, aliases, .. } = &job.phony else { unreachable!() };
+
+        aliases.iter().filter_map(|_job| {
+            match self.context.jobs.get(_job.as_str()) {
+                Some(j) => Some(j),
+                None => report_panic!{
+                    job.loc,
+                    "undefined job: {target}\nNOTE: in phony jobs you can only alias jobs\n",
+                    target = _job
+                }
+            }
+        }).for_each(|job| self.resolve_and_run_target(job));
+
+        _ = command.as_ref().map(|command| {
+            let command = Command { command, description: None };
+            self.execute_command(&command, job.target)
+        });
     }
 
-    #[inline(always)]
-    fn print(&self, s: String) {
-        #[cfg(feature = "dbg")] {
-            self.stdout.send(s).unwrap()
-        } #[cfg(not(feature = "dbg"))] {
-            _ = self.stdout.send(s)
+    fn execute_job(&mut self, job: &Job<'a>, rule: &Rule) -> ExecutorFlow {
+        #[inline(always)]
+        fn hash(command: &str) -> u64 {
+            let mut hasher = fnv::FnvHasher::default();
+            command.hash(&mut hasher);
+            hasher.finish()
         }
-    }
 
-    #[inline]
-    fn hash(command: &str) -> u64 {
-        let mut hasher = fnv::FnvHasher::default();
-        command.hash(&mut hasher);
-        hasher.finish()
-    }
+        #[inline]
+        fn compile_command<'a>(_self: &CommandRunner<'a>, job: &Job<'a>, rule: &Rule) -> Option::<String> {
+            rule.command.compile(job, &_self.context.defs).map_err(|e| {
+                println!("{e}");
+                rule.description.as_ref()
+                    .and_then(|d| d.check(&job.shadows, &_self.context.defs).err())
+                    .map(|err| println!("{err}"));
+            }).map(|command| {
+                _self.db_write.metadata_write(job.target, Metadata {
+                    command_hash: hash(&command)
+                }); command
+            }).ok()
+        }
 
-    #[inline]
-    fn needs_rebuild(&self, job: &Job<'a>, command: &str) -> bool {
-        if self.flags.always_build() { return true }
-        self.db_read.as_ref().map_or(false, |db| {
-            db.metadata_read(job.target).map_or(false, |md| {
-                md.command_hash != Self::hash(command)
-            })
-        }) || self.metadata_cache.needs_rebuild(job, &self.transitive_deps)
-    }
+        #[inline]
+        fn needs_rebuild<'a>(_self: &CommandRunner<'a>, job: &Job<'a>, command: &str) -> bool {
+            // in `check_is_up_to_date` mode `always_build` is disabled
+            // TODO: make that happen in the `Mode` struct
+            if _self.flags.always_build() && !_self.flags.check_is_up_to_date() {
+                return true
+            }
+            _self.db_read.as_ref().map_or(false, |db| {
+                db.metadata_read(job.target).map_or(false, |md| {
+                    md.command_hash != hash(command)
+                })
+            }) || _self.metadata_cache.needs_rebuild(job, &_self.transitive_deps)
+        }
 
-    #[inline]
-    fn compile_command(&self, job: &Job<'a>, rule: &Rule) -> Option::<String> {
-        rule.command.compile(job, &self.context.defs).map_err(|e| {
-            cr_print!(self, "{e}\n");
-            rule.description.as_ref().and_then(|d| d.check(&job.shadows, &self.context.defs).err()).map(|err| {
-                cr_print!(self, "{err}\n");
-            });
-        }).map(|command| {
-            self.db_write.metadata_write(job.target, Metadata {
-                command_hash: Self::hash(&command)
-            }); command
-        }).ok()
-    }
+        #[inline]
+        fn create_dirs_if_needed(path: &str) -> io::Result::<()> {
+            let path: &Path = path.as_ref();
+            if let Some(parent) = path.parent() {
+                if parent.exists() { return Ok(()) }
+                std::fs::create_dir_all(parent)?
+            } Ok(())
+        }
 
-    fn execute_job(&self, job: &Job<'a>, rule: &Rule) -> ExecutorFlow {
-        let Some(command) = self.compile_command(job, rule) else {
+        let Some(command) = compile_command(self, job, rule) else {
             return ExecutorFlow::Ok
         };
 
-        if self.needs_rebuild(job, &command) {
+        if needs_rebuild(self, job, &command) {
             if self.flags.check_is_up_to_date() {
-                self.not_up_to_date.store(job.target, Ordering::Relaxed);
+                self.not_up_to_date = Some(job.target);
                 return ExecutorFlow::Stop
             }
 
-            if let Err(e) = self.create_dirs_if_needed(job.target) {
-                cr_print!{
-                    self,
-                    "[could not create build directory for target: {target}: {e}]\n",
+            if let Err(e) = create_dirs_if_needed(job.target) {
+                println!{
+                    "[could not create build directory for target: {target}: {e}]",
                     target = job.target
                 };
                 return ExecutorFlow::Ok
             }
 
-            let description = rule.description.as_ref().and_then(|d| d.compile(&job, &self.context.defs).map_err(|e| {
-                cr_print!(self, "{e}\n");
-            }).ok());
+            let description = rule.description.as_ref()
+                .and_then(|d| {
+                    d.compile(&job, &self.context.defs)
+                        .map_err(|e| {
+                            println!("{e}");
+                        }).ok()
+                });
+
+            let command = self.arena.alloc_str(&command);
+            let description = description.as_ref().map(|d| self.arena.alloc_str(d) as &_);
 
             let command = Command { command, description };
-            let Ok((command_output, failed)) = self.execute_command(command, job.target) else {
-                return ExecutorFlow::Ok
-            };
-
-            let command_output = command_output.to_string(&self.flags);
-            cr_print!(self, "{command_output}");
-
-            return if failed { ExecutorFlow::Stop } else { ExecutorFlow::Ok }
+            _ = self.execute_command(&command, job.target);
         } else {
             let mut any_err = false;
             if let Err(err) = rule.command.check(&job.shadows, &self.context.defs) {
-                cr_print!(self, "{err}\n");
+                println!("{err}");
                 any_err = true
             }
 
             if let Some(Err(err)) = rule.description.as_ref().map(|d| d.check(&job.shadows, &self.context.defs)) {
-                cr_print!(self, "{err}\n");
+                println!("{err}");
                 any_err = true
             }
 
@@ -395,12 +326,12 @@ impl<'a> CommandRunner<'a> {
                     })
                 }) && !self.flags.check_is_up_to_date()
             {
-                cr_print!(self, "[{target} is already built]\n", target = job.target)
+                println!("[{target} is already built]", target = job.target)
             }
         } ExecutorFlow::Ok
     }
 
-    fn resolve_and_run(&self, job: &Job<'a>) {
+    fn resolve_and_run(&mut self, job: &'a Job<'a>) {
         // TODO: reserve total amount of jobs here
         let mut stack = vec![job];
         while let Some(job) = stack.pop() {
@@ -421,7 +352,7 @@ impl<'a> CommandRunner<'a> {
                         break
                     } else {
                         #[cfg(feature = "dbg")] {
-                            cr_print!(self, "[dependency {input} is assumed to exist]\n");
+                            println!("[dependency {input} is assumed to exist]")
                         }
                     }
                 }
@@ -434,8 +365,7 @@ impl<'a> CommandRunner<'a> {
                 self.executed.insert(job.target);
                 if self.execute_job(job, rule) == ExecutorFlow::Stop { break }
             } else {
-                cr_report!{
-                    self,
+                report_panic!{
                     job.loc,
                     "no rule named: {rule} found for job {target}\n",
                     rule = job_rule,

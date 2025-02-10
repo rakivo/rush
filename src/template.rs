@@ -1,5 +1,6 @@
 use crate::loc::Loc;
 use crate::types::StrHashSet;
+use crate::dbg_unwrap::DbgUnwrap;
 use crate::parser::comp::{Job, Defs};
 use crate::parser::{prep, comp, Shadows};
 
@@ -61,7 +62,7 @@ impl Template<'_> {
                 s[placeholder_start + 1..]
                     .find('}')
                     .map(|end| placeholder_start + 1 + end)
-                    .unwrap_or_else(|| report!(loc, "missing closing brace for placeholder"))
+                    .unwrap_or_else(|| report_panic!(loc, "missing closing brace for placeholder"))
             } else {
                 s[placeholder_start..]
                     .find(|c: char| !c.is_alphanumeric() && c != '_')
@@ -87,7 +88,7 @@ impl Template<'_> {
                 chunks.push(chunk);
                 last_was_placeholder_or_joined = true
             } else {
-                report!(loc, "empty placeholder")
+                report_panic!(loc, "empty placeholder")
             }
 
             start = placeholder_end;
@@ -198,28 +199,28 @@ impl Template<'_> {
         for chunk in self.chunks.iter() {
             match chunk {
                 TemplateChunk::Static(s) => {
-                    if !(ret.is_empty() && s.is_empty()) { ret.push(' ') }
+                    if !ret.is_empty() && !s.is_empty() { ret.push(' ') }
                     ret.push_str(s)
                 },
                 TemplateChunk::JoinedStatic(s) => ret.push_str(s),
                 TemplateChunk::Placeholder(placeholder) => {
                     let compiled = match *placeholder {
-                        "in" => report!(self.loc, "$in is not allowed in variables definitions"),
-                        "out" => report!(self.loc, "$out is not allowed in variables definitions"),
+                        "in" => report_panic!(self.loc, "$in is not allowed in variables definitions"),
+                        "out" => report_panic!(self.loc, "$out is not allowed in variables definitions"),
                         _ => defs.get(placeholder).map(|def| def.0.as_str()).unwrap_or_else(|| {
-                            report!(self.loc, "undefined variable: {placeholder}")
+                            report_panic!(self.loc, "undefined variable: {placeholder}")
                         })
                     };
 
-                    if !(ret.is_empty() && placeholder.is_empty()) { ret.push(' ') }
+                    if !ret.is_empty() && !placeholder.is_empty() { ret.push(' ') }
                     ret.push_str(compiled)
                 },
                 TemplateChunk::JoinedPlaceholder(placeholder) => {
                     ret.push_str(match *placeholder {
-                        "in" => report!(self.loc, "$in is not allowed in variables definitions"),
-                        "out" => report!(self.loc, "$out is not allowed in variables definitions"),
+                        "in" => report_panic!(self.loc, "$in is not allowed in variables definitions"),
+                        "out" => report_panic!(self.loc, "$out is not allowed in variables definitions"),
                         _ => defs.get(placeholder).map(|def| def.0.as_str()).unwrap_or_else(|| {
-                            report!(self.loc, "undefined variable: {placeholder}")
+                            report_panic!(self.loc, "undefined variable: {placeholder}")
                         })
                     })
                 }
@@ -262,7 +263,7 @@ impl Template<'_> {
                             if !compiled_defs.contains_key(placeholder) {
                                 Template::compile_def_recursive(placeholder, def, defs, compiling, compiled_defs);
                             }
-                            compiled_defs.get(placeholder).unwrap().0.as_str()
+                            compiled_defs.get(placeholder).unwrap_dbg().0.as_str()
                         }
                         None => panic!("Undefined variable: {placeholder}")
                     };
@@ -279,7 +280,7 @@ impl Template<'_> {
                             if !compiled_defs.contains_key(placeholder) {
                                 Template::compile_def_recursive(placeholder, def, defs, compiling, compiled_defs);
                             }
-                            compiled_defs.get(placeholder).unwrap().0.as_str()
+                            compiled_defs.get(placeholder).unwrap_dbg().0.as_str()
                         }
                         None => panic!("Undefined variable: {placeholder}")
                     };

@@ -1,30 +1,57 @@
-use crate::flags::Mode;
+use crate::flags::Flags;
 use crate::graph::Graph;
-use crate::types::StrDashMap;
 use crate::parser::comp::Job;
+use crate::types::StrDashMap;
+use crate::poll::{Poller, Subprocess};
 
 use std::io;
 use std::ptr;
 use std::mem;
-use std::ops::Add;
 use std::fs::File;
+use std::sync::Arc;
 use std::path::Path;
 use std::ffi::CString;
 use std::time::SystemTime;
+use std::os::fd::{AsFd, AsRawFd};
+use std::sync::atomic::{Ordering};
 use std::os::fd::{IntoRawFd, FromRawFd};
 
 use dashmap::DashMap;
-use rayon::prelude::*;
 use fxhash::FxBuildHasher;
+use crossbeam_channel::Sender;
+use nix::poll::{PollFd, PollFlags};
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
-pub struct Command {
-    pub command: String,
-    pub description: Option::<String>
+pub struct Command<'a> {
+    pub command: &'a str,
+    pub description: Option::<&'a str>
 }
 
 // Custom implementation of `Command` to avoid fork + exec overhead
-impl Command {
+impl<'a> Command<'a> {
+    #[inline]
+    pub fn to_string(&self, flags: &Flags) -> String {
+        let Command { command, description } = self;
+        let n = description.as_ref().map_or(0, |d| 1 + d.len() + 1) + command.len() + 1;
+        let mut buf = String::with_capacity(n);
+        if flags.verbose() {
+            if let Some(ref d) = description {
+                buf.push('[');
+                buf.push_str(d);
+                buf.push(']');
+                buf.push('\n');
+            }
+            buf.push_str(&command)
+        } else if let Some(ref d) = description {
+            buf.push('[');
+            buf.push_str(d);
+            buf.push(']');
+        } else {
+            buf.push_str(&command)
+        } buf
+    }
+
+    #[inline]
     fn create_pipe() -> io::Result::<(File, File)> {
         let mut fds = [0; 2];
         if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
@@ -35,27 +62,24 @@ impl Command {
         Ok((r, w))
     }
 
-    #[inline]
-    pub fn print_command(self) -> CommandOutput {
-        let Self { command, description } = self;
-        CommandOutput {
-            command,
-            description,
+    pub fn execute(
+        &self,
+        poller: &Poller,
+        poll_fds_sender: Sender::<PollFd>,
+    ) -> io::Result::<()> {
+        let cmd = CString::new(self.command.as_bytes())?;
+        let args = [
+            c"/bin/sh".as_ptr(),
+            c"-c".as_ptr(),
+            cmd.as_ptr(),
+            ptr::null(),
+        ];
 
-            status: 0,
-            stdout: String::new(),
-            stderr: String::new(),
-        }
-    }
+        let (stdout_reader, stdout_writer) = Self::create_pipe()?;
+        let (stderr_reader, stderr_writer) = Self::create_pipe()?;
 
-    pub fn execute(self) -> io::Result::<CommandOutput> {
-        let Self { command, description } = self;
-
-        let (mut stdout_reader, stdout_writer) = Self::create_pipe()?;
-        let (mut stderr_reader, stderr_writer) = Self::create_pipe()?;
-
-        let cmd = CString::new(command.as_bytes())?;
-        let args = [c"/bin/sh".as_ptr(), c"-c".as_ptr(), cmd.as_ptr(), ptr::null()];
+        let stdout_reader_fd = stdout_reader.as_raw_fd();
+        let stderr_reader_fd = stderr_reader.as_raw_fd();
 
         let stdout_writer_fd = stdout_writer.into_raw_fd();
         let stderr_writer_fd = stderr_writer.into_raw_fd();
@@ -73,7 +97,6 @@ impl Command {
         }
 
         let env = [c"PATH=/usr/bin:/bin".as_ptr(), ptr::null()];
-
         let mut pid = 0;
         let ret = unsafe {
             libc::posix_spawn(
@@ -82,7 +105,7 @@ impl Command {
                 &file_actions,
                 &attr,
                 args.as_ptr() as *const *mut _,
-                env.as_ptr() as *const *mut _
+                env.as_ptr() as *const *mut _,
             )
         };
 
@@ -95,79 +118,55 @@ impl Command {
             libc::close(stderr_writer_fd);
         }
 
-        let stdout = io::read_to_string(&mut stdout_reader)?;
-        let stderr = io::read_to_string(&mut stderr_reader)?;
-
-        let mut status = 0;
-        unsafe {
-            libc::waitpid(pid, &mut status, 0);
+        {
+            let command = Box::from(self.command);
+            let description = self.description.map(Box::from);
+            let subprocess = Arc::new(Subprocess {pid, command, description});
+            
+            poller.fd_to_subprocess.insert(stdout_reader_fd, Arc::clone(&subprocess));
+            poller.fd_to_subprocess.insert(stderr_reader_fd, subprocess);
         }
 
-        unsafe {
-            libc::posix_spawn_file_actions_destroy(&mut file_actions);
-            libc::posix_spawnattr_destroy(&mut attr);
-        }
+        poller.active_fds.fetch_add(1, Ordering::Relaxed);
+        poller.curr_subprocess_id.fetch_add(1, Ordering::Relaxed);
 
-        Ok(CommandOutput {command, status, stdout, stderr, description})
-    }
-}
+        // TODO: dont leak here
+        let stdout_poll_fd = {
+            let stdout_reader_fd: &'static _ = Box::leak(Box::new(stdout_reader));
+            PollFd::new(stdout_reader_fd.as_fd(), PollFlags::POLLIN)
+        };
 
-pub struct CommandOutput {
-    pub status: i32,
-    pub stdout: String,
-    pub stderr: String,
-    pub command: String,
-    pub description: Option::<String>
-}
+        let stderr_poll_fd = {
+            let stderr_reader_fd: &'static _ = Box::leak(Box::new(stderr_reader));
+            PollFd::new(stderr_reader_fd.as_fd(), PollFlags::POLLIN)
+        };
 
-impl CommandOutput {
-    #[inline]
-    pub fn to_string(&self, mode: &Mode) -> String {
-        if mode.print_commands() {
-            let mut buf = String::with_capacity(self.command.len());
-            buf.push_str(&self.command);
-            buf.push('\n');
-            return buf
-        }
-
-        if mode.quiet() {
-            let CommandOutput { stderr, command, description, .. } = self;
-            if stderr.is_empty() { return const { String::new() } }
-            let command = description.as_ref().unwrap_or(command);
-            let mut buf = String::with_capacity(command.len() + stderr.len());
-            buf.push_str(command);
-            buf.push_str(stderr);
-            return buf
-        }
-
-        let CommandOutput { stdout, stderr, command, description, .. } = self;
-        let n = description.as_ref().map_or(0, |d| 1 + d.len() + 1)
-            .add(command.len())
-            .add(1)
-            .add(stdout.len())
-            .add(stderr.len());
-
-        let mut buf = String::with_capacity(n);
-        if mode.verbose() {
-            if let Some(ref d) = description {
-                buf.push('[');
-                buf.push_str(d);
-                buf.push(']');
-                buf.push('\n');
+        #[cfg(feature = "dbg_hardcore")] {
+            {
+                let stdout_fd = stdout_poll_fd.as_fd().as_raw_fd();
+                let mut stdout = format!("sending: FD: {stdout_fd:?} ");
+                if let Some(revents) = stdout_poll_fd.revents() {
+                    let revents = format!("revents: {revents:?}");
+                    stdout.push_str(&revents)
+                }
+                println!("{stdout}");
             }
-            buf.push_str(&command)
-        } else if let Some(ref d) = description {
-            buf.push('[');
-            buf.push_str(d);
-            buf.push(']');
-        } else {
-            buf.push_str(&command)
+
+            {
+                let stderr_fd = stderr_poll_fd.as_fd().as_raw_fd();
+                let mut stderr = format!("sending: FD: {stderr_fd:?} ");
+                if let Some(revents) = stdout_poll_fd.revents() {
+                    let revents = format!("revents: {revents:?}");
+                    stderr.push_str(&revents)
+                }
+                println!("{stderr}");
+            }
         }
 
-        buf.push('\n');
-        buf.push_str(&stdout);
-        buf.push_str(&stderr);
-        buf
+        _ = poll_fds_sender.send(stdout_poll_fd);
+        _ = poll_fds_sender.send(stderr_poll_fd);
+
+        Ok(())
     }
 }
 
@@ -209,6 +208,6 @@ impl<'a> MetadataCache<'a> {
             return true
         };
 
-        mtimes.into_par_iter().any(|src_mtime| src_mtime > target_mtime)
+        mtimes.into_iter().any(|src_mtime| src_mtime > target_mtime)
     }
 }

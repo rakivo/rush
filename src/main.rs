@@ -3,6 +3,7 @@ mod loc;
 
 mod cr;
 mod db;
+mod poll;
 mod flags;
 mod types;
 mod graph;
@@ -10,6 +11,7 @@ mod parser;
 mod consts;
 mod command;
 mod template;
+mod dbg_unwrap;
 
 use db::Db;
 use flags::Flags;
@@ -18,10 +20,8 @@ use parser::{Parser, read_file};
 use graph::build_dependency_graph;
 
 use std::process::{exit, ExitCode};
-use std::thread::available_parallelism;
 
 use bumpalo::Bump;
-use rayon::ThreadPoolBuilder;
 use flager::Parser as FlagParser;
 
 fn main() -> ExitCode {
@@ -44,20 +44,6 @@ fn main() -> ExitCode {
         eprintln!("could not read: {rush_file_path}");
         return ExitCode::FAILURE
     };
-
-    /* Handle custom parallelalism */ {
-        if let Some(&parall) = flags.parallelalism() {
-            let max = available_parallelism().unwrap().get() as _;
-            if parall < 0 || parall > max {
-                eprintln!("invalid amount of the maximum parallel jobs: {parall}");
-                return ExitCode::FAILURE
-            }
-            if let Err(e) = ThreadPoolBuilder::new().num_threads(parall as _).build_global() {
-                eprintln!("could not initialize thread pool: {e}");
-                return ExitCode::FAILURE
-            }
-        }
-    }
 
     let content = unsafe { std::str::from_utf8_unchecked(&mmap[..]) };
     let (escaped, escaped_indexes) = Parser::handle_newline_escapes(content);
@@ -89,7 +75,7 @@ fn main() -> ExitCode {
     let db = content.and_then(|content| Db::read(content).ok());
 
     let (graph, default_job, transitive_deps) = build_dependency_graph(&context, default_job);
-    _ = CommandRunner::run(&context, graph, transitive_deps, &flags, db, default_job).write_finish();
+    _ = CommandRunner::run(&arena, &context, graph, transitive_deps, flags, db, default_job).write_finish();
 
     ExitCode::SUCCESS
 }
