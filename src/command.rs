@@ -83,7 +83,7 @@ impl Command {
 
     pub fn execute(
         &self,
-        curr_subprocess_id: Arc::<AtomicUsize>,
+        curr_subprocess_id: &mut usize,
         #[cfg(feature = "dbg")] stdout: Stdout,
         poll_fds_sender: Sender::<PollFd>,
         fd_to_command: &Arc::<SubprocessMap>,
@@ -140,8 +140,7 @@ impl Command {
             libc::close(stderr_writer_fd);
         }
 
-        let id = curr_subprocess_id.load(Ordering::Relaxed);
-
+        let id = *curr_subprocess_id;
         fd_to_command.insert(stdout_reader_fd, Subprocess {
             id,
             command: self.command.to_owned()
@@ -152,7 +151,7 @@ impl Command {
             command: self.command.to_owned()
         });
 
-        curr_subprocess_id.fetch_add(1, Ordering::Relaxed);
+        *curr_subprocess_id += 1;
 
         active_fds.fetch_add(1, Ordering::Relaxed);
 
