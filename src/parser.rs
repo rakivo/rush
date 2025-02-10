@@ -2,6 +2,7 @@ use crate::loc::Loc;
 use crate::consts::syntax::*;
 use crate::template::Template;
 use crate::consts::PHONY_TARGETS;
+use crate::dbg_unwrap::DbgUnwrap;
 use crate::types::{StrHashMap, StrHashSet};
 
 use std::mem;
@@ -232,12 +233,12 @@ pub struct Parsed<'a> {
 impl<'a> Parsed<'a> {
     #[inline(always)]
     fn job_mut(&mut self, target: &str) -> &mut prep::Job<'a> {
-        unsafe { self.jobs.get_mut(target).unwrap_unchecked() }
+        self.jobs.get_mut(target).unwrap_dbg()
     }
 
     #[inline(always)]
     fn rule_mut(&mut self, name: &str) -> &mut Rule<'a> {
-        unsafe { self.rules.get_mut(name).unwrap_unchecked() }
+        self.rules.get_mut(name).unwrap_dbg()
     }
 
     #[inline]
