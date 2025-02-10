@@ -43,20 +43,6 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE
     };
 
-    // /* Handle custom parallelalism */ {
-    //     if let Some(&parall) = flags.parallelalism() {
-    //         let max = available_parallelism().unwrap().get() as _;
-    //         if parall < 0 || parall > max {
-    //             eprintln!("invalid amount of the maximum parallel jobs: {parall}");
-    //             return ExitCode::FAILURE
-    //         }
-    //         if let Err(e) = ThreadPoolBuilder::new().num_threads(parall as _).build_global() {
-    //             eprintln!("could not initialize thread pool: {e}");
-    //             return ExitCode::FAILURE
-    //         }
-    //     }
-    // }
-
     let content = unsafe { std::str::from_utf8_unchecked(&mmap[..]) };
     let (escaped, escaped_indexes) = Parser::handle_newline_escapes(content);
     let context = Parser::parse(&escaped, &escaped_indexes);
