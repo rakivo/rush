@@ -121,27 +121,6 @@ impl<'a> CommandRunner<'a> {
         }
     }
 
-    #[inline]
-    fn output_to_string(flags: &Flags, command: &str, description: Option::<&str>) -> String {
-        let n = description.as_ref().map_or(0, |d| 1 + d.len() + 1) + command.len() + 1;
-        let mut buf = String::with_capacity(n);
-        if flags.verbose() {
-            if let Some(ref d) = description {
-                buf.push('[');
-                buf.push_str(d);
-                buf.push(']');
-                buf.push('\n');
-            }
-            buf.push_str(&command)
-        } else if let Some(ref d) = description {
-            buf.push('[');
-            buf.push_str(d);
-            buf.push(']');
-        } else {
-            buf.push_str(&command)
-        } buf
-    }
-
     fn poll(
         flags: Arc::<Flags>,
         stop: Arc::<AtomicBool>,
@@ -150,6 +129,8 @@ impl<'a> CommandRunner<'a> {
         poll_fd_recv: Receiver::<PollFd>,
         fd_to_subprocess: Arc::<SubprocessMap>,
     ) {
+        let job_is_done = || { _ = jobs_done.fetch_add(1, Ordering::Relaxed) };
+
         let mut jobs_failed = 0;
 
         let mut poll_fds = Vec::new();
@@ -207,7 +188,10 @@ impl<'a> CommandRunner<'a> {
                             };
                             if !printed_pids.contains(pid) {
                                 if !flags.quiet() {
-                                    let output = Self::output_to_string(&flags, &command, description.as_deref());
+                                    let output = Command {
+                                        command: &command,
+                                        description: description.as_deref()
+                                    }.to_string(&flags);
                                     println!("{output}");
                                 }
                                 _ = printed_pids.insert(*pid)
@@ -219,29 +203,32 @@ impl<'a> CommandRunner<'a> {
                             let subprocess = fd_to_subprocess.get(&fd).unwrap_dbg();
                             let Subprocess { pid, command, description } = subprocess.value().as_ref();
 
-                            if !handled_pids.contains(pid) {
-                                _ = jobs_done.fetch_add(1, Ordering::Relaxed)
+                            if flags.rush() && !handled_pids.contains(pid) {
+                                job_is_done()
                             }
 
                             if !fds_with_output.contains(&fd) && !printed_pids.contains(pid) {
                                 if !flags.quiet() {
-                                    let output = Self::output_to_string(&flags, &command, description.as_deref());
+                                    let output = Command {
+                                        command: &command,
+                                        description: description.as_deref()
+                                    }.to_string(&flags);
                                     println!("{output}");
                                 }
                                 _ = printed_pids.insert(*pid);
                             }
 
                             if !handled_pids.contains(pid) {
-                                // wait on process only if `-k` flag is specified to achieve maximum speed
-                                if let Some(max) = flags.max_fail_count() {
+                                if !flags.rush() {
+                                    // wait on process only if `-k` flag is specified to achieve maximum speed
                                     let exit_code = Self::get_process_exit_code(*pid);
                                     if exit_code.map_or(false, |code| code != 0) {
                                         jobs_failed += 1;
-                                        if jobs_failed >= *max {
+                                        if flags.max_fail_count().map_or(false, |&max| jobs_failed >= max) {
                                             stop.store(true, Ordering::Relaxed);
                                             break 'outer
                                         }
-                                    }
+                                    } job_is_done();
                                 }
                                 _ = handled_pids.insert(*pid)
                             }
@@ -374,6 +361,8 @@ impl<'a> CommandRunner<'a> {
     #[inline]
     fn execute_command(&mut self, command: &Command<'a>, target: &str) -> io::Result::<()> {
         if self.flags.print_commands() {
+            let output = command.to_string(&self.flags);
+            println!("{output}");
             return Ok(())
         }
 

@@ -1,3 +1,4 @@
+use crate::flags::Flags;
 use crate::graph::Graph;
 use crate::parser::comp::Job;
 use crate::types::StrDashMap;
@@ -28,6 +29,29 @@ pub struct Command<'a> {
 
 // Custom implementation of `Command` to avoid fork + exec overhead
 impl<'a> Command<'a> {
+    #[inline]
+    pub fn to_string(&self, flags: &Flags) -> String {
+        let Command { command, description } = self;
+        let n = description.as_ref().map_or(0, |d| 1 + d.len() + 1) + command.len() + 1;
+        let mut buf = String::with_capacity(n);
+        if flags.verbose() {
+            if let Some(ref d) = description {
+                buf.push('[');
+                buf.push_str(d);
+                buf.push(']');
+                buf.push('\n');
+            }
+            buf.push_str(&command)
+        } else if let Some(ref d) = description {
+            buf.push('[');
+            buf.push_str(d);
+            buf.push(']');
+        } else {
+            buf.push_str(&command)
+        } buf
+    }
+
+    #[inline]
     fn create_pipe() -> io::Result::<(File, File)> {
         let mut fds = [0; 2];
         if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
