@@ -8,6 +8,7 @@ use crate::consts::{CLEAN_TARGET, PHONY_TARGETS};
 
 use std::mem;
 use std::sync::Arc;
+use std::path::Path;
 use std::fs::{self, File};
 
 use memmap2::Mmap;
@@ -382,6 +383,7 @@ impl Compiled<'_> {
         let mut count = 0;
         let targets = self.jobs.values()
             .filter(|j| matches!(j.phony, comp::Phony::NotPhony { .. }))
+            .filter(|j| fs::exists::<&Path>(j.target.as_ref()).unwrap_or(false))
             .flat_map(|j| {
                 count += 1;
                 [" ", j.target]
@@ -457,11 +459,6 @@ pub struct Parser<'a> {
 impl<'a> Parser<'a> {
     pub const RUSH_FILE_PATH: &'static str = "build.rush";
 
-    #[inline(always)]
-    fn finish_rule(&mut self) {
-        // do something here in case of rule not having `command` property.
-    }
-
     #[inline]
     fn finish_job(&mut self) {
         match &mut self.context {
@@ -483,7 +480,6 @@ impl<'a> Parser<'a> {
                 }).map_or(false, |(_, first_token)| matches!(first_token, BUILD | PHONY | RULE))
             {
                 self.finish_job();
-                self.finish_rule();
                 self.context = Context::Global
             }
         }
@@ -802,8 +798,6 @@ impl<'a> Parser<'a> {
         }
 
         parser.finish_job();
-        parser.finish_rule();
-
         parser.parsed
     }
 }
