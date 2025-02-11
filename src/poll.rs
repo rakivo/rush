@@ -164,7 +164,7 @@ impl Poller {
                                     let exit_code = Self::get_process_exit_code(*pid);
                                     if exit_code.map_or(false, |code| code != 0) {
                                         jobs_failed += 1;
-                                        if self.flags.max_fail_count().map_or(false, |&max| jobs_failed >= max) {
+                                        if jobs_failed >= *self.flags.max_fail_count().unwrap_or(&1) {
                                             self.stop.store(true, Ordering::Relaxed);
                                             break 'outer
                                         }
