@@ -27,8 +27,4 @@ build $builddir/main: link $builddir/foo.o $
 phony run
 build run:
   command = ./$builddir/main
-
-phony clean
-build clean:
-  command = rm -f $builddir/*
 ```

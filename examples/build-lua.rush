@@ -46,7 +46,3 @@ build lua: link src/lapi.o src/lauxlib.o src/lbaselib.o src/lcode.o             
   src/lmem.o src/loadlib.o src/lobject.o src/lopcodes.o src/loslib.o src/lparser.o $
   src/lstate.o src/lstring.o src/lstrlib.o src/ltable.o src/ltablib.o src/ltm.o    $
   src/lua.o src/lundump.o src/lutf8lib.o src/lvm.o src/lzio.o
-
-phony clean
-build clean:
-  command = rm -f lua ./src/*.o

@@ -1,12 +1,12 @@
 use crate::flags::Flags;
 use crate::types::StrHashSet;
 use crate::db::{Db, Metadata};
-use crate::consts::PHONY_TARGETS;
 use crate::parser::comp::{Job, Phony};
 use crate::command::{Command, MetadataCache};
 use crate::parser::{Rule, Compiled, DefaultJob};
-use crate::graph::{Graph, Levels, topological_sort};
+use crate::consts::{CLEAN_TARGET, PHONY_TARGETS};
 use crate::poll::{Poller, FdSender, PollingThread};
+use crate::graph::{Graph, Levels, topological_sort};
 
 use std::io;
 use std::thread;
@@ -28,6 +28,8 @@ pub struct CommandRunner<'a> {
     arena: &'a Bump,
 
     context: &'a Compiled<'a>,
+
+    clean: Command<'a>,
 
     graph: Graph<'a>,
     transitive_deps: Graph<'a>,
@@ -91,6 +93,7 @@ impl<'a> CommandRunner<'a> {
     }
 
     fn new(
+        clean: Command<'a>,
         arena: &'a Bump,
         context: &'a Compiled,
         graph: Graph<'a>,
@@ -108,6 +111,7 @@ impl<'a> CommandRunner<'a> {
             Arc::new(DashMap::new())
         );
         Self {
+            clean,
             graph,
             arena,
             poller,
@@ -163,6 +167,7 @@ impl<'a> CommandRunner<'a> {
 
     #[inline]
     pub fn run(
+        clean: Command<'a>,
         arena: &'a Bump,
         context: &'a Compiled,
         graph: Graph<'a>,
@@ -172,6 +177,7 @@ impl<'a> CommandRunner<'a> {
         default_job: DefaultJob<'a>,
     ) -> Db<'a> {
         let mut cr = Self::new(
+            clean,
             arena,
             context,
             graph,
@@ -197,7 +203,7 @@ impl<'a> CommandRunner<'a> {
     }
 
     #[inline]
-    fn execute_command(&mut self, command: &Command<'a>, target: &str) -> io::Result::<()> {
+    fn execute_command(&self, command: &Command<'a>, target: &str) -> io::Result::<()> {
         if self.flags.print_commands() {
             let output = command.to_string(&self.flags);
             println!("{output}");
@@ -207,11 +213,16 @@ impl<'a> CommandRunner<'a> {
         command.execute(&self.poller, self.fd_sender.clone()).map_err(|e| {
             println!("[could not execute job: {target}: {e}]");
             e
-        }).map(|_| self.executed_jobs += 1)
+        })
     }
 
     #[inline]
     fn run_phony(&mut self, job: &'a Job<'a>) {
+        if job.target == CLEAN_TARGET {
+            _ = self.execute_command(&self.clean, CLEAN_TARGET).map(|_| self.executed_jobs += 1);
+            return
+        }
+
         let Phony::Phony { command, aliases, .. } = &job.phony else { unreachable!() };
 
         aliases.iter().filter_map(|_job| {
@@ -227,7 +238,7 @@ impl<'a> CommandRunner<'a> {
 
         _ = command.as_ref().map(|command| {
             let command = Command { command, description: None };
-            self.execute_command(&command, job.target)
+            self.execute_command(&command, job.target).map(|_| self.executed_jobs += 1)
         });
     }
 
@@ -276,6 +287,11 @@ impl<'a> CommandRunner<'a> {
             } Ok(())
         }
 
+        if job.target == CLEAN_TARGET {
+            _ = self.execute_command(&self.clean, CLEAN_TARGET).map(|_| self.executed_jobs += 1);
+            return ExecutorFlow::Ok
+        }
+
         let Some(command) = compile_command(self, job, rule) else {
             return ExecutorFlow::Ok
         };
@@ -306,7 +322,7 @@ impl<'a> CommandRunner<'a> {
             let description = description.as_ref().map(|d| self.arena.alloc_str(d) as &_);
 
             let command = Command { command, description };
-            _ = self.execute_command(&command, job.target);
+            _ = self.execute_command(&command, job.target).map(|_| self.executed_jobs += 1);
         } else {
             let mut any_err = false;
             if let Err(err) = rule.command.check(&job.shadows, &self.context.defs) {

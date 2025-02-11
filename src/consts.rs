@@ -12,4 +12,5 @@ pub mod syntax {
     pub const LINE_ESCAPE: char = '$';
 }
 
-pub const PHONY_TARGETS: &[&str] = &["all", "clean"];
+pub const CLEAN_TARGET: &str = "clean";
+pub const PHONY_TARGETS: &[&str] = &["all", CLEAN_TARGET];

@@ -1,9 +1,10 @@
 use crate::loc::Loc;
+use crate::command::Command;
 use crate::consts::syntax::*;
 use crate::template::Template;
-use crate::consts::PHONY_TARGETS;
 use crate::dbg_unwrap::DbgUnwrap;
 use crate::types::{StrHashMap, StrHashSet};
+use crate::consts::{CLEAN_TARGET, PHONY_TARGETS};
 
 use std::mem;
 use std::sync::Arc;
@@ -280,10 +281,10 @@ impl<'a> Parsed<'a> {
 
             let job = match &job.phony {
                 prep::Phony::Phony { command, aliases_templates, aliases } => {
-                    if  !phonys.contains(job.target) {
+                    if job.target != CLEAN_TARGET && !phonys.contains(job.target) {
                         report_panic!{
                             job.loc,
-                            "mark {target} as phony for it to have a command\n",
+                            "mark {target} as phony for it to have a command",
                             target = job.target
                         }
                     }
@@ -377,6 +378,24 @@ pub struct Compiled<'a> {
 }
 
 impl Compiled<'_> {
+    pub fn generate_clean_job<'bump>(&self, arena: &'bump Bump) -> Command<'bump> {
+        let mut count = 0;
+        let targets = self.jobs.values()
+            .filter(|j| matches!(j.phony, comp::Phony::NotPhony { .. }))
+            .flat_map(|j| {
+                count += 1;
+                [" ", j.target]
+            }).collect::<String>();
+
+        let command = format!("rm -f {targets}");
+        let description = format!("cleaned {count} files");
+
+        Command {
+            command: arena.alloc_str(&command),
+            description: Some(arena.alloc_str(&description))
+        }
+    }
+
     #[inline]
     pub fn pretty_print_targets(&self) -> String {
         let mut buf = String::with_capacity(self.jobs.len() * 24);
@@ -594,7 +613,7 @@ impl<'a> Parser<'a> {
                         if phony.as_bytes().last() == Some(&b':') {
                             report_panic!{
                                 Loc(self.cursor),
-                                "you can define phony job following way:\n  phony {target}\n  build {target}:\n    ...\n",
+                                "you can define phony job following way:\n  phony {target}\n  build {target}:\n    ...",
                                 target = &phony[..(phony.len() - 1).max(1)]
                             }
                         }
@@ -744,10 +763,24 @@ impl<'a> Parser<'a> {
             cursor: 0,
             parsed: Parsed {
                 defs: prep::Defs(StrHashMap::with_capacity(32)),
-                jobs: StrHashMap::with_capacity(32),
+                jobs: {
+                    let mut jobs = StrHashMap::from_iter([("clean", prep::Job {
+                        loc: Loc(420),
+                        target: CLEAN_TARGET,
+                        shadows: Shadows::None,
+                        target_template: Template::new(CLEAN_TARGET, Loc(420)),
+                        phony: prep::Phony::Phony {
+                            command: None,
+                            aliases: const { Vec::new() },
+                            aliases_templates: const { Vec::new() }
+                        }
+                    })].into_iter());
+                    _ = jobs.try_reserve(32);
+                    jobs
+                },
                 rules: StrHashMap::with_capacity(32),
                 phonys: {
-                    let mut phonys = StrHashSet::from_iter(PHONY_TARGETS.iter().cloned());
+                    let mut phonys = StrHashSet::from_iter(PHONY_TARGETS.into_iter().cloned());
                     _ = phonys.try_reserve(32);
                     phonys
                 },

@@ -62,7 +62,6 @@ fn main() -> ExitCode {
     let (escaped, escaped_indexes) = Parser::handle_newline_escapes(content);
     let context = Parser::parse(&escaped, &escaped_indexes);
     let reserve = context.guess_preallocation();
-
     #[cfg(feature = "dbg")] {
         println!("guessed size: {reserve}")
     }
@@ -73,6 +72,8 @@ fn main() -> ExitCode {
     #[cfg(feature = "dbg")] {
         println!("real size: {size}", size = arena.allocated_bytes())
     }
+
+    let clean = context.generate_clean_job(&arena);
 
     let default_job = flags.default_target().map(|t| {
         context.jobs.get(t.as_str()).unwrap_or_else(|| {
@@ -88,7 +89,7 @@ fn main() -> ExitCode {
     let db = content.and_then(|content| Db::read(content).ok());
 
     let (graph, default_job, transitive_deps) = build_dependency_graph(&context, default_job);
-    _ = CommandRunner::run(&arena, &context, graph, transitive_deps, flags, db, default_job).write_finish();
+    _ = CommandRunner::run(clean, &arena, &context, graph, transitive_deps, flags, db, default_job).write_finish();
 
     ExitCode::SUCCESS
 }
