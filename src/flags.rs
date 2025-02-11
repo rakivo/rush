@@ -114,7 +114,11 @@ macro_rules! define_flags {
 
 define_modes! {
     ["h", "help",           help,                   "print this text and exit"],
-    ["r", "rush",           rush,                   "trade `level synchronization` to achieve maximum speed possible. This optimization assumes that `POLLHUP` reliably indicates process termination, which is true for most well-behaved processes like compilers (gcc, clang, rustc, etc). Instead of waiting for the process to terminate using `waitpid`, we rely on `POLLHUP` to detect the process termination. This allows us to mark the job as executed faster, reducing latency and improving throughput"],
+    ["r", "rush",           rush,                   r"trade `level synchronization` to achieve maximum speed possible.
+                      This optimization assumes that `POLLHUP` reliably indicates process termination, which is true for
+                      most well-behaved processes like compilers (gcc, clang, rustc, etc).
+                      Instead of waiting for the process to terminate using `waitpid`, we rely on `POLLHUP` to indicate the process termination.
+                      This allows us to mark the job as executed faster, reducing latency and improving throughput"],
     ["u", "up-to-date",     check_is_up_to_date,    "check if up-to-date, without running anything"],
     ["p", "print-commands", print_commands,         "only print commands, without running anything"],
     ["q", "quiet",          quiet,                  "print commands only if stderr is not empty, else: stay quiet"],
@@ -123,7 +127,8 @@ define_modes! {
 }
 
 define_flags! {
-    [ ; "f",  "file",       file_path:      String, "specify custom file path to `rush` script"],
-    [ ; "t",  "target",     default_target: String, "specify custom default target"],
-    [1; "k", "keep-going",  max_fail_count: usize,  "specify custom count of fails until exit"]
+    [ ; "f",  "file",        file_path:      String, "cd into directory before doing anything"],
+    [ ; "cd", "change-dir",  change_dir:     String, "specify file path to `rush` script"],
+    [ ; "t",  "target",      default_target: String, "specify default target"],
+    [1; "k",  "keep-going",  max_fail_count: usize,  "specify count of fails until exit"]
 }

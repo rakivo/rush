@@ -19,6 +19,7 @@ use cr::CommandRunner;
 use parser::{Parser, read_file};
 use graph::build_dependency_graph;
 
+use std::env;
 use std::process::{exit, ExitCode};
 
 use bumpalo::Bump;
@@ -33,7 +34,19 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS
     }
 
-    let rush_file_path = flags.file_path().map(|s| s.as_str()).unwrap_or(Parser::RUSH_FILE_PATH);
+    if let Some(cd) = flags.change_dir() {
+        if let Err(e) = env::set_current_dir(cd) {
+            eprintln!("[could not enter {cd:?}]: {e}");
+            return ExitCode::FAILURE
+        } else {
+            println!("[changed directory to {cd:?}]")
+        }
+    }
+
+    let rush_file_path = flags.file_path()
+        .map(|s| s.as_str())
+        .map(|s| s.strip_prefix("./").unwrap_or(s))
+        .unwrap_or(Parser::RUSH_FILE_PATH);
 
     unsafe {
         loc::RUSH_FILE_PATH_PTR = rush_file_path.as_ptr();
