@@ -1,4 +1,5 @@
 use crate::loc::Loc;
+use crate::flags::Flags;
 use crate::command::Command;
 use crate::consts::syntax::*;
 use crate::template::Template;
@@ -419,20 +420,42 @@ pub struct Compiled<'a> {
 }
 
 impl Compiled<'_> {
-    pub fn generate_clean_job<'bump>(&self, arena: &'bump Bump) -> Command<'bump> {
+    pub fn generate_clean_job<'bump>(&self, arena: &'bump Bump, flags: &Flags) -> Command<'bump> {
         let mut count = 0;
-        let targets = self.jobs.values()
+        let targets_iter = self.jobs.values()
             .filter(|j| matches!(j.phony, comp::Phony::NotPhony { .. }))
             .filter(|j| fs::exists::<&Path>(j.target.as_ref()).unwrap_or(false))
-            .flat_map(|j| {
+            .map(|j| {
                 count += 1;
-                [" ", j.target]
-            }).collect::<String>();
+                j.target
+            });
 
-        let command = format!("rm -f {targets}");
-        let description = format!("cleaned {count} files");
+        let (command, description) = if flags.verbose() {
+            let targets = targets_iter.collect::<Vec::<_>>();
+            let targets_str = targets.iter().flat_map(|t| [" ", t]).collect::<String>();
+            let command = format!("rm -f {targets_str}");
+            let mut description = String::with_capacity(
+                (1 + "deleted".len() + targets.len() + 1 + 1) * 24 +
+                1 + "cleaned".len() + 20 + "files".len() + 1
+            );
+            for target in targets.iter() {
+                description.push_str("[cleaned ");
+                description.push_str(target);
+                description.push_str("]\n");
+            }
+            description.push_str("[cleaned ");
+            description.push_str(&count.to_string());
+            description.push_str(" files]");
+            (command, description)
+        } else {
+            let targets_str = targets_iter.flat_map(|t| [" ", t]).collect::<String>();
+            let command = format!("rm -f {targets_str}");
+            let description = format!("[cleaned {count} files]");
+            (command, description)
+        };
 
         Command {
+            target: CLEAN_TARGET,
             command: arena.alloc_str(&command),
             description: Some(arena.alloc_str(&description))
         }
@@ -809,7 +832,7 @@ impl<'a> Parser<'a> {
             parsed: Parsed {
                 defs: prep::Defs(StrHashMap::with_capacity(32)),
                 jobs: {
-                    let mut jobs = StrHashMap::from_iter([("clean", prep::Job {
+                    let mut jobs = StrHashMap::from_iter([(CLEAN_TARGET, prep::Job {
                         loc: Loc(420),
                         target: CLEAN_TARGET,
                         shadows: Shadows::None,

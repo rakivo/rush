@@ -19,6 +19,7 @@ pub type FdSender = Sender::<PollFd<'static>>;
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct Subprocess {
     pub pid: libc::pid_t,
+    pub target: Box::<str>,
     pub command: Box::<str>,
     pub description: Option::<Box::<str>>,
 }
@@ -88,9 +89,10 @@ impl Poller {
         let mut handled_pids = HashSet::new();
         let mut printed_pids = HashSet::new();
 
-        let print_job = |command: &Box::<str>, description: &Option::<Box::<str>>| {
+        let print_job = |target: &str, command: &Box::<str>, description: &Option::<Box::<str>>| {
             if !self.flags.quiet() {
                 let output = Command {
+                    target,
                     command: &command,
                     description: description.as_deref()
                 }.to_string(&self.flags);
@@ -136,9 +138,9 @@ impl Poller {
                             };
                             {
                                 let subprocess = self.fd_to_subprocess.get(&fd).unwrap_dbg();
-                                let Subprocess { pid, command, description } = subprocess.value().as_ref();
+                                let Subprocess { pid, target, command, description } = subprocess.value().as_ref();
                                 if !printed_pids.contains(pid) {
-                                    print_job(command, description);
+                                    print_job(target, command, description);
                                     _ = printed_pids.insert(*pid)
                                 }
                             }
@@ -147,10 +149,10 @@ impl Poller {
                     } else if revents.contains(PollFlags::POLLHUP) {
                         /* drop reference into `fd_to_subprocess` before calling `fd_to_subprocess.remove` */ {
                             let subprocess = self.fd_to_subprocess.get(&fd).unwrap_dbg();
-                            let Subprocess { pid, command, description } = subprocess.value().as_ref();
+                            let Subprocess { pid, target, command, description } = subprocess.value().as_ref();
 
                             if !printed_pids.contains(pid) {
-                                print_job(command, description);
+                                print_job(target, command, description);
                                 _ = printed_pids.insert(*pid)
                             }
 

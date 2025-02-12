@@ -210,7 +210,7 @@ impl<'a> CommandRunner<'a> {
             return Ok(())
         }
 
-        command.execute(&self.poller, self.fd_sender.clone()).map_err(|e| {
+        command.execute(&self.poller, FdSender::clone(&self.fd_sender)).map_err(|e| {
             println!("[could not execute job: {target}: {e}]");
             e
         })
@@ -237,7 +237,7 @@ impl<'a> CommandRunner<'a> {
         }).for_each(|job| self.resolve_and_run_target(job));
 
         _ = command.as_ref().map(|command| {
-            let command = Command { command, description: None };
+            let command = Command {command, target: job.target, description: None};
             self.execute_command(&command, job.target).map(|_| self.executed_jobs += 1)
         });
     }
@@ -318,10 +318,11 @@ impl<'a> CommandRunner<'a> {
                         }).ok()
                 });
 
+            let target = job.target;
             let command = self.arena.alloc_str(&command);
             let description = description.as_ref().map(|d| self.arena.alloc_str(d) as &_);
 
-            let command = Command { command, description };
+            let command = Command {target, command, description};
             _ = self.execute_command(&command, job.target).map(|_| self.executed_jobs += 1);
         } else {
             let mut any_err = false;

@@ -2,6 +2,7 @@ use crate::flags::Flags;
 use crate::graph::Graph;
 use crate::parser::comp::Job;
 use crate::types::StrDashMap;
+use crate::consts::CLEAN_TARGET;
 use crate::poll::{Poller, Subprocess};
 
 use std::io;
@@ -23,6 +24,7 @@ use nix::poll::{PollFd, PollFlags};
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct Command<'a> {
+    pub target: &'a str,
     pub command: &'a str,
     pub description: Option::<&'a str>
 }
@@ -31,21 +33,21 @@ pub struct Command<'a> {
 impl<'a> Command<'a> {
     #[inline]
     pub fn to_string(&self, flags: &Flags) -> String {
-        let Command { command, description } = self;
+        let Command { target, command, description } = self;
         let n = description.as_ref().map_or(0, |d| 1 + d.len() + 1) + command.len() + 1;
         let mut buf = String::with_capacity(n);
         if flags.verbose() {
             if let Some(ref d) = description {
-                buf.push('[');
+                if *target != CLEAN_TARGET { buf.push('[') }
                 buf.push_str(d);
-                buf.push(']');
+                if *target != CLEAN_TARGET { buf.push(']') }
                 buf.push('\n');
             }
             buf.push_str(&command)
         } else if let Some(ref d) = description {
-            buf.push('[');
+            if *target != CLEAN_TARGET { buf.push('[') }
             buf.push_str(d);
-            buf.push(']');
+            if *target != CLEAN_TARGET { buf.push(']') }
         } else {
             buf.push_str(&command)
         } buf
@@ -119,9 +121,10 @@ impl<'a> Command<'a> {
         }
 
         {
+            let target = Box::from(self.target);
             let command = Box::from(self.command);
             let description = self.description.map(Box::from);
-            let subprocess = Arc::new(Subprocess {pid, command, description});
+            let subprocess = Arc::new(Subprocess {pid, target, command, description});
             
             poller.fd_to_subprocess.insert(stdout_reader_fd, Arc::clone(&subprocess));
             poller.fd_to_subprocess.insert(stderr_reader_fd, subprocess);

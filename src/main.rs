@@ -27,11 +27,12 @@ use flager::Parser as FlagParser;
 
 fn main() -> ExitCode {
     let args = env::args().collect::<Vec::<_>>();
-    if let Some(undefined_flag) = args[1..].iter().find(|arg| {
-        !FLAG_STRS.contains(&arg.as_str()) && !MODE_STRS.contains(&arg.as_str())
+    if let Some(undefined_flag) = args[1..].windows(2).find(|w| {
+        !FLAG_STRS.contains(&w[0].as_str()) &&
+        !FLAG_STRS.contains(&w[1].as_str()) && !MODE_STRS.contains(&w[1].as_str())
     }) {
         eprintln!{
-            "did you mean: {program} -t {undefined_flag}?",
+            "did you mean: {program} -t {undefined_flag:?}?",
             program = args[0],
         };
         return ExitCode::FAILURE
@@ -84,7 +85,7 @@ fn main() -> ExitCode {
         println!("real size: {size}", size = arena.allocated_bytes())
     }
 
-    let clean = context.generate_clean_job(&arena);
+    let clean = context.generate_clean_job(&arena, &flags);
 
     let default_job = flags.default_target().map(|t| {
         context.jobs.get(t.as_str()).unwrap_or_else(|| {
