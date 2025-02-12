@@ -27,12 +27,15 @@ use flager::Parser as FlagParser;
 
 fn main() -> ExitCode {
     let args = env::args().collect::<Vec::<_>>();
-    if let Some(undefined_flag) = args[1..].windows(2).find(|w| {
-        !FLAG_STRS.contains(&w[0].as_str()) &&
-        !FLAG_STRS.contains(&w[1].as_str()) && !MODE_STRS.contains(&w[1].as_str())
-    }) {
+    if let Some(undefined_flag) = args.get(1)
+        .filter(|f| !MODE_STRS.contains(&f.as_str()))
+        .or(args[1..].windows(2).find(|w| {
+            !FLAG_STRS.contains(&w[0].as_str()) &&
+            !FLAG_STRS.contains(&w[1].as_str()) && !MODE_STRS.contains(&w[1].as_str())
+        }).map(|w| &w[1]))
+    {
         eprintln!{
-            "did you mean: {program} -t {undefined_flag:?}?",
+            "did you mean: {program} -t {undefined_flag} [..flags]?",
             program = args[0],
         };
         return ExitCode::FAILURE
