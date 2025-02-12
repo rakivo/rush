@@ -115,7 +115,7 @@ pub fn build_dependency_graph<'a>(
                 }
             }
 
-            // find the jobs that does not act as an input anywhere,
+            // find the jobs that do not act as an input anywhere,
             // then sort those by their first appearance in the source code row-wise
             processed.jobs.keys()
                 .filter(|job| !reverse_graph.contains_key(*job))
