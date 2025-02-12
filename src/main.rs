@@ -59,8 +59,8 @@ fn main() -> ExitCode {
     };
 
     let content = unsafe { std::str::from_utf8_unchecked(&mmap[..]) };
-    let (escaped, escaped_indexes) = Parser::handle_newline_escapes(content);
-    let context = Parser::parse(&escaped, &escaped_indexes);
+    let (content, escaped_indexes) = Parser::preprocess_content(content);
+    let context = Parser::parse(&content, &escaped_indexes);
     let reserve = context.guess_preallocation();
     #[cfg(feature = "dbg")] {
         println!("guessed size: {reserve}")

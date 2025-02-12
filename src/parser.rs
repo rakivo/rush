@@ -721,12 +721,22 @@ impl<'a> Parser<'a> {
     }
 
     #[cfg_attr(feature = "dbg", tramer("nanos"))]
-    pub fn handle_newline_escapes(input: &str) -> (String, EscapedIndexes) {
+    pub fn preprocess_content(input: &str) -> (String, EscapedIndexes) {
         let mut ret = String::with_capacity(input.len());
         let mut indexes = Vec::with_capacity(32);
 
         let mut lines = input.lines().enumerate().peekable();
         while let Some((index, line)) = lines.next() {
+            if line.trim_start().as_bytes().first() == Some(&(COMMENT as u8)) {
+                continue
+            }
+
+            let line = if let Some(comment_idx) = line.rfind(COMMENT) {
+                &line[..comment_idx]
+            } else {
+                line
+            };
+
             let mut escaped_lines = 0;
             let mut curr_line = line.trim_end();
             while curr_line.as_bytes().last() == Some(&(LINE_ESCAPE as u8)) {
@@ -754,7 +764,7 @@ impl<'a> Parser<'a> {
     }
 
     #[cfg_attr(feature = "dbg", tramer("millis"))]
-    pub fn parse(escaped: &'a str, escaped_indexes: &EscapedIndexes) -> Parsed<'a> {
+    pub fn parse(content: &'a str, escaped_indexes: &EscapedIndexes) -> Parsed<'a> {
         let mut parser = Self {
             cursor: 0,
             parsed: Parsed {
@@ -786,15 +796,13 @@ impl<'a> Parser<'a> {
         };
 
         let mut escaped_index = 0;
-        for line in escaped.lines() {
+        for line in content.lines() {
             parser.cursor += 1;
             if escaped_index < escaped_indexes.len() && escaped_indexes[escaped_index].0 <= parser.cursor {
                 parser.cursor += escaped_indexes[escaped_index].1;
                 escaped_index += 1
             }
-            let trimmed = line.trim_start();
-            if trimmed.as_bytes().first() == Some(&(COMMENT as u8)) { continue }
-            parser.parse_line(line, trimmed)
+            parser.parse_line(line, line.trim_start())
         }
 
         parser.finish_job();
