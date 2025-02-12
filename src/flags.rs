@@ -27,6 +27,10 @@ macro_rules! define_modes {
             ).help($description);
         )*
 
+        pub const MODE_STRS: &[&str] = &[
+            $(stringify!([<$name:snake:upper _MODE>])), *
+        ];
+
         #[repr(u64)]
         enum FlagBit { $([<$name:camel>]), * }
 
@@ -76,6 +80,10 @@ macro_rules! define_flags {
                 None
             ).help($description);
         )*
+
+        pub const FLAG_STRS: &[&str] = &[
+            $(stringify!([<$name:snake:upper _MODE>])), *
+        ];
 
         #[cfg_attr(feature = "dbg", derive(Debug))]
         pub struct Flags {

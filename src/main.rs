@@ -14,10 +14,10 @@ mod template;
 mod dbg_unwrap;
 
 use db::Db;
-use flags::Flags;
 use cr::CommandRunner;
-use parser::{Parser, read_file};
 use graph::build_dependency_graph;
+use flags::{Flags, FLAG_STRS, MODE_STRS};
+use parser::{Parser, read_file};
 
 use std::env;
 use std::process::{exit, ExitCode};
@@ -26,6 +26,17 @@ use bumpalo::Bump;
 use flager::Parser as FlagParser;
 
 fn main() -> ExitCode {
+    let args = env::args().collect::<Vec::<_>>();
+    if let Some(undefined_flag) = args[1..].iter().find(|arg| {
+        !FLAG_STRS.contains(&arg.as_str()) && !MODE_STRS.contains(&arg.as_str())
+    }) {
+        eprintln!{
+            "did you mean: {program} -t {undefined_flag}?",
+            program = args[0],
+        };
+        return ExitCode::FAILURE
+    }
+
     let flag_parser = FlagParser::new();
     let flags = Flags::new(&flag_parser);
 
