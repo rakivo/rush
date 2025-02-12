@@ -10,11 +10,14 @@ use std::mem;
 use std::sync::Arc;
 use std::path::Path;
 use std::fs::{self, File};
+use std::hash::{Hash, Hasher};
+use std::collections::HashSet;
 
 use memmap2::Mmap;
 use bumpalo::Bump;
 #[cfg(feature = "dbg")]
 use tramer::tramer;
+use fxhash::FxBuildHasher;
 
 #[inline]
 pub fn read_file(path: &str) -> Option::<Mmap> {
@@ -362,6 +365,42 @@ impl<'a> Parsed<'a> {
             Some((target, job))
         }).collect::<StrHashMap::<_>>();
 
+        struct JobInput<'a> {
+            job: &'a comp::Job<'a>,
+            input: &'a str
+        }
+
+        impl Eq for JobInput<'_> {}
+
+        impl PartialEq for JobInput<'_> {
+            fn eq(&self, other: &Self) -> bool {
+                self.input.eq(other.input)
+            }
+        }
+
+        impl Hash for JobInput<'_> {
+            #[inline(always)]
+            fn hash<H: Hasher>(&self, state: &mut H) {
+                self.input.hash(state);
+            }
+        }
+
+        jobs.values().filter_map(|job| {
+            if let comp::Phony::NotPhony { inputs, .. } = &job.phony {
+                Some(inputs.iter().map(|input| JobInput { job, input }))
+            } else {
+                None
+            }
+        }).flatten().collect::<HashSet::<_, FxBuildHasher>>().iter().for_each(|JobInput {job, input}| {
+            if !jobs.contains_key(input) && !fs::exists::<&Path>(input.as_ref()).unwrap_or(false) {
+                report_panic!{
+                    job.loc,
+                    "undefined job: {input}, {target} depends on it",
+                    target = job.target
+                }
+            }
+        });
+
         let default_target = default_target.map(|dt| {
             Template::new(dt.t, dt.loc).compile_def(&defs)
         });
@@ -650,8 +689,7 @@ impl<'a> Parser<'a> {
                                 post_colon.trim_end()
                             };
 
-                            let aliases_tokens = aliases_str.split_ascii_whitespace();
-                            let aliases = aliases_tokens.collect::<Vec::<_>>();
+                            let aliases = aliases_str.split_ascii_whitespace().collect::<Vec::<_>>();
                             let aliases_templates = aliases.iter().map(|alias| Template::new(alias, loc)).collect();
 
                             prep::Job {
@@ -728,6 +766,7 @@ impl<'a> Parser<'a> {
         let mut lines = input.lines().enumerate().peekable();
         while let Some((index, line)) = lines.next() {
             if line.trim_start().as_bytes().first() == Some(&(COMMENT as u8)) {
+                indexes.push((index, 1));
                 continue
             }
 
