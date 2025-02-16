@@ -32,10 +32,9 @@ impl Template<'_> {
         let mut in_used = false;
         let mut statics_len = 0;
         let mut chunks = Vec::with_capacity(s.len() / 2);
-        let mut last_was_placeholder_or_joined = false;
 
         #[inline(always)]
-        fn is_joined(s: &str) -> bool {
+        fn is_joined_static(s: &str) -> bool {
             s.as_bytes().first().map_or(false, |b| !b.is_ascii_whitespace())
         }
 
@@ -43,16 +42,15 @@ impl Template<'_> {
             let i = start + i;
             if i > start {
                 let ref not_trimmed = s[start..i];
-                if !not_trimmed.is_empty() {
-                    let trimmed = not_trimmed.trim();
-                    let chunk = if last_was_placeholder_or_joined && is_joined(not_trimmed) {
+                let trimmed = not_trimmed.trim();
+                if !trimmed.is_empty() {
+                    let chunk = if is_joined_static(not_trimmed) {
                         TemplateChunk::JoinedStatic(trimmed)
                     } else {
                         TemplateChunk::Static(trimmed)
                     };
                     chunks.push(chunk);
                     statics_len += trimmed.len();
-                    last_was_placeholder_or_joined = false
                 }
             }
 
@@ -70,6 +68,13 @@ impl Template<'_> {
                     .unwrap_or_else(|| s.len())
             };
 
+            let is_joined_placeholder = || -> bool {
+                if i == 0 { return false }
+                !s[i-1..placeholder_end].as_bytes()
+                    .iter()
+                    .any(|b| b.is_ascii_whitespace())
+            };
+
             if placeholder_start < placeholder_end {
                 let placeholder = if curly_syntax {
                     &s[placeholder_start + 1..placeholder_end]
@@ -79,14 +84,13 @@ impl Template<'_> {
 
                 in_used = placeholder == "in";
 
-                let chunk = if last_was_placeholder_or_joined {
+                let chunk = if is_joined_placeholder() {
                     TemplateChunk::JoinedPlaceholder(placeholder)
                 } else {
                     TemplateChunk::Placeholder(placeholder)
                 };
 
                 chunks.push(chunk);
-                last_was_placeholder_or_joined = true
             } else {
                 report_panic!(loc, "empty placeholder")
             }
@@ -97,9 +101,9 @@ impl Template<'_> {
 
         if start < s.len() {
             let ref not_trimmed = s[start..];
-            if !not_trimmed.is_empty() {
-                let trimmed = not_trimmed.trim();
-                let chunk = if last_was_placeholder_or_joined && is_joined(not_trimmed) {
+            let trimmed = not_trimmed.trim();
+            if !trimmed.is_empty() {
+                let chunk = if is_joined_static(not_trimmed) {
                     TemplateChunk::JoinedStatic(trimmed)
                 } else {
                     TemplateChunk::Static(trimmed)
