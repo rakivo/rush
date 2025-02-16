@@ -500,6 +500,8 @@ enum Context<'a> {
         shadows: Option::<StrHashMap::<'a, &'a str>>,
     },
     Rule {
+        loc: Loc,
+
         name: &'a str,
 
         already_inserted: bool,
@@ -522,6 +524,19 @@ impl<'a> Parser<'a> {
     pub const RUSH_FILE_PATH: &'static str = "build.rush";
 
     #[inline]
+    #[cfg_attr(feature = "dbg", track_caller)]
+    fn finish_rule(&self) {
+        match &self.context {
+            Context::Rule { loc, name, already_inserted, .. } => {
+                if !already_inserted {
+                    report_panic!(loc, "rule {name} without a command")
+                }
+            },
+            _ => {}
+        };
+    }
+
+    #[inline]
     fn finish_job(&mut self) {
         match &mut self.context {
             Context::Job { target, shadows } => {
@@ -542,6 +557,7 @@ impl<'a> Parser<'a> {
                 }).map_or(false, |(_, first_token)| matches!(first_token, BUILD | PHONY | RULE))
             {
                 self.finish_job();
+                self.finish_rule();
                 self.context = Context::Global
             }
         }
@@ -599,7 +615,7 @@ impl<'a> Parser<'a> {
                     }
                 }
             },
-            Context::Rule { name, depfile, already_inserted, description } => {
+            Context::Rule { loc, name, depfile, already_inserted, description } => {
                 match first_token {
                     COMMAND => {
                         let command_start = second_space + 1 + 1;
@@ -618,6 +634,7 @@ impl<'a> Parser<'a> {
                         self.parsed.rules.insert(name, rule);
                         self.context = Context::Rule {
                             name,
+                            loc: *loc,
                             already_inserted: true,
                             description: *description,
                             depfile: *depfile,
@@ -625,15 +642,15 @@ impl<'a> Parser<'a> {
                     },
                     DEPFILE => {
                         let path = parse_shadow();
-                        let loc = Loc(self.cursor);
-                        let depfile = DepfilePath {loc, path};
+                        let depfile = DepfilePath {path, loc: Loc(self.cursor)};
                         if *already_inserted {
                             let rule = self.parsed.rule_mut(name);
-                            let depfile = Template::new(path, loc);
+                            let depfile = Template::new(path, depfile.loc);
                             rule.depfile = Some(depfile)
                         } else {
                             self.context = Context::Rule {
                                 name,
+                                loc: *loc,
                                 depfile: Some(depfile),
                                 description: *description,
                                 already_inserted: *already_inserted
@@ -641,15 +658,15 @@ impl<'a> Parser<'a> {
                         }
                     },
                     DESCRIPTION => {
-                        let loc = Loc(self.cursor);
                         let description = line[second_space + 1 + 1..].trim();
-                        let description = Description { loc, description };
+                        let description = Description { description, loc: Loc(self.cursor) };
                         if *already_inserted {
                             let rule = self.parsed.rule_mut(name);
                             rule.description = Some(Template::new(description.description, description.loc));
                         } else {
                             self.context = Context::Rule {
                                 name,
+                                loc: *loc,
                                 depfile: *depfile,
                                 description: Some(description),
                                 already_inserted: *already_inserted
@@ -690,8 +707,9 @@ impl<'a> Parser<'a> {
                         self.context = Context::Rule {
                             depfile: None,
                             description: None,
-                            name: line[second_space..].trim_end(),
+                            loc: Loc(self.cursor),
                             already_inserted: false,
+                            name: line[second_space..].trim_end(),
                         }
                     },
                     BUILD => {
@@ -868,6 +886,7 @@ impl<'a> Parser<'a> {
         }
 
         parser.finish_job();
+        parser.finish_rule();
         parser.parsed
     }
 }
