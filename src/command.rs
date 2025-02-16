@@ -131,7 +131,6 @@ impl<'a> Command<'a> {
         }
 
         poller.active_fds.fetch_add(1, Ordering::Relaxed);
-        poller.curr_subprocess_id.fetch_add(1, Ordering::Relaxed);
 
         // TODO: dont leak here
         let stdout_poll_fd = {

@@ -32,7 +32,6 @@ pub struct Poller {
     pub stop: Arc::<AtomicBool>,
     pub jobs_done: Arc::<AtomicUsize>,
     pub active_fds: Arc::<AtomicUsize>,
-    pub curr_subprocess_id: AtomicUsize,
     pub poll_fd_recv: Receiver::<PollFd<'static>>,
     pub fd_to_subprocess: Arc::<SubprocessMap>,
 }
@@ -54,7 +53,6 @@ impl Poller {
             active_fds,
             poll_fd_recv,
             fd_to_subprocess,
-            curr_subprocess_id: AtomicUsize::new(0)
         };
         let poller = Arc::new(poller);
         let thread = thread::spawn({
