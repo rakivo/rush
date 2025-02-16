@@ -39,7 +39,6 @@ fn main() -> ExitCode {
         }).or(args[1..].windows(2).find(|w| {
             let f = w[0].as_str();
             let v = w[1].as_str();
-            
 
             if v.as_bytes().first().map_or(false, |&b| b == b'-') &&
                 !FLAG_STRS.contains(&f)
@@ -107,8 +106,6 @@ fn main() -> ExitCode {
         println!("real size: {size}", size = arena.allocated_bytes())
     }
 
-    let clean = context.generate_clean_job(&arena, &flags);
-
     if flags.list_jobs() {
         let jobs = context.pretty_print_targets();
         println!("available jobs: [{jobs}]");
@@ -130,6 +127,8 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS
     }
 
+    let clean = context.generate_clean_job(&arena, &flags);
+
     let default_job = flags.default_target().map(|t| {
         context.jobs.get(t.as_str()).unwrap_or_else(|| {
             let targets = context.pretty_print_targets();
@@ -138,7 +137,6 @@ fn main() -> ExitCode {
             exit(1)
         })
     });
-
 
     let mmap = Db::read_cache();
     let content = mmap.as_ref().map(|mmap| unsafe { std::str::from_utf8_unchecked(&mmap[..]) });
