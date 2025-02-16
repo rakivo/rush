@@ -16,8 +16,8 @@ mod dbg_unwrap;
 use db::Db;
 use cr::CommandRunner;
 use graph::build_dependency_graph;
+use parser::{comp, Parser, read_file};
 use flags::{Flags, FLAG_STRS, MODE_STRS};
-use parser::{Parser, read_file};
 
 use std::env;
 use std::process::{exit, ExitCode};
@@ -28,10 +28,29 @@ use flager::Parser as FlagParser;
 fn main() -> ExitCode {
     let args = env::args().collect::<Vec::<_>>();
     if let Some(undefined_flag) = args.get(1)
-        .filter(|f| !MODE_STRS.contains(&f.as_str()))
-        .or(args[1..].windows(2).find(|w| {
-            !FLAG_STRS.contains(&w[0].as_str()) &&
-            !FLAG_STRS.contains(&w[1].as_str()) && !MODE_STRS.contains(&w[1].as_str())
+        .filter(|f| args.len() == 2 && !MODE_STRS.contains(&f.as_str()))
+        .map(|v| {
+            if v.as_bytes().first().map_or(false, |&b| b == b'-') &&
+                !FLAG_STRS.contains(&v.as_str())
+            {
+                eprintln!("undefined flag: {v}");
+                exit(1)
+            } v
+        }).or(args[1..].windows(2).find(|w| {
+            let f = w[0].as_str();
+            let v = w[1].as_str();
+            
+
+            if v.as_bytes().first().map_or(false, |&b| b == b'-') &&
+                !FLAG_STRS.contains(&f)
+            {
+                eprintln!("undefined flag: {f}");
+                exit(1)
+            }
+
+            !FLAG_STRS.contains(&f) &&
+            !FLAG_STRS.contains(&v) &&
+            !MODE_STRS.contains(&v)
         }).map(|w| &w[1]))
     {
         eprintln!{
@@ -90,6 +109,27 @@ fn main() -> ExitCode {
 
     let clean = context.generate_clean_job(&arena, &flags);
 
+    if flags.list_jobs() {
+        let jobs = context.pretty_print_targets();
+        println!("available jobs: [{jobs}]");
+        return ExitCode::SUCCESS
+    }
+
+    if flags.list_rules() {
+        let rules = context.pretty_print_rules();
+        println!("available rules: [{rules}]");
+        return ExitCode::SUCCESS
+    }
+
+    if flags.list_jobs_and_rules() {
+        let jobs = context.pretty_print_targets();
+        println!("available jobs: [{jobs}]");
+
+        let rules = context.pretty_print_rules();
+        println!("available rules: [{rules}]");
+        return ExitCode::SUCCESS
+    }
+
     let default_job = flags.default_target().map(|t| {
         context.jobs.get(t.as_str()).unwrap_or_else(|| {
             let targets = context.pretty_print_targets();
@@ -99,11 +139,23 @@ fn main() -> ExitCode {
         })
     });
 
+
     let mmap = Db::read_cache();
     let content = mmap.as_ref().map(|mmap| unsafe { std::str::from_utf8_unchecked(&mmap[..]) });
     let db = content.and_then(|content| Db::read(content).ok());
 
     let (graph, default_job, transitive_deps) = build_dependency_graph(&context, default_job);
+
+    if flags.print_default_job() {
+        if let Some(comp::Job { target, .. }) = default_job.as_ref() {
+            println!("default job: {target}");
+            return ExitCode::SUCCESS
+        } else {
+            println!("no default job");
+            return ExitCode::SUCCESS
+        }
+    }
+
     _ = CommandRunner::run(clean, &arena, &context, graph, transitive_deps, flags, db, default_job).write_finish();
 
     ExitCode::SUCCESS

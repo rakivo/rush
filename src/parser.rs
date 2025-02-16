@@ -462,17 +462,30 @@ impl Compiled<'_> {
     }
 
     #[inline]
+    fn pretty_print_vec<T>(vec: &Vec::<T>) -> String
+    where
+        T: std::fmt::Display
+    {
+        let mut buf = String::with_capacity(256);
+        vec.first().map(|s| buf.push_str(&s.to_string()));
+        vec.iter().skip(1).for_each(|s| {
+            buf.push_str(&", ".to_owned());
+            buf.push_str(&s.to_string())
+        }); buf
+    }
+
+    #[inline]
+    pub fn pretty_print_rules(&self) -> String {
+        let mut rules = self.rules.iter().collect::<Vec::<_>>();
+        rules.sort_unstable_by(|(_, ra), (_, rb)| ra.command.loc.0.cmp(&rb.command.loc.0));
+        Self::pretty_print_vec(&rules.iter().map(|(s, _)| s).collect())
+    }
+
+    #[inline]
     pub fn pretty_print_targets(&self) -> String {
         let mut targets = self.jobs.iter().collect::<Vec::<_>>();
         targets.sort_unstable_by(|(_, ja), (_, jb)| ja.loc.0.cmp(&jb.loc.0));
-
-        let mut buf = String::with_capacity(self.jobs.len() * 24);
-        targets.first().map(|(t, _)| buf.push_str(t));
-        targets.iter().skip(1).for_each(|(t, _)| {
-            buf.push_str(", ");
-            buf.push_str(t);
-        });
-        buf
+        Self::pretty_print_vec(&targets.iter().map(|(s, _)| s).collect())
     }
 }
 

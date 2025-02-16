@@ -117,17 +117,21 @@ macro_rules! define_flags {
 */
 
 define_modes! {
-    ["h", "help",           help,                   "print this text and exit"],
-    ["r", "rush",           rush,                   r"trade `level synchronization` to achieve maximum speed possible.
+    ["h",  "help",           help,                   "print this text and exit"],
+    ["r",  "rush",           rush,                   r"trade `level synchronization` to achieve maximum speed possible.
                       This optimization assumes that `POLLHUP` reliably indicates process termination, which is true for
                       most well-behaved processes like compilers (gcc, clang, rustc, etc).
                       Instead of waiting for the process to terminate using `waitpid`, we rely on `POLLHUP` to indicate the process termination.
                       This allows us to mark the job as executed faster, reducing latency and improving throughput"],
-    ["u", "up-to-date",     check_is_up_to_date,    "check if up-to-date, without running anything"],
-    ["p", "print-commands", print_commands,         "only print commands, without running anything"],
-    ["q", "quiet",          quiet,                  "print commands only if stderr is not empty, else: stay quiet"],
-    ["v", "verbose",        verbose,                "print both command and description while executing job. Also print `already built` text for every job"],
-    ["B", "always-build",   always_build,           "always build job, no matter is it up-to-date or not"]
+    ["d",  "default-job",    print_default_job,      "print default job"],
+    ["lj", "list-jobs",      list_jobs,              "list all jobs and exit"],
+    ["lr", "list-rules",     list_rules,             "list all rules and exit"],
+    ["l",  "list",           list_jobs_and_rules,    "list all jobs and rules and exit"],
+    ["u",  "up-to-date",     check_is_up_to_date,    "check if up-to-date, without running anything"],
+    ["p",  "print-commands", print_commands,         "only print commands, without running anything"],
+    ["q",  "quiet",          quiet,                  "print commands only if stderr is not empty, else: stay quiet"],
+    ["v",  "verbose",        verbose,                "print both command and description while executing job. Also print `already built` text for every job"],
+    ["B",  "always-build",   always_build,           "always build job, no matter is it up-to-date or not"]
 }
 
 define_flags! {
