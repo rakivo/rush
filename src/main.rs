@@ -1,6 +1,7 @@
 #[macro_use]
 mod loc;
 
+mod ux;
 mod cr;
 mod db;
 mod poll;
@@ -14,10 +15,11 @@ mod template;
 mod dbg_unwrap;
 
 use db::Db;
+use flags::Flags;
 use cr::CommandRunner;
 use graph::build_dependency_graph;
 use parser::{comp, Parser, read_file};
-use flags::{Flags, FLAG_STRS, MODE_STRS};
+use ux::{check_args, did_you_mean_compiled};
 
 use std::env;
 use std::process::{exit, ExitCode};
@@ -27,31 +29,7 @@ use flager::Parser as FlagParser;
 
 fn main() -> ExitCode {
     let args = env::args().collect::<Vec::<_>>();
-    if let Some(undefined_flag) = args.get(1)
-        .filter(|f| args.len() == 2 && !MODE_STRS.contains(&f.as_str()))
-        .map(|v| {
-            if v.as_bytes().first().map_or(false, |&b| b == b'-') &&
-                !FLAG_STRS.contains(&v.as_str())
-            {
-                eprintln!("undefined flag: {v}");
-                exit(1)
-            } v
-        }).or(args[1..].windows(2).find(|w| {
-            let f = w[0].as_str();
-            let v = w[1].as_str();
-
-            if v.as_bytes().first().map_or(false, |&b| b == b'-') &&
-                !FLAG_STRS.contains(&f)
-            {
-                eprintln!("undefined flag: {f}");
-                exit(1)
-            }
-
-            !FLAG_STRS.contains(&f) &&
-            !FLAG_STRS.contains(&v) &&
-            !MODE_STRS.contains(&v)
-        }).map(|w| &w[1]))
-    {
+    if let Some(undefined_flag) = check_args(&args) {
         eprintln!{
             "did you mean: {program} -t {undefined_flag} [..flags]?",
             program = args[0],
@@ -133,6 +111,13 @@ fn main() -> ExitCode {
         context.jobs.get(t.as_str()).unwrap_or_else(|| {
             let targets = context.pretty_print_targets();
             eprintln!("no target: {t} found in {rush_file_path}");
+            if let Some(compiled) = did_you_mean_compiled(
+                t,
+                &context.jobs,
+                &context.rules,
+            ) {
+                println!("did you mean: {compiled}?")
+            }
             eprintln!("available targets: [{targets}]");
             exit(1)
         })

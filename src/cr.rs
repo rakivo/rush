@@ -1,6 +1,7 @@
 use crate::flags::Flags;
 use crate::types::StrHashSet;
 use crate::db::{Db, Metadata};
+use crate::ux::did_you_mean_compiled;
 use crate::parser::comp::{Job, Phony};
 use crate::command::{Command, MetadataCache};
 use crate::parser::{Rule, Compiled, DefaultJob};
@@ -228,10 +229,24 @@ impl<'a> CommandRunner<'a> {
         aliases.iter().filter_map(|_job| {
             match self.context.jobs.get(_job.as_str()) {
                 Some(j) => Some(j),
-                None => report_panic!{
-                    job.loc,
-                    "undefined job: {target}\nNOTE: in phony jobs you can only alias jobs\n",
-                    target = _job
+                None => {
+                    let mut msg = report_fmt!{
+                        job.loc,
+                        "undefined job: {target}\nNOTE: in phony jobs you can only alias jobs\n",
+                        target = _job
+                    };
+
+                    if let Some(compiled) = did_you_mean_compiled(
+                        _job,
+                        &self.context.jobs,
+                        &self.context.rules
+                    ) {
+                        let msg_ = format!("\nnote: did you mean: {compiled}?");
+                        msg.push_str(&msg_)
+                    }
+
+                    report_panic!("{msg}")
+
                 }
             }
         }).for_each(|job| self.resolve_and_run_target(job));

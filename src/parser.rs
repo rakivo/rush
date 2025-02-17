@@ -4,6 +4,7 @@ use crate::command::Command;
 use crate::consts::syntax::*;
 use crate::template::Template;
 use crate::dbg_unwrap::DbgUnwrap;
+use crate::ux::did_you_mean_compiled;
 use crate::types::{StrHashMap, StrHashSet};
 use crate::consts::{CLEAN_TARGET, PHONY_TARGETS};
 
@@ -271,14 +272,6 @@ impl<'a> Parsed<'a> {
 
         let defs = defs.compile();
         let jobs = jobs.values().filter_map(|job| {
-            if let prep::Phony::NotPhony { rule, .. } = &job.phony {
-                if let Some(ref rule) = rule {
-                    if !rules.contains_key(rule) {
-                        report_panic!(job.loc, "undefined rule: {rule}")
-                    }
-                }
-            }
-
             let target = match job.target_template.compile_prep(&job, &defs) {
                 Ok(ok) => arena.alloc_str(&ok) as &_,
                 Err(e) => panic!("{e}\n")
@@ -366,6 +359,27 @@ impl<'a> Parsed<'a> {
             Some((target, job))
         }).collect::<StrHashMap::<_>>();
 
+        jobs.values().for_each(|job| {
+            if let comp::Phony::NotPhony { rule, .. } = &job.phony {
+                if let Some(ref rule) = rule {
+                    if !rules.contains_key(rule) {
+                        let mut msg = report_fmt!(job.loc, "undefined rule: {rule}");
+
+                        if let Some(compiled) = did_you_mean_compiled(
+                            rule,
+                            &jobs,
+                            &rules
+                        ) {
+                            let msg_ = format!("\nnote: did you mean: {compiled}?");
+                            msg.push_str(&msg_)
+                        }
+
+                        report_panic!("{msg}")
+                    }
+                }
+            }
+        });
+
         struct JobInput<'a> {
             job: &'a comp::Job<'a>,
             input: &'a str
@@ -395,11 +409,18 @@ impl<'a> Parsed<'a> {
             }
         }).flatten().collect::<HashSet::<_, FxBuildHasher>>().iter().for_each(|JobInput {job, input}| {
             if !jobs.contains_key(input) && !fs::exists::<&Path>(input.as_ref()).unwrap_or(false) {
-                report_panic!{
+                let mut msg = report_fmt!{
                     job.loc,
                     "undefined job: {input}, {target} depends on it",
                     target = job.target
+                };
+
+                if let Some(compiled) = did_you_mean_compiled(input, &jobs, &rules) {
+                    let msg_ = format!("\nnote: did you mean: {compiled}?");
+                    msg.push_str(&msg_)
                 }
+
+                report_panic!("{msg}")
             }
         });
 

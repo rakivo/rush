@@ -53,5 +53,6 @@ macro_rules! report_fmt {
 
 #[macro_export]
 macro_rules! report_panic {
+    ($literal: literal) => { $crate::loc::Loc::report(&std::fmt::format(format_args!($literal))) };
     ($loc: expr, $($arg: tt)*) => { $crate::loc::Loc::report(&report_fmt!($loc, $($arg)*)) }
 }
