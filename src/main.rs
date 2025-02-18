@@ -13,6 +13,7 @@ mod consts;
 mod command;
 mod template;
 mod dbg_unwrap;
+mod edit_distance;
 
 use db::Db;
 use flags::Flags;
