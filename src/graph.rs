@@ -7,6 +7,7 @@ use std::fs;
 use std::sync::Arc;
 use std::collections::VecDeque;
 
+use bumpalo::Bump;
 #[cfg(feature = "dbg")]
 use tramer::tramer;
 
@@ -15,11 +16,13 @@ pub type Graph<'a> = StrHashMap::<'a, Arc::<StrIndexSet<'a>>>;
 
 #[cfg_attr(feature = "dbg", tramer("nanos"))]
 pub fn build_dependency_graph<'a>(
+    arena: &'a Bump,
     processed: &'a Compiled,
     default_job: DefaultJob<'a>
 ) -> (Graph<'a>, DefaultJob<'a>, Graph<'a>) {
     fn collect_deps<'a>(
         node: &'a str,
+        arena: &'a Bump,
         parsed: &'a Compiled,
         graph: &mut Graph<'a>,
         visited: &mut StrHashSet<'a>,
@@ -45,20 +48,15 @@ pub fn build_dependency_graph<'a>(
 
         // check if depfile exists, if it does => read it, extend our deps with the ones that are listed in the .d file
         if let Some(job) = parsed.jobs.get(node) {
-            if let Some(Some(rule)) = job.rule().map(|rule| parsed.rules.get(rule)) {
-                if let Some(ref depfile_template) = rule.depfile {
-                    let depfile_path = match depfile_template.compile(job, &parsed.defs) {
-                        Ok(ok) => ok,
-                        Err(e) => report_panic!(job.loc, "{e}")
-                    };
-                    if let Ok(depfile) = fs::read_to_string(&depfile_path) {
-                        let depfile = Box::leak(depfile.into_boxed_str());
-                        let colon_idx = depfile.find(':').unwrap_dbg();
-                        let depfile_deps = depfile[colon_idx + 1..]
-                            .split_ascii_whitespace()
-                            .filter(|f| *f != "\\");
-                        deps.extend(depfile_deps);
-                    }
+            if let Some(depfile_path) = job.depfile() {
+                if let Ok(depfile) = fs::read_to_string(depfile_path) {
+                    let depfile = arena.alloc_str(&depfile);
+                    let colon_idx = depfile.find(':').unwrap_dbg();
+                    let depfile_deps = depfile[colon_idx + 1..]
+                        .split_ascii_whitespace()
+                        .filter(|f| *f != "\\");
+
+                    deps.extend(depfile_deps);
                 }
             }
         }
@@ -72,7 +70,7 @@ pub fn build_dependency_graph<'a>(
             .filter(|dep| !is_system_header(dep))
             .fold(Vec::with_capacity(deps.len()), |mut transitive, dep|
         {
-            let deps = collect_deps(&dep, parsed, graph, visited, transitive_deps);
+            let deps = collect_deps(&dep, arena, parsed, graph, visited, transitive_deps);
             transitive.extend(deps.iter().map(|h| *h));
             transitive
         });
@@ -95,7 +93,7 @@ pub fn build_dependency_graph<'a>(
     let mut transitive_deps = Graph::with_capacity(n);
 
     for target in processed.jobs.keys() {
-        collect_deps(target, processed, &mut graph, &mut visited, &mut transitive_deps);
+        collect_deps(target, arena, processed, &mut graph, &mut visited, &mut transitive_deps);
     }
 
     let default_job = default_job.or({

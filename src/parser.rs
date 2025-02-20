@@ -181,6 +181,7 @@ pub mod comp {
             inputs: Vec::<&'a str>,
             inputs_str: &'a str,
             deps: Vec::<&'a str>,
+            depfile: Option::<String>,
         }
     }
 
@@ -193,6 +194,12 @@ pub mod comp {
     }
 
     impl<'a> Job<'a> {
+        #[inline(always)]
+        pub fn depfile(&self) -> Option::<&String> {
+            if let Phony::NotPhony { depfile, .. } = &self.phony { depfile.as_ref() }
+            else { None }
+        }
+
         #[inline(always)]
         pub fn aliases(&self) -> Option::<&Aliases> {
             if let Phony::Phony { aliases, .. } = &self.phony { Some(aliases) }
@@ -342,7 +349,7 @@ impl<'a> Parsed<'a> {
                             }
                         }).collect::<Vec::<_>>();
 
-                    comp::Job {
+                    let mut job = comp::Job {
                         target,
                         loc: job.loc,
                         shadows: job.shadows.as_ref().map(Arc::clone),
@@ -351,8 +358,26 @@ impl<'a> Parsed<'a> {
                             inputs,
                             inputs_str,
                             rule: *rule,
+                            depfile: None
+                        }
+                    };
+
+                    if let Some(Some(rule)) = job.rule().map(|rule| rules.get(rule)) {
+                        if let Some(ref depfile_template) = rule.depfile {
+                            let depfile_path = match depfile_template.compile(&job, &defs) {
+                                Ok(ok) => ok,
+                                Err(e) => panic!("{e}\n")
+                            };
+
+                            let comp::Phony::NotPhony { depfile, .. } = &mut job.phony else {
+                                unsafe { std::hint::unreachable_unchecked() }
+                            };
+
+                            *depfile = Some(depfile_path)
                         }
                     }
+
+                    job
                 }
             };
 
@@ -442,18 +467,22 @@ pub struct Compiled<'a> {
 
 impl Compiled<'_> {
     pub fn generate_clean_job<'bump>(&self, arena: &'bump Bump, flags: &Flags) -> Command<'bump> {
-        let mut count = 0;
-        let targets_iter = self.jobs.values()
+        let targets = self.jobs.values()
             .filter(|j| matches!(j.phony, comp::Phony::NotPhony { .. }))
-            .filter(|j| fs::exists::<&Path>(j.target.as_ref()).unwrap_or(false))
-            .map(|j| {
-                count += 1;
-                j.target
+            .fold(Vec::with_capacity(64), |mut files, j| {
+                if fs::exists::<&Path>(j.target.as_ref()).unwrap_or(false) {
+                    files.push(j.target)
+                }
+
+                if let Some(dp) = j.depfile() {
+                    if fs::exists::<&Path>(dp.as_ref()).unwrap_or(false) {
+                        files.push(dp)
+                    }
+                } files
             });
 
         let (command, description) = if flags.verbose() {
-            let targets = targets_iter.collect::<Vec::<_>>();
-            let targets_str = targets.iter().flat_map(|t| [" ", t]).collect::<String>();
+            let targets_str = targets.join(" ");
             let command = format!("rm -f {targets_str}");
             let mut description = String::with_capacity(
                 (1 + "deleted".len() + targets.len() + 1 + 1) * 24 +
@@ -465,13 +494,16 @@ impl Compiled<'_> {
                 description.push_str("]\n");
             }
             description.push_str("[cleaned ");
-            description.push_str(&count.to_string());
+            description.push_str(&targets.len().to_string());
             description.push_str(" files]");
             (command, description)
         } else {
-            let targets_str = targets_iter.flat_map(|t| [" ", t]).collect::<String>();
+            let targets_str = targets.join(" ");
             let command = format!("rm -f {targets_str}");
-            let description = format!("[cleaned {count} files]");
+            let description = format!{
+                "[cleaned {count} files]",
+                count = targets.len()
+            };
             (command, description)
         };
 

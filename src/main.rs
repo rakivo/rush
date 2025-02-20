@@ -128,7 +128,7 @@ fn main() -> ExitCode {
     let content = mmap.as_ref().map(|mmap| unsafe { std::str::from_utf8_unchecked(&mmap[..]) });
     let db = content.and_then(|content| Db::read(content).ok());
 
-    let (graph, default_job, transitive_deps) = build_dependency_graph(&context, default_job);
+    let (graph, default_job, transitive_deps) = build_dependency_graph(&arena, &context, default_job);
 
     if flags.print_default_job() {
         if let Some(comp::Job { target, .. }) = default_job.as_ref() {
@@ -140,7 +140,16 @@ fn main() -> ExitCode {
         }
     }
 
-    _ = CommandRunner::run(clean, &arena, &context, graph, transitive_deps, flags, db, default_job).write_finish();
+    _ = CommandRunner::run(
+        clean,
+        &arena,
+        &context,
+        graph,
+        transitive_deps,
+        flags,
+        db,
+        default_job
+    ).write_finish();
 
     ExitCode::SUCCESS
 }
