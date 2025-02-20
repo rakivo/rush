@@ -1,5 +1,6 @@
 use crate::db::Db;
 use crate::loc::Loc;
+use std::borrow::Cow;
 use crate::flags::Flags;
 use crate::command::Command;
 use crate::consts::syntax::*;
@@ -7,14 +8,14 @@ use crate::template::Template;
 use crate::dbg_unwrap::DbgUnwrap;
 use crate::ux::did_you_mean_compiled;
 use crate::types::{StrHashMap, StrHashSet};
-use crate::consts::{CLEAN_TARGET, PHONY_TARGETS};
+use crate::consts::{CLEAN_TARGET, PHONY_TARGETS, BUILD_DIR_VARIABLE};
 
 use std::mem;
 use std::sync::Arc;
-use std::path::Path;
 use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 use memmap2::Mmap;
 use bumpalo::Bump;
@@ -22,21 +23,13 @@ use bumpalo::Bump;
 use tramer::tramer;
 use fxhash::FxBuildHasher;
 
-#[inline]
-pub fn read_file(path: &str) -> Option::<Mmap> {
-    if fs::read_dir(".")
-        .expect("could not read cwd")
-        .filter_map(|res| res.map(|e| e.path()).ok())
-        .find(|_path| {
-            _path.file_name()
-                .map_or(false, |name| name.to_string_lossy() == path)
-        }).is_some()
-    {
-        let file = File::open(path).ok()?;
-        Some(unsafe { Mmap::map(&file) }.ok()?)
-    } else {
-        None
-    }
+#[inline(always)]
+pub fn read_file<P>(path: P) -> Option::<Mmap>
+where
+    P: AsRef::<Path>
+{
+    let file = File::open(path).ok()?;
+    Some(unsafe { Mmap::map(&file) }.ok()?)
 }
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
@@ -454,7 +447,15 @@ impl<'a> Parsed<'a> {
             Template::new(dt.t, dt.loc).compile_def(&defs)
         });
 
-        Compiled {jobs, rules, defs, default_target}
+        let cache_file_path = if let Some(comp::Def(build_dir)) = defs.get(BUILD_DIR_VARIABLE) {
+            let mut path_buf = PathBuf::from(build_dir);
+            path_buf.push(Db::RUSH_FILE_NAME);
+            Cow::Owned(path_buf.to_string_lossy().into_owned())
+        } else {
+            Cow::Borrowed(Db::RUSH_FILE_NAME)
+        };
+
+        Compiled {jobs, rules, defs, default_target, cache_file_path}
     }
 }
 
@@ -462,6 +463,7 @@ impl<'a> Parsed<'a> {
 pub struct Compiled<'a> {
     pub defs: comp::Defs<'a>,
     pub default_target: DefaultTarget,
+    pub cache_file_path: Cow::<'a, str>,
     pub rules: StrHashMap::<'a, Rule<'a>>,
     pub jobs: StrHashMap::<'a, comp::Job<'a>>,
 }

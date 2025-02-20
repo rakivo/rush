@@ -124,11 +124,17 @@ fn main() -> ExitCode {
         })
     });
 
-    let mmap = Db::read_cache();
-    let content = mmap.as_ref().map(|mmap| unsafe { std::str::from_utf8_unchecked(&mmap[..]) });
+    let mmap = Db::read_cache(&context.cache_file_path);
+    let content = mmap.as_ref().map(|mmap| unsafe {
+        std::str::from_utf8_unchecked(&mmap[..])
+    });
     let db = content.and_then(|content| Db::read(content).ok());
 
-    let (graph, default_job, transitive_deps) = build_dependency_graph(&arena, &context, default_job);
+    let (graph, default_job, transitive_deps) = build_dependency_graph(
+        &arena,
+        &context,
+        default_job
+    );
 
     if flags.print_default_job() {
         if let Some(comp::Job { target, .. }) = default_job.as_ref() {
@@ -149,7 +155,7 @@ fn main() -> ExitCode {
         flags,
         db,
         default_job
-    ).write_finish();
+    ).write_finish(&context.cache_file_path);
 
     ExitCode::SUCCESS
 }

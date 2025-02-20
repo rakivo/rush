@@ -14,3 +14,5 @@ pub mod syntax {
 
 pub const CLEAN_TARGET: &str = "clean";
 pub const PHONY_TARGETS: &[&str] = &["all", CLEAN_TARGET];
+
+pub const BUILD_DIR_VARIABLE: &str = "builddir";
