@@ -2,6 +2,7 @@ use crate::parser::read_file;
 use crate::types::StrDashMap;
 
 use std::fs;
+use std::path::Path;
 use std::io::{self, Write};
 
 use memmap2::Mmap;
@@ -71,6 +72,15 @@ impl<'a> Db<'a> {
     }
 
     pub fn write_finish(&self) -> io::Result::<()> {
+        if self.map.is_empty() {
+            if !fs::exists::<&Path>(Self::RUSH_FILE_NAME.as_ref())
+                .unwrap_or(false)
+            {
+                return Ok(())
+            }
+            return fs::remove_file(Self::RUSH_FILE_NAME)
+        }
+
         let mut buf = String::with_capacity(256 + 20 + 1);
         let mut file = fs::File::create(Self::RUSH_FILE_NAME)?;
         for e in self.map.iter() {
