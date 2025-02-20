@@ -1,3 +1,4 @@
+use crate::db::Db;
 use crate::loc::Loc;
 use crate::flags::Flags;
 use crate::command::Command;
@@ -470,6 +471,10 @@ impl Compiled<'_> {
         let targets = self.jobs.values()
             .filter(|j| matches!(j.phony, comp::Phony::NotPhony { .. }))
             .fold(Vec::with_capacity(64), |mut files, j| {
+                if fs::exists::<&Path>(Db::RUSH_FILE_NAME.as_ref()).unwrap_or(false) {
+                    files.push(Db::RUSH_FILE_NAME)
+                }
+
                 if fs::exists::<&Path>(j.target.as_ref()).unwrap_or(false) {
                     files.push(j.target)
                 }
