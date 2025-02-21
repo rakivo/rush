@@ -70,15 +70,16 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE
     };
 
-    let content = unsafe { std::str::from_utf8_unchecked(&mmap[..]) };
-    let (content, escaped_indexes) = Parser::preprocess_content(content);
-    let context = Parser::parse(&content, &escaped_indexes);
-    let reserve = context.guess_preallocation();
-    #[cfg(feature = "dbg")] {
-        println!("guessed size: {reserve}")
-    }
+    let content_ = unsafe { std::str::from_utf8_unchecked(&mmap[..]) };
+    let mut content = String::with_capacity(content_.len());
+    let escaped_indexes = Parser::preprocess_content(content_, &mut content);
+    let arena = Bump::with_capacity(1024 * 1024);
+    let context = Parser::parse(&arena, &content, &escaped_indexes);
+    // let reserve = context.guess_preallocation();
+    // #[cfg(feature = "dbg")] {
+    //     println!("guessed size: {reserve}")
+    // }
 
-    let arena = Bump::with_capacity(reserve);
     let context = context.compile(&arena);
 
     #[cfg(feature = "dbg")] {

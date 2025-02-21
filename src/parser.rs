@@ -1,6 +1,5 @@
 use crate::db::Db;
 use crate::loc::Loc;
-use std::borrow::Cow;
 use crate::flags::Flags;
 use crate::command::Command;
 use crate::consts::syntax::*;
@@ -11,7 +10,9 @@ use crate::types::{StrHashMap, StrHashSet};
 use crate::consts::{CLEAN_TARGET, PHONY_TARGETS, BUILD_DIR_VARIABLE};
 
 use std::mem;
+use std::io::Read;
 use std::sync::Arc;
+use std::borrow::Cow;
 use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
 use std::collections::HashSet;
@@ -589,6 +590,7 @@ type EscapedIndexes = Vec::<(usize, usize)>;
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct Parser<'a> {
     cursor: usize,
+    arena: &'a Bump,
     context: Context<'a>,
     pub parsed: Parsed<'a>,
 }
@@ -650,6 +652,8 @@ impl<'a> Parser<'a> {
             .map(|p| p + first_space) else {
                 return
             };
+
+        let second_token = line[first_space..].trim();
         
         let parse_shadow = || -> &'a str {
             let check_start = first_space;
@@ -756,8 +760,48 @@ impl<'a> Parser<'a> {
             },
             Context::Global => {
                 match first_token {
+                    SUBRUSH => {
+                        let path = second_token;
+                        let mut file = match File::open(path) {
+                            Ok(ok) => ok,
+                            Err(e) => report_panic!{
+                                Loc(self.cursor),
+                                "could not read: {path}: {e}"
+                            }
+                        };
+
+                        let file_size = file.metadata().unwrap().len() as usize;
+                        let content = self.arena.alloc_slice_fill_default(file_size);
+
+                        if let Err(e) = file.read_exact(content) {
+                            report_panic!{
+                                Loc(self.cursor),
+                                "could not read: {path}: {e}"
+                            }
+                        }
+
+                        let content = unsafe { std::str::from_utf8_unchecked(&*content) };
+
+                        // TODO: preprocess allocated string in-place, without additional allocation
+                        let buf = self.arena.alloc_slice_fill_default(content.len());
+
+                        let mut string = unsafe { String::from_raw_parts(buf.as_mut_ptr(), 0, buf.len()) };
+
+                        let escaped_indexes = Parser::preprocess_content(content, &mut string);
+
+                        let len = string.len();
+                        let ptr = string.as_ptr();
+
+                        let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
+                        let content = unsafe { std::str::from_utf8_unchecked(&slice) };
+
+                        // this memory belongs to arena -> it is going to be deallocated
+                        mem::forget(string);
+
+                        _ = self.parse_lines(content, &escaped_indexes)
+                    },
                     PHONY => {
-                        let phony = line[first_space..].trim();
+                        let phony = second_token;
                         if phony.as_bytes().last() == Some(&b':') {
                             report_panic!{
                                 Loc(self.cursor),
@@ -772,7 +816,7 @@ impl<'a> Parser<'a> {
                     },
                     DEFAULT => {
                         self.parsed.default_target = Some(prep::Target {
-                            t: line[first_space..].trim(),
+                            t: second_token,
                             loc: Loc(self.cursor)
                         });
                     },
@@ -873,8 +917,7 @@ impl<'a> Parser<'a> {
     }
 
     #[cfg_attr(feature = "dbg", tramer("nanos"))]
-    pub fn preprocess_content(input: &str) -> (String, EscapedIndexes) {
-        let mut ret = String::with_capacity(input.len());
+    pub fn preprocess_content(input: &str, buf: &mut String) -> EscapedIndexes {
         let mut indexes = Vec::with_capacity(32);
 
         let mut lines = input.lines().enumerate().peekable();
@@ -898,8 +941,8 @@ impl<'a> Parser<'a> {
 
                 if let Some((.., next_line)) = lines.peek() {
                     let next_trimmed = next_line.trim_start();
-                    ret.push_str(curr_line);
-                    ret.push(' ');
+                    buf.push_str(curr_line);
+                    buf.push(' ');
                     curr_line = next_trimmed;
                     lines.next();
                 } else {
@@ -911,14 +954,28 @@ impl<'a> Parser<'a> {
                 indexes.push((index, escaped_lines))
             }
 
-            ret.push_str(curr_line);
-            ret.push('\n');
-        } (ret, indexes)
+            buf.push_str(curr_line);
+            buf.push('\n')
+        } indexes
+    }
+
+    #[inline]
+    fn parse_lines(&mut self, content: &'a str, escaped_indexes: &EscapedIndexes) {
+        let mut escaped_index = 0;
+        for line in content.lines() {
+            self.cursor += 1;
+            if escaped_index < escaped_indexes.len() && escaped_indexes[escaped_index].0 <= self.cursor {
+                self.cursor += escaped_indexes[escaped_index].1;
+                escaped_index += 1
+            }
+            self.parse_line(line, line.trim_start())
+        }
     }
 
     #[cfg_attr(feature = "dbg", tramer("millis"))]
-    pub fn parse(content: &'a str, escaped_indexes: &EscapedIndexes) -> Parsed<'a> {
+    pub fn parse(arena: &'a Bump, content: &'a str, escaped_indexes: &EscapedIndexes) -> Parsed<'a> {
         let mut parser = Self {
+            arena,
             cursor: 0,
             parsed: Parsed {
                 defs: prep::Defs(StrHashMap::with_capacity(32)),
@@ -948,16 +1005,7 @@ impl<'a> Parser<'a> {
             context: Context::Global
         };
 
-        let mut escaped_index = 0;
-        for line in content.lines() {
-            parser.cursor += 1;
-            if escaped_index < escaped_indexes.len() && escaped_indexes[escaped_index].0 <= parser.cursor {
-                parser.cursor += escaped_indexes[escaped_index].1;
-                escaped_index += 1
-            }
-            parser.parse_line(line, line.trim_start())
-        }
-
+        parser.parse_lines(content, escaped_indexes);
         parser.finish_job();
         parser.finish_rule();
         parser.parsed

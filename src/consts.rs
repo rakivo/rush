@@ -2,6 +2,7 @@ pub mod syntax {
     pub const RULE: &str = "rule";
     pub const PHONY: &str = "phony";
     pub const BUILD: &str = "build";
+    pub const SUBRUSH: &str = "subrush";
 
     pub const COMMAND: &str = "command";
     pub const DEPFILE: &str = "depfile";

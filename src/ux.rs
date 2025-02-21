@@ -32,8 +32,8 @@ pub fn check_args<'a>(args: &'a [String]) -> Option::<&'a String> {
             }
 
             !FLAG_STRS.contains(&f) &&
-                !FLAG_STRS.contains(&v) &&
-                !MODE_STRS.contains(&v)
+            !FLAG_STRS.contains(&v) &&
+            !MODE_STRS.contains(&v)
         }).map(|w| &w[1]))
 }
 
