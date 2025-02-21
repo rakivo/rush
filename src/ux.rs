@@ -25,7 +25,7 @@ pub fn check_args<'a>(args: &'a [String]) -> Option::<&'a String> {
             if v.as_bytes().first().map_or(false, |&b| b == b'-') &&
                 !FLAG_STRS.contains(&f)
             {
-                eprintln!("undefined flag: {f}");
+                eprintln!("undefined flag: {v}");
                 if let Some(flag) = did_you_mean_flags(v) {
                     eprintln!("did you mean: {flag}?")
                 } exit(1)
