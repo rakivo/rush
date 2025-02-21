@@ -9,12 +9,12 @@ use crate::consts::{CLEAN_TARGET, PHONY_TARGETS};
 use crate::poll::{Poller, FdSender, PollingThread};
 use crate::graph::{Graph, Levels, topological_sort};
 
-use std::io;
-use std::thread;
 use std::sync::Arc;
-use std::path::Path;
+use std::{fs, thread};
 use std::time::Duration;
+use std::io::{self, Write};
 use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{Ordering, AtomicBool, AtomicUsize};
 
 use bumpalo::Bump;
@@ -61,7 +61,6 @@ impl std::ops::Deref for CommandRunner<'_> {
 }
 
 impl<'a> CommandRunner<'a> {
-    #[inline]
     fn run_levels(&mut self, levels: &Levels<'a>) {
         'outer: for level in levels.into_iter() {
             #[cfg(feature = "dbg")] {
@@ -166,7 +165,6 @@ impl<'a> CommandRunner<'a> {
         _ = self.run_levels(&levels)
     }
 
-    #[inline]
     pub fn run(
         clean: Command<'a>,
         arena: &'a Bump,
@@ -217,7 +215,6 @@ impl<'a> CommandRunner<'a> {
         })
     }
 
-    #[inline]
     fn run_phony(&mut self, job: &'a Job<'a>) {
         if job.target == CLEAN_TARGET {
             _ = self.execute_command(&self.clean, CLEAN_TARGET).map(|_| self.executed_jobs += 1);
@@ -297,8 +294,16 @@ impl<'a> CommandRunner<'a> {
         fn create_dirs_if_needed(path: &str) -> io::Result::<()> {
             let path: &Path = path.as_ref();
             if let Some(parent) = path.parent() {
-                if parent.exists() { return Ok(()) }
-                std::fs::create_dir_all(parent)?
+                if !parent.exists() {
+                    _ = fs::create_dir_all(parent)?
+                }
+
+                let mut path_buf = PathBuf::from(parent);
+                path_buf.push(".gitignore");
+
+                if let Ok(mut file) = fs::File::create_new(path_buf) {
+                    _ = file.write(b"*")
+                }
             } Ok(())
         }
 
