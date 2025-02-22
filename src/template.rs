@@ -227,7 +227,10 @@ impl Template<'_> {
         compiled_defs: &mut comp::Defs<'a>,
     ) {
         if compiling.contains(name) {
-            panic!("circular reference detected involving {name}")
+            report_panic!{
+                def.0.loc,
+                "circular reference detected involving {name}"
+            }
         }
 
         if compiled_defs.contains_key(name) { return }
@@ -246,7 +249,10 @@ impl Template<'_> {
                     if !ret.is_empty() && !placeholder.is_empty() { ret.push(' ') }
 
                     if compiling.contains(placeholder) {
-                        panic!("circular reference detected involving {placeholder}")
+                        report_panic!{
+                            def.0.loc,
+                            "circular reference detected involving {placeholder}"
+                        }
                     }
 
                     let compiled = match defs.0.get(placeholder) {
@@ -256,14 +262,20 @@ impl Template<'_> {
                             }
                             compiled_defs.get(placeholder).unwrap_dbg().0.as_str()
                         }
-                        None => panic!("Undefined variable: {placeholder}")
+                        None => report_panic!{
+                            def.0.loc,
+                            "undefined variable: {placeholder}"
+                        }
                     };
 
                     ret.push_str(compiled)
                 }
                 TemplateChunk::JoinedPlaceholder(placeholder) => {
                     if compiling.contains(placeholder) {
-                        panic!("circular reference detected involving {placeholder}")
+                        report_panic!{
+                            def.0.loc,
+                            "circular reference detected involving {placeholder}"
+                        }
                     }
 
                     let compiled = match defs.0.get(placeholder) {
@@ -273,7 +285,10 @@ impl Template<'_> {
                             }
                             compiled_defs.get(placeholder).unwrap_dbg().0.as_str()
                         }
-                        None => panic!("Undefined variable: {placeholder}")
+                        None => report_panic!{
+                            def.0.loc,
+                            "undefined variable: {placeholder}"
+                        }
                     };
 
                     ret.push_str(compiled)
