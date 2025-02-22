@@ -5,7 +5,7 @@ mod ux;
 mod cr;
 mod db;
 mod util;
-mod poll;
+// mod poll;
 mod flags;
 mod types;
 mod graph;
@@ -19,9 +19,9 @@ mod edit_distance;
 use db::Db;
 use flags::Flags;
 use cr::CommandRunner;
+use ux::did_you_mean_compiled;
 use graph::build_dependency_graph;
 use parser::{comp, Parser, read_file};
-use ux::{check_args, did_you_mean_compiled};
 
 use std::env;
 use std::process::{exit, ExitCode};
@@ -30,15 +30,6 @@ use bumpalo::Bump;
 use flager::Parser as FlagParser;
 
 fn main() -> ExitCode {
-    let args = env::args().collect::<Vec::<_>>();
-    if let Some(undefined_flag) = check_args(&args) {
-        eprintln!{
-            "did you mean: {program} -t {undefined_flag} [..flags]?",
-            program = args[0],
-        };
-        return ExitCode::FAILURE
-    }
-
     let flag_parser = FlagParser::new();
     let flags = Flags::new(&flag_parser);
 

@@ -1,24 +1,22 @@
 use crate::flags::Flags;
-use crate::types::StrHashSet;
+use crate::types::StrDashSet;
 use crate::db::{Db, Metadata};
 use crate::ux::did_you_mean_compiled;
 use crate::parser::comp::{Edge, Phony};
 use crate::command::{Command, MetadataCache};
 use crate::parser::{Rule, Compiled, DefaultEdge};
 use crate::consts::{CLEAN_TARGET, PHONY_TARGETS};
-use crate::poll::{Poller, FdSender, PollingThread};
 use crate::graph::{Graph, Levels, topological_sort};
 
-use std::thread;
 use std::sync::Arc;
-use std::time::Duration;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{Ordering, AtomicBool, AtomicUsize};
+use std::sync::atomic::{Ordering, AtomicUsize};
 
-use dashmap::DashMap;
+use rayon::prelude::*;
+use fxhash::FxBuildHasher;
 
 #[derive(PartialEq)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
@@ -35,12 +33,11 @@ pub struct CommandRunner<'a> {
 
     default_edge: DefaultEdge<'a>,
 
-    fd_sender: FdSender,
-    poller: Arc::<Poller>,
-    polling_thread: PollingThread,
+    flags: Flags,
+    failed_edges_count: AtomicUsize,
 
-    executed_edges: StrHashSet<'a>,
-    executed_edges_curr_level: usize,
+    executed_edges: StrDashSet<'a>,
+    executed_edges_curr_level: AtomicUsize,
 
     db_read: Option::<Db<'a>>,
     db_write: Db<'a>,
@@ -49,41 +46,16 @@ pub struct CommandRunner<'a> {
     metadata_cache: MetadataCache<'a>
 }
 
-impl std::ops::Deref for CommandRunner<'_> {
-    type Target = Poller;
-    #[inline(always)]
-    fn deref(&self) -> &Self::Target { &self.poller }
-}
-
 impl<'a> CommandRunner<'a> {
-    fn run_levels(&mut self, levels: &Levels<'a>) {
-        'outer: for level in levels.into_iter() {
+    fn run_levels(&self, levels: &Levels<'a>) {
+        for level in levels.into_iter() {
             #[cfg(feature = "dbg")] {
                 println!("RUNNING LEVEL: {level:#?}")
             }
 
-            {
-                self.edges_done.store(0, Ordering::Relaxed);
-                self.executed_edges_curr_level = 0
-            }
-
-            for edge in level.into_iter().filter_map(|t| self.context.edges.get(t)) {
-                self.resolve_and_run(edge);
-                if self.stop.load(Ordering::Relaxed) { break 'outer }
-            }
-
-            loop {
-                let jobs_done = self.edges_done.load(Ordering::Relaxed);
-                if jobs_done >= self.executed_edges_curr_level { break }
-                #[cfg(feature = "dbg")] {
-                    println!("{jobs_done} < {e}", e = self.executed_jobs)
-                } thread::sleep(Duration::from_millis(50))
-            }
-
-            {
-                self.executed_edges_curr_level = 0;
-                self.edges_done.store(0, Ordering::Relaxed)
-            }
+            level.into_par_iter().filter_map(|t| self.context.edges.get(t)).for_each(|edge| {
+                self.resolve_and_run(edge)
+            })
         }
     }
 
@@ -96,32 +68,23 @@ impl<'a> CommandRunner<'a> {
         db_read: Option::<Db<'a>>,
         default_edge: DefaultEdge<'a>,
     ) -> Self {
-        let (poller, fd_sender, polling_thread) = Poller::spawn(
-            Arc::new(flags),
-            Arc::new(AtomicBool::new(false)),
-            Arc::new(AtomicUsize::new(0)),
-            Arc::new(AtomicUsize::new(0)),
-            Arc::new(DashMap::new())
-        );
-
         let n = context.edges.len();
 
         Self {
             clean,
+            flags,
             graph,
-            poller,
             context,
             db_read,
-            fd_sender,
             default_edge,
-            polling_thread,
             transitive_deps,
 
             not_up_to_date: None,
             db_write: Db::write(),
-            executed_edges_curr_level: 0,
             metadata_cache: MetadataCache::new(n),
-            executed_edges: StrHashSet::with_capacity(n)
+            failed_edges_count: AtomicUsize::new(0),
+            executed_edges_curr_level: AtomicUsize::new(0),
+            executed_edges: StrDashSet::with_capacity_and_hasher(n, FxBuildHasher::default())
         }
     }
 
@@ -133,8 +96,6 @@ impl<'a> CommandRunner<'a> {
                 Some(target) => println!("[{target} is not up to date]")
             }
         }
-        self.stop.store(true, Ordering::Relaxed);
-        _ = self.polling_thread.join();
         self.db_write
     }
 
@@ -152,7 +113,7 @@ impl<'a> CommandRunner<'a> {
     }
 
     #[inline]
-    fn resolve_and_run_target(&mut self, edge: &Edge<'a>) {
+    fn resolve_and_run_target(&self, edge: &Edge<'a>) {
         let levels = {
             let subgraph = self.build_subgraph(edge.target);
             topological_sort(&subgraph)
@@ -169,7 +130,7 @@ impl<'a> CommandRunner<'a> {
         db_read: Option::<Db<'a>>,
         default_edge: DefaultEdge<'a>,
     ) -> Db<'a> {
-        let mut cr = Self::new(
+        let cr = Self::new(
             clean,
             context,
             graph,
@@ -194,23 +155,52 @@ impl<'a> CommandRunner<'a> {
         cr.finish()
     }
 
-    #[inline]
-    fn execute_command(&self, command: &Command, target: &str) -> io::Result::<()> {
-        if self.flags.print_commands() {
-            let output = command.to_string(&self.flags);
-            println!("{output}");
-            return Ok(())
+    fn execute_command(&self, command: &Command, target: &str) -> io::Result<()> {
+        if !self.flags.quiet() {
+            if self.flags.print_commands() {
+                let output = command.to_string(&self.flags);
+
+                print!("\x1B[2K\r{output}");
+                std::io::stdout().flush().unwrap();
+                return Ok(())
+            }
+
+            print!("\x1B[2K\r{command}", command = command.to_string(&self.flags));
+            _ = std::io::stdout().flush().unwrap()
         }
 
-        command.execute(&self.poller, FdSender::clone(&self.fd_sender)).map_err(|e| {
-            println!("[could not execute edge: {target}: {e}]");
-            e
-        })
+        let out = command.execute()
+            .inspect_err(|e| {
+                eprintln!("[could not execute edge: {target}: {e}]");
+            }).map(|out| {
+                if out.status != 0 {
+                    if let Some(&max) = self.flags.max_fail_count() {
+                        self.failed_edges_count.fetch_add(1, Ordering::Relaxed);
+                        let failed_edges_count = self.failed_edges_count.load(Ordering::Relaxed);
+                        if failed_edges_count >= max {
+                            eprintln!{
+                                "[{failed_edges_count} {job} exited with non-zero code, aborting..]",
+                                job = if failed_edges_count > 1 { "jobs are" } else { "job" }
+                            };
+                            std::process::exit(1)
+                        }
+                    }
+                } out
+            })?;
+
+        let out = out.to_string(&self.flags);
+        if !out.is_empty() {
+            print!("\n{out}")
+        }
+
+        Ok(())
     }
 
-    fn run_phony(&mut self, edge: &'a Edge<'a>) {
+    fn run_phony(&self, edge: &'a Edge<'a>) {
         if edge.target == CLEAN_TARGET {
-            _ = self.execute_command(&self.clean, CLEAN_TARGET).map(|_| self.executed_edges_curr_level += 1);
+            _ = self.execute_command(&self.clean, CLEAN_TARGET).map(|_| {
+                self.executed_edges_curr_level.fetch_add(1, Ordering::Relaxed)
+            });
             return
         }
 
@@ -242,11 +232,13 @@ impl<'a> CommandRunner<'a> {
 
         _ = command.as_ref().map(|command| {
             let command = Command {command, target: edge.target, description: None};
-            self.execute_command(&command, edge.target).map(|_| self.executed_edges_curr_level += 1)
+            self.execute_command(&command, edge.target).map(|_| {
+                self.executed_edges_curr_level.fetch_add(1, Ordering::Relaxed)
+            })
         });
     }
 
-    fn execute_edge(&mut self, edge: &Edge<'a>, rule: &Rule) -> ExecutorFlow {
+    fn execute_edge(&self, edge: &Edge<'a>, rule: &Rule) -> ExecutorFlow {
         #[inline(always)]
         fn hash(command: &str) -> u64 {
             let mut hasher = fnv::FnvHasher::default();
@@ -300,7 +292,9 @@ impl<'a> CommandRunner<'a> {
         }
 
         if edge.target == CLEAN_TARGET {
-            _ = self.execute_command(&self.clean, CLEAN_TARGET).map(|_| self.executed_edges_curr_level += 1);
+            _ = self.execute_command(&self.clean, CLEAN_TARGET).map(|_| {
+                self.executed_edges_curr_level.fetch_add(1, Ordering::Relaxed)
+            });
             return ExecutorFlow::Ok
         }
 
@@ -310,7 +304,7 @@ impl<'a> CommandRunner<'a> {
 
         if needs_rebuild(self, edge, &command) {
             if self.flags.check_is_up_to_date() {
-                self.not_up_to_date = Some(edge.target);
+                // self.not_up_to_date = Some(edge.target);
                 return ExecutorFlow::Stop
             }
 
@@ -335,7 +329,7 @@ impl<'a> CommandRunner<'a> {
             let description = description.as_deref();
 
             let command = Command {target, command, description};
-            _ = self.execute_command(&command, edge.target).map(|_| self.executed_edges_curr_level += 1);
+            _ = self.execute_command(&command, edge.target).map(|_| self.executed_edges_curr_level.fetch_add(1, Ordering::Relaxed));
         } else {
             let mut any_err = false;
             if let Err(err) = rule.command.check(&edge.shadows, &self.context.defs) {
@@ -360,7 +354,7 @@ impl<'a> CommandRunner<'a> {
         } ExecutorFlow::Ok
     }
 
-    fn resolve_and_run(&mut self, edge: &'a Edge<'a>) {
+    fn resolve_and_run(&self, edge: &'a Edge<'a>) {
         // TODO: reserve total amount of edges here
         let mut stack = vec![edge];
         while let Some(edge) = stack.pop() {

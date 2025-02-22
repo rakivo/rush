@@ -915,7 +915,7 @@ impl<'a> Parser<'a> {
                     buf.push_str(curr_line);
                     buf.push(' ');
                     curr_line = next_trimmed;
-                    lines.next();
+                    _ = lines.next()
                 } else {
                     break
                 }
