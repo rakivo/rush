@@ -1,9 +1,9 @@
+use crate::util;
 use crate::parser::comp::Phony;
 use crate::dbg_unwrap::DbgUnwrap;
 use crate::parser::{Compiled, DefaultJob};
 use crate::types::{StrHashMap, StrHashSet, StrIndexSet};
 
-use std::fs;
 use std::sync::Arc;
 use std::collections::VecDeque;
 
@@ -49,8 +49,7 @@ pub fn build_dependency_graph<'a>(
         // check if depfile exists, if it does => read it, extend our deps with the ones that are listed in the .d file
         if let Some(job) = parsed.jobs.get(node) {
             if let Some(depfile_path) = job.depfile() {
-                if let Ok(depfile) = fs::read_to_string(depfile_path) {
-                    let depfile = arena.alloc_str(&depfile);
+                if let Ok(depfile) = util::read_file_into_arena_str(arena, depfile_path) {
                     let colon_idx = depfile.find(':').unwrap_dbg();
                     let depfile_deps = depfile[colon_idx + 1..]
                         .split_ascii_whitespace()

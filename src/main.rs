@@ -4,6 +4,7 @@ mod loc;
 mod ux;
 mod cr;
 mod db;
+mod util;
 mod poll;
 mod flags;
 mod types;
@@ -73,12 +74,11 @@ fn main() -> ExitCode {
     let content_ = unsafe { std::str::from_utf8_unchecked(&mmap[..]) };
     let mut content = String::with_capacity(content_.len());
     let escaped_indexes = Parser::preprocess_content(content_, &mut content);
-    let arena = Bump::with_capacity(1024 * 1024);
+
+    let arena_cap = content.len().max(1024 * 1024);
+
+    let arena = Bump::with_capacity(arena_cap);
     let context = Parser::parse(&arena, &content, &escaped_indexes);
-    // let reserve = context.guess_preallocation();
-    // #[cfg(feature = "dbg")] {
-    //     println!("guessed size: {reserve}")
-    // }
 
     let context = context.compile(&arena);
 
@@ -149,7 +149,6 @@ fn main() -> ExitCode {
 
     _ = CommandRunner::run(
         clean,
-        &arena,
         &context,
         graph,
         transitive_deps,

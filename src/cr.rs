@@ -17,7 +17,6 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{Ordering, AtomicBool, AtomicUsize};
 
-use bumpalo::Bump;
 use dashmap::DashMap;
 
 #[derive(PartialEq)]
@@ -26,8 +25,6 @@ enum ExecutorFlow { Ok, Stop }
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct CommandRunner<'a> {
-    arena: &'a Bump,
-
     context: &'a Compiled<'a>,
 
     clean: Command<'a>,
@@ -94,8 +91,7 @@ impl<'a> CommandRunner<'a> {
 
     fn new(
         clean: Command<'a>,
-        arena: &'a Bump,
-        context: &'a Compiled,
+        context: &'a Compiled<'a>,
         graph: Graph<'a>,
         transitive_deps: Graph<'a>,
         flags: Flags,
@@ -113,7 +109,6 @@ impl<'a> CommandRunner<'a> {
         Self {
             clean,
             graph,
-            arena,
             poller,
             context,
             db_read,
@@ -167,7 +162,6 @@ impl<'a> CommandRunner<'a> {
 
     pub fn run(
         clean: Command<'a>,
-        arena: &'a Bump,
         context: &'a Compiled,
         graph: Graph<'a>,
         transitive_deps: Graph<'a>,
@@ -177,7 +171,6 @@ impl<'a> CommandRunner<'a> {
     ) -> Db<'a> {
         let mut cr = Self::new(
             clean,
-            arena,
             context,
             graph,
             transitive_deps,
@@ -202,7 +195,7 @@ impl<'a> CommandRunner<'a> {
     }
 
     #[inline]
-    fn execute_command(&self, command: &Command<'a>, target: &str) -> io::Result::<()> {
+    fn execute_command(&self, command: &Command, target: &str) -> io::Result::<()> {
         if self.flags.print_commands() {
             let output = command.to_string(&self.flags);
             println!("{output}");
@@ -339,8 +332,8 @@ impl<'a> CommandRunner<'a> {
                 });
 
             let target = job.target;
-            let command = self.arena.alloc_str(&command);
-            let description = description.as_ref().map(|d| self.arena.alloc_str(d) as &_);
+            let command = command.as_ref();
+            let description = description.as_deref();
 
             let command = Command {target, command, description};
             _ = self.execute_command(&command, job.target).map(|_| self.executed_jobs += 1);

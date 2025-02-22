@@ -22,7 +22,6 @@ pub struct Template<'a> {
 }
 
 impl Template<'_> {
-    const PLACEHOLDER_MULTIPLIER: usize = 7;
     const AVERAGE_COMPILED_CHUNK_SIZE: usize = 24;
     const CONSTANT_PLACEHOLDERS: &'static [&'static str] = &["in", "out"];
 
@@ -114,18 +113,6 @@ impl Template<'_> {
         }
 
         Template { loc, in_used, statics_len, chunks }
-    }
-
-    #[inline]
-    pub fn guess_compiled_size(&self) -> usize {
-        self.chunks.iter().map(|c| {
-            match c {
-                TemplateChunk::Static(s) => s.len() + 1,
-                TemplateChunk::JoinedStatic(s) => s.len(),
-                TemplateChunk::Placeholder(p) => Self::PLACEHOLDER_MULTIPLIER * p.len() + 1,
-                TemplateChunk::JoinedPlaceholder(p) => Self::PLACEHOLDER_MULTIPLIER * p.len()
-            }
-        }).sum::<usize>() + self.chunks.len() * 8
     }
 
     #[inline]

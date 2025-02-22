@@ -1,3 +1,4 @@
+use crate::util;
 use crate::db::Db;
 use crate::loc::Loc;
 use crate::flags::Flags;
@@ -10,7 +11,6 @@ use crate::types::{StrHashMap, StrHashSet};
 use crate::consts::{CLEAN_TARGET, PHONY_TARGETS, BUILD_DIR_VARIABLE};
 
 use std::mem;
-use std::io::Read;
 use std::sync::Arc;
 use std::borrow::Cow;
 use std::fs::{self, File};
@@ -248,24 +248,6 @@ impl<'a> Parsed<'a> {
     #[inline(always)]
     fn rule_mut(&mut self, name: &str) -> &mut Rule<'a> {
         self.rules.get_mut(name).unwrap_dbg()
-    }
-
-    #[inline]
-    pub fn guess_preallocation(&self) -> usize {
-        self.jobs.values().map(|j| {
-            j.target_template.guess_compiled_size() + match &j.phony {
-                prep::Phony::Phony { .. } => 0,
-                prep::Phony::NotPhony { inputs_templates, deps_templates, .. } => {
-                    inputs_templates.iter()
-                        .chain(deps_templates.iter())
-                        .map(|t| t.guess_compiled_size())
-                        .sum::<usize>()
-                }
-            }
-        }).sum::<usize>() + self.rules.values().map(|r| {
-            r.command.guess_compiled_size() +
-                r.description.as_ref().map_or(0, |d| d.guess_compiled_size())
-        }).sum::<usize>()
     }
 
     #[cfg_attr(feature = "dbg", tramer("nanos"))]
@@ -762,25 +744,14 @@ impl<'a> Parser<'a> {
                 match first_token {
                     SUBRUSH => {
                         let path = second_token;
-                        let mut file = match File::open(path) {
+
+                        let content = match util::read_file_into_arena_str(self.arena, path) {
                             Ok(ok) => ok,
                             Err(e) => report_panic!{
                                 Loc(self.cursor),
                                 "could not read: {path}: {e}"
                             }
                         };
-
-                        let file_size = file.metadata().unwrap().len() as usize;
-                        let content = self.arena.alloc_slice_fill_default(file_size);
-
-                        if let Err(e) = file.read_exact(content) {
-                            report_panic!{
-                                Loc(self.cursor),
-                                "could not read: {path}: {e}"
-                            }
-                        }
-
-                        let content = unsafe { std::str::from_utf8_unchecked(&*content) };
 
                         // TODO: preprocess allocated string in-place, without additional allocation
                         let buf = self.arena.alloc_slice_fill_default(content.len());
