@@ -30,7 +30,7 @@ pub type SubprocessMap = DashMap::<i32, Arc::<Subprocess>>;
 pub struct Poller {
     pub flags: Arc::<Flags>,
     pub stop: Arc::<AtomicBool>,
-    pub jobs_done: Arc::<AtomicUsize>,
+    pub edges_done: Arc::<AtomicUsize>,
     pub active_fds: Arc::<AtomicUsize>,
     pub poll_fd_recv: Receiver::<PollFd<'static>>,
     pub fd_to_subprocess: Arc::<SubprocessMap>,
@@ -49,7 +49,7 @@ impl Poller {
         let poller = Self {
             flags,
             stop,
-            jobs_done: edges_done,
+            edges_done,
             active_fds,
             poll_fd_recv,
             fd_to_subprocess,
@@ -60,11 +60,6 @@ impl Poller {
             move || poller.start_polling()
         });
         (poller, fd_sender, thread)
-    }
-
-    #[inline(always)]
-    fn edge_is_done(&self) {
-        _ = self.jobs_done.fetch_add(1, Ordering::Relaxed)
     }
 
     #[inline]
@@ -79,6 +74,11 @@ impl Poller {
                 None
             }
         }
+    }
+
+    #[inline(always)]
+    fn edge_done(&self) {
+        _ = self.edges_done.fetch_add(1, Ordering::Relaxed)
     }
 
     fn start_polling(&self) {
@@ -99,12 +99,14 @@ impl Poller {
         };
 
         loop {
-            if self.stop.load(Ordering::Relaxed) && self.active_fds.load(Ordering::Relaxed) == 0 {
+            if self.stop.load(Ordering::Relaxed)
+                && self.active_fds.load(Ordering::Relaxed) == 0
+            {
                 break
             }
 
             while let Ok(poll_fd) = self.poll_fd_recv.try_recv() {
-                poll_fds.push(poll_fd);
+                poll_fds.push(poll_fd)
             }
 
             if poll_fds.is_empty() {
@@ -155,7 +157,7 @@ impl Poller {
                             }
 
                             if self.flags.rush() && !handled_pids.contains(pid) {
-                                self.edge_is_done()
+                                self.edge_done()
                             }
 
                             if !handled_pids.contains(pid) {
@@ -168,7 +170,7 @@ impl Poller {
                                             self.stop.store(true, Ordering::Relaxed);
                                             break 'outer
                                         }
-                                    } self.edge_is_done()
+                                    } self.edge_done()
                                 }
                                 _ = handled_pids.insert(*pid)
                             }

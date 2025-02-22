@@ -9,9 +9,10 @@ use crate::consts::{CLEAN_TARGET, PHONY_TARGETS};
 use crate::poll::{Poller, FdSender, PollingThread};
 use crate::graph::{Graph, Levels, topological_sort};
 
+use std::thread;
 use std::sync::Arc;
-use std::{fs, thread};
 use std::time::Duration;
+use std::fs::{self, File};
 use std::io::{self, Write};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -27,28 +28,25 @@ enum ExecutorFlow { Ok, Stop }
 pub struct CommandRunner<'a> {
     context: &'a Compiled<'a>,
 
-    clean: Command<'a>,
-
     graph: Graph<'a>,
     transitive_deps: Graph<'a>,
 
+    clean: Command<'a>,
+
+    default_edge: DefaultEdge<'a>,
+
+    fd_sender: FdSender,
     poller: Arc::<Poller>,
     polling_thread: PollingThread,
 
-    fd_sender: FdSender,
-
-    executed_jobs: usize,
-
-    not_up_to_date: Option::<&'a str>,
+    executed_edges: StrHashSet<'a>,
+    executed_edges_curr_level: usize,
 
     db_read: Option::<Db<'a>>,
     db_write: Db<'a>,
 
-    default_edge: DefaultEdge<'a>,
-
-    executed: StrHashSet<'a>,
-
-    metadata_cache: MetadataCache<'a>,
+    not_up_to_date: Option::<&'a str>,
+    metadata_cache: MetadataCache<'a>
 }
 
 impl std::ops::Deref for CommandRunner<'_> {
@@ -65,8 +63,8 @@ impl<'a> CommandRunner<'a> {
             }
 
             {
-                self.jobs_done.store(0, Ordering::Relaxed);
-                self.executed_jobs = 0
+                self.edges_done.store(0, Ordering::Relaxed);
+                self.executed_edges_curr_level = 0
             }
 
             for edge in level.into_iter().filter_map(|t| self.context.edges.get(t)) {
@@ -75,16 +73,16 @@ impl<'a> CommandRunner<'a> {
             }
 
             loop {
-                let jobs_done = self.jobs_done.load(Ordering::Relaxed);
-                if jobs_done >= self.executed_jobs { break }
+                let jobs_done = self.edges_done.load(Ordering::Relaxed);
+                if jobs_done >= self.executed_edges_curr_level { break }
                 #[cfg(feature = "dbg")] {
                     println!("{jobs_done} < {e}", e = self.executed_jobs)
                 } thread::sleep(Duration::from_millis(50))
             }
 
             {
-                self.executed_jobs = 0;
-                self.jobs_done.store(0, Ordering::Relaxed)
+                self.executed_edges_curr_level = 0;
+                self.edges_done.store(0, Ordering::Relaxed)
             }
         }
     }
@@ -98,7 +96,6 @@ impl<'a> CommandRunner<'a> {
         db_read: Option::<Db<'a>>,
         default_edge: DefaultEdge<'a>,
     ) -> Self {
-        let n = context.edges.len();
         let (poller, fd_sender, polling_thread) = Poller::spawn(
             Arc::new(flags),
             Arc::new(AtomicBool::new(false)),
@@ -106,6 +103,9 @@ impl<'a> CommandRunner<'a> {
             Arc::new(AtomicUsize::new(0)),
             Arc::new(DashMap::new())
         );
+
+        let n = context.edges.len();
+
         Self {
             clean,
             graph,
@@ -117,11 +117,11 @@ impl<'a> CommandRunner<'a> {
             polling_thread,
             transitive_deps,
 
-            executed_jobs: 0,
             not_up_to_date: None,
             db_write: Db::write(),
+            executed_edges_curr_level: 0,
             metadata_cache: MetadataCache::new(n),
-            executed: StrHashSet::with_capacity(n),
+            executed_edges: StrHashSet::with_capacity(n)
         }
     }
 
@@ -146,7 +146,7 @@ impl<'a> CommandRunner<'a> {
         subgraph.insert(target, Arc::clone(&deps));
         for dep in deps.iter() {
             if let Some(deps_of_dep) = self.graph.get(dep) {
-                subgraph.insert(&dep, Arc::clone(deps_of_dep));
+                _ = subgraph.insert(&dep, Arc::clone(deps_of_dep))
             }
         } subgraph
     }
@@ -210,7 +210,7 @@ impl<'a> CommandRunner<'a> {
 
     fn run_phony(&mut self, edge: &'a Edge<'a>) {
         if edge.target == CLEAN_TARGET {
-            _ = self.execute_command(&self.clean, CLEAN_TARGET).map(|_| self.executed_jobs += 1);
+            _ = self.execute_command(&self.clean, CLEAN_TARGET).map(|_| self.executed_edges_curr_level += 1);
             return
         }
 
@@ -242,7 +242,7 @@ impl<'a> CommandRunner<'a> {
 
         _ = command.as_ref().map(|command| {
             let command = Command {command, target: edge.target, description: None};
-            self.execute_command(&command, edge.target).map(|_| self.executed_jobs += 1)
+            self.execute_command(&command, edge.target).map(|_| self.executed_edges_curr_level += 1)
         });
     }
 
@@ -293,14 +293,14 @@ impl<'a> CommandRunner<'a> {
                 let mut path_buf = PathBuf::from(parent);
                 path_buf.push(".gitignore");
 
-                if let Ok(mut file) = fs::File::create_new(path_buf) {
+                if let Ok(mut file) = File::create_new(path_buf) {
                     _ = file.write(b"*")
                 }
             } Ok(())
         }
 
         if edge.target == CLEAN_TARGET {
-            _ = self.execute_command(&self.clean, CLEAN_TARGET).map(|_| self.executed_jobs += 1);
+            _ = self.execute_command(&self.clean, CLEAN_TARGET).map(|_| self.executed_edges_curr_level += 1);
             return ExecutorFlow::Ok
         }
 
@@ -335,7 +335,7 @@ impl<'a> CommandRunner<'a> {
             let description = description.as_deref();
 
             let command = Command {target, command, description};
-            _ = self.execute_command(&command, edge.target).map(|_| self.executed_jobs += 1);
+            _ = self.execute_command(&command, edge.target).map(|_| self.executed_edges_curr_level += 1);
         } else {
             let mut any_err = false;
             if let Err(err) = rule.command.check(&edge.shadows, &self.context.defs) {
@@ -364,7 +364,7 @@ impl<'a> CommandRunner<'a> {
         // TODO: reserve total amount of edges here
         let mut stack = vec![edge];
         while let Some(edge) = stack.pop() {
-            if self.executed.contains(edge.target) { continue }
+            if self.executed_edges.contains(edge.target) { continue }
 
             let Phony::NotPhony { rule, inputs, .. } = &edge.phony else {
                 self.run_phony(edge);
@@ -373,7 +373,7 @@ impl<'a> CommandRunner<'a> {
 
             let mut all_deps_resolved = true;
             for input in inputs.iter() {
-                if !self.executed.contains(input) {
+                if !self.executed_edges.contains(input) {
                     if let Some(dep_edge) = self.context.edges.get(input) {
                         stack.push(edge);
                         stack.push(dep_edge);
@@ -391,7 +391,7 @@ impl<'a> CommandRunner<'a> {
 
             let Some(ref edge_rule) = rule else { continue };
             if let Some(rule) = self.context.rules.get(edge_rule) {
-                self.executed.insert(edge.target);
+                self.executed_edges.insert(edge.target);
                 if self.execute_edge(edge, rule) == ExecutorFlow::Stop { break }
             } else {
                 report_panic!{
