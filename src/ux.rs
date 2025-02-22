@@ -6,6 +6,7 @@ use crate::parser::comp::Job;
 use crate::flags::{FLAG_STRS, MODE_STRS};
 use crate::edit_distance::find_best_match_for_name;
 
+#[allow(unused)]
 pub fn check_args<'a>(args: &'a [String]) -> Option::<&'a String> {
     args.get(1)
         .filter(|f| args.len() == 2 && !MODE_STRS.contains(&f.as_str()))
