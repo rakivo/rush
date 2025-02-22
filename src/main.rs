@@ -75,7 +75,7 @@ fn main() -> ExitCode {
     let mut content = String::with_capacity(content_.len());
     let escaped_indexes = Parser::preprocess_content(content_, &mut content);
 
-    let arena_cap = content.len().max(1024 * 1024);
+    let arena_cap = (content.len() as f64 * 2.5) as _;
 
     let arena = Bump::with_capacity(arena_cap);
     let context = Parser::parse(&arena, &content, &escaped_indexes);
