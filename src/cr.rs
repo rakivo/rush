@@ -331,7 +331,7 @@ impl<'a> CommandRunner<'a> {
                 });
 
             let target = edge.target;
-            let command = self.arena.alloc_str(&command);
+            let command = command.as_ref();
             let description = description.as_deref();
 
             let command = Command {target, command, description};
