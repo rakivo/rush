@@ -2,7 +2,7 @@ use std::process::exit;
 
 use crate::parser::Rule;
 use crate::types::StrHashMap;
-use crate::parser::comp::Job;
+use crate::parser::comp::Edge;
 use crate::flags::{FLAG_STRS, MODE_STRS};
 use crate::edit_distance::find_best_match_for_name;
 
@@ -61,10 +61,10 @@ pub fn did_you_mean_flags(flag: &str) -> Option::<String> {
 #[inline]
 pub fn did_you_mean_compiled<'a>(
     target: &'a str,
-    jobs: &StrHashMap::<'a, Job>,
+    edge: &StrHashMap::<'a, Edge>,
     rules: &StrHashMap::<'a, Rule>
 ) -> Option::<String> {
-    let candidates = jobs.keys()
+    let candidates = edge.keys()
         .chain(rules.keys())
         .cloned()
         .collect::<Vec::<_>>();

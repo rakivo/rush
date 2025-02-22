@@ -1,6 +1,6 @@
 use crate::flags::Flags;
 use crate::graph::Graph;
-use crate::parser::comp::Job;
+use crate::parser::comp::Edge;
 use crate::types::StrDashMap;
 use crate::consts::CLEAN_TARGET;
 use crate::poll::{Poller, Subprocess};
@@ -198,15 +198,15 @@ impl<'a> MetadataCache<'a> {
     }
 
     #[inline]
-    pub fn needs_rebuild(&self, job: &Job<'a>, transitive_deps: &Graph<'a>) -> bool {
+    pub fn needs_rebuild(&self, edge: &Edge<'a>, transitive_deps: &Graph<'a>) -> bool {
         // TODO: do something here if dependent file does not exist
         let mtimes = unsafe {
-            transitive_deps.get(job.target).unwrap_unchecked()
+            transitive_deps.get(edge.target).unwrap_unchecked()
         }.iter().filter_map(|dep| {
             self.mtime(*dep).ok()
         }).collect::<Vec::<_>>();
 
-        let Ok(target_mtime) = self.mtime(job.target) else {
+        let Ok(target_mtime) = self.mtime(edge.target) else {
             return true
         };
 

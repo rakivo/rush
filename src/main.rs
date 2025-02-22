@@ -86,8 +86,8 @@ fn main() -> ExitCode {
     }
 
     if flags.list_jobs() {
-        let jobs = context.pretty_print_targets();
-        println!("available jobs: [{jobs}]");
+        let edges = context.pretty_print_targets();
+        println!("available jobs: [{edges}]");
         return ExitCode::SUCCESS
     }
 
@@ -98,23 +98,23 @@ fn main() -> ExitCode {
     }
 
     if flags.list_jobs_and_rules() {
-        let jobs = context.pretty_print_targets();
-        println!("available jobs: [{jobs}]");
+        let edges = context.pretty_print_targets();
+        println!("available jobs: [{edges}]");
 
         let rules = context.pretty_print_rules();
         println!("available rules: [{rules}]");
         return ExitCode::SUCCESS
     }
 
-    let clean = context.generate_clean_job(&arena, &flags);
+    let clean = context.generate_clean_edge(&arena, &flags);
 
-    let default_job = flags.default_target().map(|t| {
-        context.jobs.get(t.as_str()).unwrap_or_else(|| {
+    let default_edge = flags.default_target().map(|t| {
+        context.edges.get(t.as_str()).unwrap_or_else(|| {
             let targets = context.pretty_print_targets();
             eprintln!("no target: {t} found in {rush_file_path}");
             if let Some(compiled) = did_you_mean_compiled(
                 t,
-                &context.jobs,
+                &context.edges,
                 &context.rules,
             ) {
                 println!("did you mean: {compiled}?")
@@ -130,14 +130,14 @@ fn main() -> ExitCode {
     });
     let db = content.and_then(|content| Db::read(content).ok());
 
-    let (graph, default_job, transitive_deps) = build_dependency_graph(
+    let (graph, default_edge, transitive_deps) = build_dependency_graph(
         &arena,
         &context,
-        default_job
+        default_edge
     );
 
     if flags.print_default_job() {
-        if let Some(comp::Job { target, .. }) = default_job.as_ref() {
+        if let Some(comp::Edge { target, .. }) = default_edge.as_ref() {
             println!("default job: {target}");
             return ExitCode::SUCCESS
         } else {
@@ -154,7 +154,7 @@ fn main() -> ExitCode {
         transitive_deps,
         flags,
         db,
-        default_job
+        default_edge
     ).write_finish(&context.cache_file_path);
 
     ExitCode::SUCCESS

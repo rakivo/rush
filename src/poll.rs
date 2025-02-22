@@ -41,7 +41,7 @@ impl Poller {
     pub fn spawn(
         flags: Arc::<Flags>,
         stop: Arc::<AtomicBool>,
-        jobs_done: Arc::<AtomicUsize>,
+        edges_done: Arc::<AtomicUsize>,
         active_fds: Arc::<AtomicUsize>,
         fd_to_subprocess: Arc::<SubprocessMap>,
     ) -> (Arc::<Self>, FdSender, PollingThread) {
@@ -49,7 +49,7 @@ impl Poller {
         let poller = Self {
             flags,
             stop,
-            jobs_done,
+            jobs_done: edges_done,
             active_fds,
             poll_fd_recv,
             fd_to_subprocess,
@@ -63,7 +63,7 @@ impl Poller {
     }
 
     #[inline(always)]
-    fn job_is_done(&self) {
+    fn edge_is_done(&self) {
         _ = self.jobs_done.fetch_add(1, Ordering::Relaxed)
     }
 
@@ -82,12 +82,12 @@ impl Poller {
     }
 
     fn start_polling(&self) {
-        let mut jobs_failed = 0;
+        let mut edges_failed = 0;
         let mut poll_fds = Vec::new();
         let mut handled_pids = HashSet::new();
         let mut printed_pids = HashSet::new();
 
-        let print_job = |target: &str, command: &Box::<str>, description: &Option::<Box::<str>>| {
+        let print_edge = |target: &str, command: &Box::<str>, description: &Option::<Box::<str>>| {
             if !self.flags.quiet() {
                 let output = Command {
                     target,
@@ -138,7 +138,7 @@ impl Poller {
                                 let subprocess = self.fd_to_subprocess.get(&fd).unwrap_dbg();
                                 let Subprocess { pid, target, command, description } = subprocess.value().as_ref();
                                 if !printed_pids.contains(pid) {
-                                    print_job(target, command, description);
+                                    print_edge(target, command, description);
                                     _ = printed_pids.insert(*pid)
                                 }
                             }
@@ -150,12 +150,12 @@ impl Poller {
                             let Subprocess { pid, target, command, description } = subprocess.value().as_ref();
 
                             if !printed_pids.contains(pid) {
-                                print_job(target, command, description);
+                                print_edge(target, command, description);
                                 _ = printed_pids.insert(*pid)
                             }
 
                             if self.flags.rush() && !handled_pids.contains(pid) {
-                                self.job_is_done()
+                                self.edge_is_done()
                             }
 
                             if !handled_pids.contains(pid) {
@@ -163,12 +163,12 @@ impl Poller {
                                     // wait on process only if `-k` flag is specified to achieve maximum speed
                                     let exit_code = Self::get_process_exit_code(*pid);
                                     if exit_code.map_or(false, |code| code != 0) {
-                                        jobs_failed += 1;
-                                        if jobs_failed >= *self.flags.max_fail_count().unwrap_or(&1) {
+                                        edges_failed += 1;
+                                        if edges_failed >= *self.flags.max_fail_count().unwrap_or(&1) {
                                             self.stop.store(true, Ordering::Relaxed);
                                             break 'outer
                                         }
-                                    } self.job_is_done()
+                                    } self.edge_is_done()
                                 }
                                 _ = handled_pids.insert(*pid)
                             }

@@ -1,7 +1,7 @@
 use crate::loc::Loc;
 use crate::types::StrHashSet;
 use crate::dbg_unwrap::DbgUnwrap;
-use crate::parser::comp::{Job, Defs};
+use crate::parser::comp::{Edge, Defs};
 use crate::parser::{prep, comp, Shadows};
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
@@ -187,13 +187,13 @@ impl Template<'_> {
     }
 
     #[inline(always)]
-    pub fn compile(&self, job: &Job, defs: &Defs) -> Result::<String, String> {
-        self._compile(job.target, job.inputs_str(self.in_used), &job.shadows, defs)
+    pub fn compile(&self, edge: &Edge, defs: &Defs) -> Result::<String, String> {
+        self._compile(edge.target, edge.inputs_str(self.in_used), &edge.shadows, defs)
     }
 
     #[inline(always)]
-    pub fn compile_prep(&self, job: &prep::Job, defs: &Defs) -> Result::<String, String> {
-        self._compile(job.target, job.inputs_str(self.in_used), &job.shadows, defs)
+    pub fn compile_prep(&self, edge: &prep::Edge, defs: &Defs) -> Result::<String, String> {
+        self._compile(edge.target, edge.inputs_str(self.in_used), &edge.shadows, defs)
     }
 
     #[inline]
