@@ -13,7 +13,7 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{Ordering, AtomicUsize};
+use std::sync::atomic::{Ordering, AtomicBool, AtomicUsize};
 
 use rayon::prelude::*;
 use fxhash::FxBuildHasher;
@@ -41,6 +41,8 @@ pub struct CommandRunner<'a> {
 
     db_read: Option::<Db<'a>>,
     db_write: Db<'a>,
+
+    ran_any_edges: AtomicBool,
 
     not_up_to_date: Option::<&'a str>,
     metadata_cache: MetadataCache<'a>
@@ -81,6 +83,7 @@ impl<'a> CommandRunner<'a> {
 
             not_up_to_date: None,
             db_write: Db::write(),
+            ran_any_edges: AtomicBool::new(false),
             metadata_cache: MetadataCache::new(n),
             failed_edges_count: AtomicUsize::new(0),
             executed_edges_curr_level: AtomicUsize::new(0),
@@ -90,6 +93,9 @@ impl<'a> CommandRunner<'a> {
 
     #[inline]
     fn finish(self) -> Db<'a> {
+        if self.ran_any_edges.load(Ordering::Relaxed) {
+            println!()
+        }
         if self.flags.check_is_up_to_date() {
             match self.not_up_to_date {
                 None => println!("[up to date]"),
@@ -156,6 +162,8 @@ impl<'a> CommandRunner<'a> {
     }
 
     fn execute_command(&self, command: &Command, target: &str) -> io::Result<()> {
+        self.ran_any_edges.store(true, Ordering::Relaxed);
+
         if !self.flags.quiet() {
             if self.flags.print_commands() {
                 let output = command.to_string(&self.flags);
