@@ -452,7 +452,7 @@ pub struct Compiled<'a> {
 }
 
 impl Compiled<'_> {
-    pub fn generate_clean_edge<'bump>(&self, arena: &'bump Bump, flags: &Flags) -> Command<'bump> {
+    pub fn generate_clean_edge(&self, flags: &Flags) -> Command<'_> {
         let targets = self.edges.values()
             .filter(|j| matches!(j.phony, comp::Phony::NotPhony { .. }))
             .fold(Vec::with_capacity(64), |mut files, j| {
@@ -498,9 +498,9 @@ impl Compiled<'_> {
         };
 
         Command {
-            target: CLEAN_TARGET,
-            command: arena.alloc_str(&command),
-            description: Some(arena.alloc_str(&description))
+            command: Cow::Owned(command),
+            target: Cow::Borrowed(CLEAN_TARGET),
+            description: Some(Cow::Owned(description))
         }
     }
 

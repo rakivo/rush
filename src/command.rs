@@ -4,9 +4,9 @@ use crate::parser::comp::Edge;
 use crate::types::StrDashMap;
 use crate::consts::CLEAN_TARGET;
 
-
 use std::fs::File;
 use std::path::Path;
+use std::borrow::Cow;
 use std::ffi::CString;
 use std::{io, ptr, mem};
 use std::time::SystemTime;
@@ -17,9 +17,9 @@ use fxhash::FxBuildHasher;
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct Command<'a> {
-    pub target: &'a str,
-    pub command: &'a str,
-    pub description: Option::<&'a str>
+    pub target: Cow::<'a, str>,
+    pub command: Cow::<'a, str>,
+    pub description: Option::<Cow::<'a, str>>
 }
 
 // Custom implementation of `Command` to avoid fork + exec overhead
@@ -58,7 +58,7 @@ impl<'a> Command<'a> {
     }
 
     pub fn execute(&self) -> io::Result::<Output> {
-        let command = self.command;
+        let ref command = self.command;
 
         let (mut stdout_reader, stdout_writer) = Self::create_pipe()?;
         let (mut stderr_reader, stderr_writer) = Self::create_pipe()?;

@@ -8,10 +8,11 @@ use crate::parser::{Rule, Compiled, DefaultEdge};
 use crate::consts::{CLEAN_TARGET, PHONY_TARGETS};
 use crate::graph::{Graph, Levels, topological_sort};
 
-use std::sync::Arc;
+use std::borrow::Cow;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::hash::{Hash, Hasher};
+use std::sync::{Arc, OnceLock};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{Ordering, AtomicBool, AtomicUsize};
 
@@ -29,7 +30,7 @@ pub struct CommandRunner<'a> {
     graph: Graph<'a>,
     transitive_deps: Graph<'a>,
 
-    clean: Command<'a>,
+    clean: OnceLock::<Command<'a>>,
 
     default_edge: DefaultEdge<'a>,
 
@@ -62,7 +63,6 @@ impl<'a> CommandRunner<'a> {
     }
 
     fn new(
-        clean: Command<'a>,
         context: &'a Compiled<'a>,
         graph: Graph<'a>,
         transitive_deps: Graph<'a>,
@@ -73,7 +73,6 @@ impl<'a> CommandRunner<'a> {
         let n = context.edges.len();
 
         Self {
-            clean,
             flags,
             graph,
             context,
@@ -83,6 +82,7 @@ impl<'a> CommandRunner<'a> {
 
             not_up_to_date: None,
             db_write: Db::write(),
+            clean: OnceLock::new(),
             ran_any_edges: AtomicBool::new(false),
             metadata_cache: MetadataCache::new(n),
             failed_edges_count: AtomicUsize::new(0),
@@ -128,7 +128,6 @@ impl<'a> CommandRunner<'a> {
     }
 
     pub fn run(
-        clean: Command<'a>,
         context: &'a Compiled,
         graph: Graph<'a>,
         transitive_deps: Graph<'a>,
@@ -137,7 +136,6 @@ impl<'a> CommandRunner<'a> {
         default_edge: DefaultEdge<'a>,
     ) -> Db<'a> {
         let cr = Self::new(
-            clean,
             context,
             graph,
             transitive_deps,
@@ -204,9 +202,15 @@ impl<'a> CommandRunner<'a> {
         Ok(())
     }
 
+    fn clean(&self) -> &Command {
+        self.clean.get_or_init(|| {
+            self.context.generate_clean_edge(&self.flags)
+        })
+    }
+
     fn run_phony(&self, edge: &'a Edge<'a>) {
         if edge.target == CLEAN_TARGET {
-            _ = self.execute_command(&self.clean, CLEAN_TARGET).map(|_| {
+            _ = self.execute_command(&self.clean(), CLEAN_TARGET).map(|_| {
                 self.executed_edges_curr_level.fetch_add(1, Ordering::Relaxed)
             });
             return
@@ -239,7 +243,9 @@ impl<'a> CommandRunner<'a> {
         }).for_each(|edge| self.resolve_and_run_target(edge));
 
         _ = command.as_ref().map(|command| {
-            let command = Command {command, target: edge.target, description: None};
+            let target = Cow::Borrowed(edge.target);
+            let command = Cow::Borrowed(command.as_str());
+            let command = Command {command, target, description: None};
             self.execute_command(&command, edge.target).map(|_| {
                 self.executed_edges_curr_level.fetch_add(1, Ordering::Relaxed)
             })
@@ -300,7 +306,7 @@ impl<'a> CommandRunner<'a> {
         }
 
         if edge.target == CLEAN_TARGET {
-            _ = self.execute_command(&self.clean, CLEAN_TARGET).map(|_| {
+            _ = self.execute_command(&self.clean(), CLEAN_TARGET).map(|_| {
                 self.executed_edges_curr_level.fetch_add(1, Ordering::Relaxed)
             });
             return ExecutorFlow::Ok
@@ -332,9 +338,9 @@ impl<'a> CommandRunner<'a> {
                         }).ok()
                 });
 
-            let target = edge.target;
-            let command = command.as_ref();
-            let description = description.as_deref();
+            let target = Cow::Borrowed(edge.target);
+            let command = Cow::Borrowed(command.as_ref());
+            let description = description.as_deref().map(Into::into);
 
             let command = Command {target, command, description};
             _ = self.execute_command(&command, edge.target).map(|_| self.executed_edges_curr_level.fetch_add(1, Ordering::Relaxed));

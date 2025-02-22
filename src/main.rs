@@ -5,7 +5,6 @@ mod ux;
 mod cr;
 mod db;
 mod util;
-// mod poll;
 mod flags;
 mod types;
 mod graph;
@@ -98,8 +97,6 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS
     }
 
-    let clean = context.generate_clean_edge(&arena, &flags);
-
     let default_edge = flags.default_target().map(|t| {
         context.edges.get(t.as_str()).unwrap_or_else(|| {
             let targets = context.pretty_print_targets();
@@ -139,7 +136,6 @@ fn main() -> ExitCode {
     }
 
     _ = CommandRunner::run(
-        clean,
         &context,
         graph,
         transitive_deps,
