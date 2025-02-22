@@ -1,7 +1,7 @@
 use crate::util;
 use crate::parser::comp::Phony;
 use crate::dbg_unwrap::DbgUnwrap;
-use crate::parser::{Compiled, DefaultJob};
+use crate::parser::{Compiled, DefaultEdge};
 use crate::types::{StrHashMap, StrHashSet, StrIndexSet};
 
 use std::sync::Arc;
@@ -18,8 +18,8 @@ pub type Graph<'a> = StrHashMap::<'a, Arc::<StrIndexSet<'a>>>;
 pub fn build_dependency_graph<'a>(
     arena: &'a Bump,
     processed: &'a Compiled,
-    default_job: DefaultJob<'a>
-) -> (Graph<'a>, DefaultJob<'a>, Graph<'a>) {
+    default_edge: DefaultEdge<'a>
+) -> (Graph<'a>, DefaultEdge<'a>, Graph<'a>) {
     fn collect_deps<'a>(
         node: &'a str,
         arena: &'a Bump,
@@ -34,8 +34,8 @@ pub fn build_dependency_graph<'a>(
 
         visited.insert(node);
 
-        let mut deps = parsed.jobs.get(node).map(|job| {
-            match &job.phony {
+        let mut deps = parsed.edges.get(node).map(|edge| {
+            match &edge.phony {
                 Phony::Phony { .. } => { StrIndexSet::default() },
                 Phony::NotPhony { deps, inputs, .. } => {
                     inputs.iter()
@@ -47,8 +47,8 @@ pub fn build_dependency_graph<'a>(
         }).unwrap_or_default();
 
         // check if depfile exists, if it does => read it, extend our deps with the ones that are listed in the .d file
-        if let Some(job) = parsed.jobs.get(node) {
-            if let Some(depfile_path) = job.depfile() {
+        if let Some(edge) = parsed.edges.get(node) {
+            if let Some(depfile_path) = edge.depfile() {
                 if let Ok(depfile) = util::read_file_into_arena_str(arena, depfile_path) {
                     let colon_idx = depfile.find(':').unwrap_dbg();
                     let depfile_deps = depfile[colon_idx + 1..]
@@ -86,24 +86,24 @@ pub fn build_dependency_graph<'a>(
         deps
     }
 
-    let n = processed.jobs.len();
+    let n = processed.edges.len();
     let mut graph = Graph::with_capacity(n);
     let mut visited = StrHashSet::with_capacity(n);
     let mut transitive_deps = Graph::with_capacity(n);
 
-    for target in processed.jobs.keys() {
+    for target in processed.edges.keys() {
         collect_deps(target, arena, processed, &mut graph, &mut visited, &mut transitive_deps);
     }
 
-    let default_job = default_job.or({
+    let default_edge = default_edge.or({
         if let Some(ref dt) = processed.default_target {
-            let job = processed.jobs.get(dt.as_str());
-            debug_assert!(job.is_some());
-            job
+            let edge = processed.edges.get(dt.as_str());
+            debug_assert!(edge.is_some());
+            edge
         } else if graph.is_empty() {
-            let job = processed.jobs.values().next();
-            debug_assert!(job.is_some());
-            job
+            let edge = processed.edges.values().next();
+            debug_assert!(edge.is_some());
+            edge
         } else {
             let mut reverse_graph = StrHashMap::with_capacity(n);
             for (node, deps) in graph.iter() {
@@ -112,16 +112,16 @@ pub fn build_dependency_graph<'a>(
                 }
             }
 
-            // find the jobs that do not act as an input anywhere,
+            // find the edges that do not act as an input anywhere,
             // then sort those by their first appearance in the source code row-wise
-            processed.jobs.keys()
-                .filter(|job| !reverse_graph.contains_key(*job))
-                .map(|t| unsafe { processed.jobs.get(t).unwrap_unchecked() })
+            processed.edges.keys()
+                .filter(|edge| !reverse_graph.contains_key(*edge))
+                .map(|t| unsafe { processed.edges.get(t).unwrap_unchecked() })
                 .min_by(|x, y| x.loc.0.cmp(&y.loc.0))
         }
     });
 
-    (graph, default_job, transitive_deps)
+    (graph, default_edge, transitive_deps)
 }
 
 pub fn topological_sort<'a>(graph: &Graph<'a>) -> Levels<'a> {

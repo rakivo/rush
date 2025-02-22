@@ -2,9 +2,9 @@ use crate::flags::Flags;
 use crate::types::StrHashSet;
 use crate::db::{Db, Metadata};
 use crate::ux::did_you_mean_compiled;
-use crate::parser::comp::{Job, Phony};
+use crate::parser::comp::{Edge, Phony};
 use crate::command::{Command, MetadataCache};
-use crate::parser::{Rule, Compiled, DefaultJob};
+use crate::parser::{Rule, Compiled, DefaultEdge};
 use crate::consts::{CLEAN_TARGET, PHONY_TARGETS};
 use crate::poll::{Poller, FdSender, PollingThread};
 use crate::graph::{Graph, Levels, topological_sort};
@@ -44,7 +44,7 @@ pub struct CommandRunner<'a> {
     db_read: Option::<Db<'a>>,
     db_write: Db<'a>,
 
-    default_job: DefaultJob<'a>,
+    default_edge: DefaultEdge<'a>,
 
     executed: StrHashSet<'a>,
 
@@ -69,8 +69,8 @@ impl<'a> CommandRunner<'a> {
                 self.executed_jobs = 0
             }
 
-            for job in level.into_iter().filter_map(|t| self.context.jobs.get(t)) {
-                self.resolve_and_run(job);
+            for edge in level.into_iter().filter_map(|t| self.context.edges.get(t)) {
+                self.resolve_and_run(edge);
                 if self.stop.load(Ordering::Relaxed) { break 'outer }
             }
 
@@ -96,9 +96,9 @@ impl<'a> CommandRunner<'a> {
         transitive_deps: Graph<'a>,
         flags: Flags,
         db_read: Option::<Db<'a>>,
-        default_job: DefaultJob<'a>,
+        default_edge: DefaultEdge<'a>,
     ) -> Self {
-        let n = context.jobs.len();
+        let n = context.edges.len();
         let (poller, fd_sender, polling_thread) = Poller::spawn(
             Arc::new(flags),
             Arc::new(AtomicBool::new(false)),
@@ -113,7 +113,7 @@ impl<'a> CommandRunner<'a> {
             context,
             db_read,
             fd_sender,
-            default_job,
+            default_edge,
             polling_thread,
             transitive_deps,
 
@@ -152,9 +152,9 @@ impl<'a> CommandRunner<'a> {
     }
 
     #[inline]
-    fn resolve_and_run_target(&mut self, job: &Job<'a>) {
+    fn resolve_and_run_target(&mut self, edge: &Edge<'a>) {
         let levels = {
-            let subgraph = self.build_subgraph(job.target);
+            let subgraph = self.build_subgraph(edge.target);
             topological_sort(&subgraph)
         };
         _ = self.run_levels(&levels)
@@ -167,7 +167,7 @@ impl<'a> CommandRunner<'a> {
         transitive_deps: Graph<'a>,
         flags: Flags,
         db_read: Option::<Db<'a>>,
-        default_job: DefaultJob<'a>,
+        default_edge: DefaultEdge<'a>,
     ) -> Db<'a> {
         let mut cr = Self::new(
             clean,
@@ -176,14 +176,14 @@ impl<'a> CommandRunner<'a> {
             transitive_deps,
             flags,
             db_read,
-            default_job
+            default_edge
         );
 
-        let levels = if let Some(job) = default_job {
-            if PHONY_TARGETS.contains(&job.target) {
-                cr.run_phony(job);
+        let levels = if let Some(edge) = default_edge {
+            if PHONY_TARGETS.contains(&edge.target) {
+                cr.run_phony(edge);
             } else {
-                cr.resolve_and_run_target(job);
+                cr.resolve_and_run_target(edge);
             }
             return cr.finish()
         } else {
@@ -203,32 +203,32 @@ impl<'a> CommandRunner<'a> {
         }
 
         command.execute(&self.poller, FdSender::clone(&self.fd_sender)).map_err(|e| {
-            println!("[could not execute job: {target}: {e}]");
+            println!("[could not execute edge: {target}: {e}]");
             e
         })
     }
 
-    fn run_phony(&mut self, job: &'a Job<'a>) {
-        if job.target == CLEAN_TARGET {
+    fn run_phony(&mut self, edge: &'a Edge<'a>) {
+        if edge.target == CLEAN_TARGET {
             _ = self.execute_command(&self.clean, CLEAN_TARGET).map(|_| self.executed_jobs += 1);
             return
         }
 
-        let Phony::Phony { command, aliases, .. } = &job.phony else { unreachable!() };
+        let Phony::Phony { command, aliases, .. } = &edge.phony else { unreachable!() };
 
-        aliases.iter().filter_map(|_job| {
-            match self.context.jobs.get(_job.as_str()) {
+        aliases.iter().filter_map(|_edge| {
+            match self.context.edges.get(_edge.as_str()) {
                 Some(j) => Some(j),
                 None => {
                     let mut msg = report_fmt!{
-                        job.loc,
-                        "undefined job: {target}\nNOTE: in phony jobs you can only alias jobs\n",
-                        target = _job
+                        edge.loc,
+                        "undefined edge: {target}\nNOTE: in phony jobs you can only alias jobs\n",
+                        target = _edge
                     };
 
                     if let Some(compiled) = did_you_mean_compiled(
-                        _job,
-                        &self.context.jobs,
+                        _edge,
+                        &self.context.edges,
                         &self.context.rules
                     ) {
                         let msg_ = format!("\nnote: did you mean: {compiled}?");
@@ -236,18 +236,17 @@ impl<'a> CommandRunner<'a> {
                     }
 
                     report_panic!("{msg}")
-
                 }
             }
-        }).for_each(|job| self.resolve_and_run_target(job));
+        }).for_each(|edge| self.resolve_and_run_target(edge));
 
         _ = command.as_ref().map(|command| {
-            let command = Command {command, target: job.target, description: None};
-            self.execute_command(&command, job.target).map(|_| self.executed_jobs += 1)
+            let command = Command {command, target: edge.target, description: None};
+            self.execute_command(&command, edge.target).map(|_| self.executed_jobs += 1)
         });
     }
 
-    fn execute_job(&mut self, job: &Job<'a>, rule: &Rule) -> ExecutorFlow {
+    fn execute_edge(&mut self, edge: &Edge<'a>, rule: &Rule) -> ExecutorFlow {
         #[inline(always)]
         fn hash(command: &str) -> u64 {
             let mut hasher = fnv::FnvHasher::default();
@@ -256,31 +255,31 @@ impl<'a> CommandRunner<'a> {
         }
 
         #[inline]
-        fn compile_command<'a>(_self: &CommandRunner<'a>, job: &Job<'a>, rule: &Rule) -> Option::<String> {
-            rule.command.compile(job, &_self.context.defs).map_err(|e| {
+        fn compile_command<'a>(_self: &CommandRunner<'a>, edge: &Edge<'a>, rule: &Rule) -> Option::<String> {
+            rule.command.compile(edge, &_self.context.defs).map_err(|e| {
                 println!("{e}");
                 rule.description.as_ref()
-                    .and_then(|d| d.check(&job.shadows, &_self.context.defs).err())
+                    .and_then(|d| d.check(&edge.shadows, &_self.context.defs).err())
                     .map(|err| println!("{err}"));
             }).map(|command| {
-                _self.db_write.metadata_write(job.target, Metadata {
+                _self.db_write.metadata_write(edge.target, Metadata {
                     command_hash: hash(&command)
                 }); command
             }).ok()
         }
 
         #[inline]
-        fn needs_rebuild<'a>(_self: &CommandRunner<'a>, job: &Job<'a>, command: &str) -> bool {
+        fn needs_rebuild<'a>(_self: &CommandRunner<'a>, edge: &Edge<'a>, command: &str) -> bool {
             // in `check_is_up_to_date` mode `always_build` is disabled
             // TODO: make that happen in the `Mode` struct
             if _self.flags.always_build() && !_self.flags.check_is_up_to_date() {
                 return true
             }
             _self.db_read.as_ref().map_or(false, |db| {
-                db.metadata_read(job.target).map_or(false, |md| {
+                db.metadata_read(edge.target).map_or(false, |md| {
                     md.command_hash != hash(command)
                 })
-            }) || _self.metadata_cache.needs_rebuild(job, &_self.transitive_deps)
+            }) || _self.metadata_cache.needs_rebuild(edge, &_self.transitive_deps)
         }
 
         #[inline]
@@ -300,84 +299,84 @@ impl<'a> CommandRunner<'a> {
             } Ok(())
         }
 
-        if job.target == CLEAN_TARGET {
+        if edge.target == CLEAN_TARGET {
             _ = self.execute_command(&self.clean, CLEAN_TARGET).map(|_| self.executed_jobs += 1);
             return ExecutorFlow::Ok
         }
 
-        let Some(command) = compile_command(self, job, rule) else {
+        let Some(command) = compile_command(self, edge, rule) else {
             return ExecutorFlow::Ok
         };
 
-        if needs_rebuild(self, job, &command) {
+        if needs_rebuild(self, edge, &command) {
             if self.flags.check_is_up_to_date() {
-                self.not_up_to_date = Some(job.target);
+                self.not_up_to_date = Some(edge.target);
                 return ExecutorFlow::Stop
             }
 
-            if let Err(e) = create_dirs_if_needed(job.target) {
+            if let Err(e) = create_dirs_if_needed(edge.target) {
                 println!{
                     "[could not create build directory for target: {target}: {e}]",
-                    target = job.target
+                    target = edge.target
                 };
                 return ExecutorFlow::Ok
             }
 
             let description = rule.description.as_ref()
                 .and_then(|d| {
-                    d.compile(&job, &self.context.defs)
+                    d.compile(&edge, &self.context.defs)
                         .map_err(|e| {
                             println!("{e}");
                         }).ok()
                 });
 
-            let target = job.target;
-            let command = command.as_ref();
+            let target = edge.target;
+            let command = self.arena.alloc_str(&command);
             let description = description.as_deref();
 
             let command = Command {target, command, description};
-            _ = self.execute_command(&command, job.target).map(|_| self.executed_jobs += 1);
+            _ = self.execute_command(&command, edge.target).map(|_| self.executed_jobs += 1);
         } else {
             let mut any_err = false;
-            if let Err(err) = rule.command.check(&job.shadows, &self.context.defs) {
+            if let Err(err) = rule.command.check(&edge.shadows, &self.context.defs) {
                 println!("{err}");
                 any_err = true
             }
 
-            if let Some(Err(err)) = rule.description.as_ref().map(|d| d.check(&job.shadows, &self.context.defs)) {
+            if let Some(Err(err)) = rule.description.as_ref().map(|d| d.check(&edge.shadows, &self.context.defs)) {
                 println!("{err}");
                 any_err = true
             }
 
             if !any_err && self.flags.verbose() ||
-                self.default_job.as_ref().map_or(false, |def| {
-                    def.target == job.target || def.aliases().map_or(false, |aliases| {
-                        aliases.iter().any(|a| a == job.target)
+                self.default_edge.as_ref().map_or(false, |def| {
+                    def.target == edge.target || def.aliases().map_or(false, |aliases| {
+                        aliases.iter().any(|a| a == edge.target)
                     })
                 }) && !self.flags.check_is_up_to_date()
             {
-                println!("[{target} is already built]", target = job.target)
+                println!("[{target} is already built]", target = edge.target)
             }
         } ExecutorFlow::Ok
     }
 
-    fn resolve_and_run(&mut self, job: &'a Job<'a>) {
-        // TODO: reserve total amount of jobs here
-        let mut stack = vec![job];
-        while let Some(job) = stack.pop() {
-            if self.executed.contains(job.target) { continue }
+    fn resolve_and_run(&mut self, edge: &'a Edge<'a>) {
+        // TODO: reserve total amount of edges here
+        let mut stack = vec![edge];
+        while let Some(edge) = stack.pop() {
+            if self.executed.contains(edge.target) { continue }
 
-            let Phony::NotPhony { rule, inputs, .. } = &job.phony else {
-                self.run_phony(job);
+            let Phony::NotPhony { rule, inputs, .. } = &edge.phony else {
+                self.run_phony(edge);
                 return
             };
 
             let mut all_deps_resolved = true;
             for input in inputs.iter() {
                 if !self.executed.contains(input) {
-                    if let Some(dep_job) = self.context.jobs.get(input) {
-                        stack.push(job);
-                        stack.push(dep_job);
+                    if let Some(dep_edge) = self.context.edges.get(input) {
+                        stack.push(edge);
+                        stack.push(dep_edge);
                         all_deps_resolved = false;
                         break
                     } else {
@@ -390,16 +389,16 @@ impl<'a> CommandRunner<'a> {
 
             if !all_deps_resolved { continue }
 
-            let Some(ref job_rule) = rule else { continue };
-            if let Some(rule) = self.context.rules.get(job_rule) {
-                self.executed.insert(job.target);
-                if self.execute_job(job, rule) == ExecutorFlow::Stop { break }
+            let Some(ref edge_rule) = rule else { continue };
+            if let Some(rule) = self.context.rules.get(edge_rule) {
+                self.executed.insert(edge.target);
+                if self.execute_edge(edge, rule) == ExecutorFlow::Stop { break }
             } else {
                 report_panic!{
-                    job.loc,
+                    edge.loc,
                     "no rule named: {rule} found for job {target}\n",
-                    rule = job_rule,
-                    target = job.target
+                    rule = edge_rule,
+                    target = edge.target
                 }
             }
         }
