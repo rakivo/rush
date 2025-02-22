@@ -6,8 +6,9 @@ use crate::parser::comp::Job;
 use crate::flags::{FLAG_STRS, MODE_STRS};
 use crate::edit_distance::find_best_match_for_name;
 
-#[allow(unused)]
 pub fn check_args<'a>(args: &'a [String]) -> Option::<&'a String> {
+    let mut prev_is_value = false;
+
     args.get(1)
         .filter(|f| args.len() == 2 && !MODE_STRS.contains(&f.as_str()))
         .inspect(|v| {
@@ -24,7 +25,8 @@ pub fn check_args<'a>(args: &'a [String]) -> Option::<&'a String> {
             let v = w[1].as_str();
 
             if v.as_bytes().first().map_or(false, |&b| b == b'-') &&
-                !FLAG_STRS.contains(&f)
+                !FLAG_STRS.contains(&f) &&
+                !prev_is_value
             {
                 eprintln!("undefined flag: {v}");
                 if let Some(flag) = did_you_mean_flags(v) {
@@ -32,9 +34,13 @@ pub fn check_args<'a>(args: &'a [String]) -> Option::<&'a String> {
                 } exit(1)
             }
 
+            if FLAG_STRS.contains(&f) {
+                prev_is_value = true
+            }
+
             !FLAG_STRS.contains(&f) &&
-                !FLAG_STRS.contains(&v) &&
-                !MODE_STRS.contains(&v)
+            !FLAG_STRS.contains(&v) &&
+            !MODE_STRS.contains(&v)
         }).map(|w| &w[1]))
 }
 
