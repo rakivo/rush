@@ -949,7 +949,7 @@ impl<'a> Parser<'a> {
         let mut escaped_index = 0;
         for line in content.lines() {
             self.cursor += 1;
-            if escaped_index < escaped_indexes.len() && escaped_indexes[escaped_index].0 <= self.cursor {
+            if escaped_indexes.get(escaped_index).map_or(false, |(row, _)| *row + 1 <= self.cursor) {
                 self.cursor += escaped_indexes[escaped_index].1;
                 escaped_index += 1
             }
@@ -964,6 +964,7 @@ impl<'a> Parser<'a> {
             cursor: 0,
             file_path,
             parsed: Parsed {
+                default_target: None,
                 defs: prep::Defs(StrHashMap::with_capacity(32)),
                 edges: {
                     let mut edges = StrHashMap::from_iter([(CLEAN_TARGET, prep::Edge {
@@ -986,7 +987,6 @@ impl<'a> Parser<'a> {
                     _ = phonys.try_reserve(32);
                     phonys
                 },
-                default_target: None,
             },
             context: Context::Global
         };
