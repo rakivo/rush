@@ -467,10 +467,11 @@ impl Compiled<'_> {
                 } files
             });
 
-
         if fs::exists::<&Path>(Db::RUSH_FILE_NAME.as_ref()).unwrap_or(false) {
             targets.push(Db::RUSH_FILE_NAME)
         }
+
+        let count = targets.len().to_string();
 
         let (command, description) = if flags.verbose() {
             let targets_str = targets.join(" ");
@@ -485,16 +486,13 @@ impl Compiled<'_> {
                 description.push_str("]\n");
             }
             description.push_str("[cleaned ");
-            description.push_str(&targets.len().to_string());
+            description.push_str(&count);
             description.push_str(" files]");
             (command, description)
         } else {
             let targets_str = targets.join(" ");
             let command = format!("rm -f {targets_str}");
-            let description = format!{
-                "[cleaned {count} files]",
-                count = targets.len()
-            };
+            let description = format!("[cleaned {count} files]");
             (command, description)
         };
 

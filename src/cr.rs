@@ -160,7 +160,7 @@ impl<'a> CommandRunner<'a> {
         cr.finish()
     }
 
-    fn execute_command(&self, command: &Command, target: &str) -> io::Result<()> {
+    fn execute_command(&self, command: &Command, target: &str) -> io::Result::<()> {
         if self.ran_any_edges.load(Ordering::Relaxed) {
             _ = self.ran_any_edges.store(true, Ordering::Relaxed)
         }
@@ -206,6 +206,14 @@ impl<'a> CommandRunner<'a> {
     }
 
     #[inline(always)]
+    fn execute_clean(&self) {
+        println!("[cleaning..]");
+        _ = self.execute_command(&self.clean(), CLEAN_TARGET).map(|_| {
+            self.executed_edges_curr_level.fetch_add(1, Ordering::Relaxed)
+        });
+    }
+
+    #[inline(always)]
     fn clean(&self) -> &Command {
         self.clean.get_or_init(|| {
             self.context.generate_clean_edge(&self.flags)
@@ -214,9 +222,7 @@ impl<'a> CommandRunner<'a> {
 
     fn run_phony(&self, edge: &'a Edge<'a>) {
         if edge.target == CLEAN_TARGET {
-            _ = self.execute_command(&self.clean(), CLEAN_TARGET).map(|_| {
-                self.executed_edges_curr_level.fetch_add(1, Ordering::Relaxed)
-            });
+            self.execute_clean();
             return
         }
 
@@ -312,9 +318,7 @@ impl<'a> CommandRunner<'a> {
         }
 
         if edge.target == CLEAN_TARGET {
-            _ = self.execute_command(&self.clean(), CLEAN_TARGET).map(|_| {
-                self.executed_edges_curr_level.fetch_add(1, Ordering::Relaxed)
-            });
+            self.execute_clean();
             return ExecutorFlow::Ok
         }
 
