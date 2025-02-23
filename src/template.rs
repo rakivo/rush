@@ -17,16 +17,16 @@ pub struct Template<'a> {
     in_used: bool,
     statics_len: usize,
 
-    pub loc: Loc,
+    pub loc: Loc<'a>,
     pub chunks: Vec::<TemplateChunk<'a>>,
 }
 
-impl Template<'_> {
+impl<'a> Template<'a> {
     const AVERAGE_COMPILED_CHUNK_SIZE: usize = 24;
     const CONSTANT_PLACEHOLDERS: &'static [&'static str] = &["in", "out"];
 
     #[cfg_attr(feature = "dbg", track_caller)]
-    pub fn new(s: &str, loc: Loc) -> Template {
+    pub fn new(s: &'a str, loc: Loc<'a>) -> Template<'a> {
         let mut start = 0;
         let mut in_used = false;
         let mut statics_len = 0;
@@ -219,12 +219,12 @@ impl Template<'_> {
         } ret
     }
 
-    pub fn compile_def_recursive<'a>(
-        name: &'a str,
-        def: &prep::Def<'a>,
-        defs: &prep::Defs<'a>,
-        compiling: &mut StrHashSet<'a>,
-        compiled_defs: &mut comp::Defs<'a>,
+    pub fn compile_def_recursive<'b>(
+        name: &'b str,
+        def: &prep::Def<'b>,
+        defs: &prep::Defs<'b>,
+        compiling: &mut StrHashSet<'b>,
+        compiled_defs: &mut comp::Defs<'b>,
     ) {
         if compiling.contains(name) {
             report_panic!{

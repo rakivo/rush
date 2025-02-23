@@ -42,7 +42,7 @@ pub fn build_dependency_graph<'a>(
                         .chain(deps.iter())
                         .cloned()
                         .collect::<StrIndexSet>()
-                } 
+                }
             }
         }).unwrap_or_default();
 
@@ -117,7 +117,7 @@ pub fn build_dependency_graph<'a>(
             processed.edges.keys()
                 .filter(|edge| !reverse_graph.contains_key(*edge))
                 .map(|t| unsafe { processed.edges.get(t).unwrap_unchecked() })
-                .min_by(|x, y| x.loc.0.cmp(&y.loc.0))
+                .min_by(|x, y| x.loc.row.cmp(&y.loc.row))
         }
     });
 

@@ -49,12 +49,8 @@ fn main() -> ExitCode {
     let rush_file_path = flags.file_path()
         .map(|s| s.as_str())
         .map(|s| s.strip_prefix("./").unwrap_or(s))
-        .unwrap_or(Parser::RUSH_FILE_PATH);
-
-    unsafe {
-        loc::RUSH_FILE_PATH_PTR = rush_file_path.as_ptr();
-        loc::RUSH_FILE_PATH_LEN = rush_file_path.len();
-    }
+        .unwrap_or(Parser::RUSH_FILE_PATH)
+        .to_owned();
 
     let Some(mmap) = read_file(&rush_file_path) else {
         eprintln!("could not read: {rush_file_path}");
@@ -68,7 +64,7 @@ fn main() -> ExitCode {
     let arena_cap = (content.len() as f64 * 2.5) as _;
 
     let arena = Bump::with_capacity(arena_cap);
-    let context = Parser::parse(&arena, &content, &escaped_indexes);
+    let context = Parser::parse(&arena, &content, &rush_file_path, &escaped_indexes);
 
     let context = context.compile(&arena);
 

@@ -45,7 +45,7 @@ impl<'a> Rule<'a> {
     #[cfg_attr(feature = "dbg", track_caller)]
     fn new(
         command: &'a str,
-        command_loc: Loc,
+        command_loc: Loc<'a>,
         description: Option::<Description<'a>>,
         depfile_path: Option::<DepfilePath<'a>>
     ) -> Self {
@@ -69,7 +69,7 @@ pub mod prep {
     #[cfg_attr(feature = "dbg", derive(Debug))]
     pub struct Target<'a> {
         pub t: &'a str,
-        pub loc: Loc
+        pub loc: Loc<'a>
     }
 
     pub type DefaultTarget<'a> = Option::<Target<'a>>;
@@ -95,7 +95,7 @@ pub mod prep {
 
     #[cfg_attr(feature = "dbg", derive(Debug))]
     pub struct Edge<'a> {
-        pub loc: Loc,
+        pub loc: Loc<'a>,
         pub phony: Phony<'a>,
         pub shadows: Shadows<'a>,
 
@@ -182,7 +182,7 @@ pub mod comp {
 
     #[cfg_attr(feature = "dbg", derive(Debug))]
     pub struct Edge<'a> {
-        pub loc: Loc,
+        pub loc: Loc<'a>,
         pub phony: Phony<'a>,
         pub target: &'a str,
         pub shadows: Shadows<'a>,
@@ -520,14 +520,14 @@ impl Compiled<'_> {
     #[inline]
     pub fn pretty_print_rules(&self) -> String {
         let mut rules = self.rules.iter().collect::<Vec::<_>>();
-        rules.sort_unstable_by(|(_, ra), (_, rb)| ra.command.loc.0.cmp(&rb.command.loc.0));
+        rules.sort_unstable_by(|(_, ra), (_, rb)| ra.command.loc.row.cmp(&rb.command.loc.row));
         Self::pretty_print_vec(&rules.iter().map(|(s, _)| s).collect())
     }
 
     #[inline]
     pub fn pretty_print_targets(&self) -> String {
         let mut targets = self.edges.iter().collect::<Vec::<_>>();
-        targets.sort_unstable_by(|(_, ea), (_, eb)| ea.loc.0.cmp(&eb.loc.0));
+        targets.sort_unstable_by(|(_, ea), (_, eb)| ea.loc.row.cmp(&eb.loc.row));
         Self::pretty_print_vec(&targets.iter().map(|(s, _)| s).collect())
     }
 }
@@ -536,7 +536,7 @@ impl Compiled<'_> {
 #[derive(Copy, Clone)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 struct DepfilePath<'a> {
-    loc: Loc,
+    loc: Loc<'a>,
     path: &'a str
 }
 
@@ -544,7 +544,7 @@ struct DepfilePath<'a> {
 #[derive(Copy, Clone)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 struct Description<'a> {
-    loc: Loc,
+    loc: Loc<'a>,
     description: &'a str
 }
 
@@ -556,7 +556,7 @@ enum Context<'a> {
         shadows: Option::<StrHashMap::<'a, &'a str>>,
     },
     Rule {
-        loc: Loc,
+        loc: Loc<'a>,
 
         name: &'a str,
 
@@ -573,6 +573,7 @@ type EscapedIndexes = Vec::<(usize, usize)>;
 pub struct Parser<'a> {
     cursor: usize,
     arena: &'a Bump,
+    file_path: &'a str,
     context: Context<'a>,
     pub parsed: Parsed<'a>,
 }
@@ -626,8 +627,16 @@ impl<'a> Parser<'a> {
             (first_space, &line[..first_space])
         });
 
+        let get_loc = || -> Loc<'_> {
+            Loc::new(self.cursor, self.file_path)
+        };
+
+        let new_loc = |row: usize| -> Loc<'_> {
+            Loc::new(row, self.file_path)
+        };
+
         let Some((first_space, first_token)) = first else {
-            report_panic!(Loc(self.cursor), "undefined token: {line}")
+            report_panic!(get_loc(), "undefined token: {line}")
         };
 
         let Some(second_space) = line[first_space..].find(|c: char| !c.is_ascii_whitespace())
@@ -636,18 +645,18 @@ impl<'a> Parser<'a> {
             };
 
         let second_token = line[first_space..].trim();
-        
+
         let parse_shadow = || -> &'a str {
             let check_start = first_space;
             let check_end = (second_space + 1 + 1).min(line.len());
             if !line[check_start..check_end].contains('=') {
-                report_panic!(Loc(self.cursor), "expected `=` in variable definition")
+                report_panic!(get_loc(), "expected `=` in variable definition")
             }
             line[second_space + 1..].trim()
         };
 
         let parse_def = || -> prep::Def<'a> {
-            prep::Def(Template::new(parse_shadow(), Loc(self.cursor)))
+            prep::Def(Template::new(parse_shadow(), get_loc()))
         };
 
         // TODO: we should move context here and this match should return another updated context
@@ -656,7 +665,7 @@ impl<'a> Parser<'a> {
                 match first_token {
                     COMMAND => {
                         let command_ = line[second_space + 1 + 1..].trim();
-                        let command_loc = Loc(self.cursor);
+                        let command_loc = get_loc();
                         let command = Template::new(command_, command_loc);
                         let edge = self.parsed.edge_mut(target);
                         edge.phony = edge.into_phony(Some(command));
@@ -686,7 +695,7 @@ impl<'a> Parser<'a> {
                         let command_loc = self.cursor;
                         let rule = Rule::new(
                             command,
-                            Loc(command_loc),
+                            new_loc(command_loc),
                             *description,
                             *depfile,
                         );
@@ -701,7 +710,7 @@ impl<'a> Parser<'a> {
                     },
                     DEPFILE => {
                         let path = parse_shadow();
-                        let depfile = DepfilePath {path, loc: Loc(self.cursor)};
+                        let depfile = DepfilePath {path, loc: get_loc()};
                         if *already_inserted {
                             let rule = self.parsed.rule_mut(name);
                             let depfile = Template::new(path, depfile.loc);
@@ -718,7 +727,7 @@ impl<'a> Parser<'a> {
                     },
                     DESCRIPTION => {
                         let description = line[second_space + 1 + 1..].trim();
-                        let description = Description { description, loc: Loc(self.cursor) };
+                        let description = Description { description, loc: get_loc() };
                         if *already_inserted {
                             let rule = self.parsed.rule_mut(name);
                             rule.description = Some(Template::new(description.description, description.loc));
@@ -734,7 +743,7 @@ impl<'a> Parser<'a> {
                     },
                     _ => if line.chars().next() != Some(COMMENT) {
                         report_panic!{
-                            Loc(self.cursor),
+                            get_loc(),
                             "undefined property: `{first_token}`, existing properties are: `command`, `description`"
                         }
                     }
@@ -748,7 +757,7 @@ impl<'a> Parser<'a> {
                         let content = match util::read_file_into_arena_str(self.arena, path) {
                             Ok(ok) => ok,
                             Err(e) => report_panic!{
-                                Loc(self.cursor),
+                                get_loc(),
                                 "could not read: {path}: {e}"
                             }
                         };
@@ -769,13 +778,18 @@ impl<'a> Parser<'a> {
                         // this memory belongs to arena -> it is going to be deallocated
                         mem::forget(string);
 
-                        _ = self.parse_lines(content, &escaped_indexes)
+                        let old_file_path = self.file_path;
+                        self.file_path = path;
+
+                        _ = self.parse_lines(content, &escaped_indexes);
+
+                        self.file_path = old_file_path
                     },
                     PHONY => {
                         let phony = second_token;
                         if phony.as_bytes().last() == Some(&b':') {
                             report_panic!{
-                                Loc(self.cursor),
+                                get_loc(),
                                 "you can define phony edge following way:\n  phony {target}\n  build {target}:\n    ...",
                                 target = &phony[..(phony.len() - 1).max(1)]
                             }
@@ -788,26 +802,26 @@ impl<'a> Parser<'a> {
                     DEFAULT => {
                         self.parsed.default_target = Some(prep::Target {
                             t: second_token,
-                            loc: Loc(self.cursor)
+                            loc: get_loc()
                         });
                     },
                     RULE => {
                         self.context = Context::Rule {
                             depfile: None,
                             description: None,
-                            loc: Loc(self.cursor),
+                            loc: get_loc(),
                             already_inserted: false,
                             name: line[second_space..].trim_end(),
                         }
                     },
                     BUILD => {
                         let Some(colon_idx) = line.find(':') else {
-                            report_panic!(Loc(self.cursor), "expected colon after build target")
+                            report_panic!(get_loc(), "expected colon after build target")
                         };
                         let post_colon = line[colon_idx + 1..].trim();
                         let or_idx = post_colon.find('|');
 
-                        let loc = Loc(self.cursor);
+                        let loc = get_loc();
                         let target = line[first_space..colon_idx].trim();
                         let target_template = Template::new(target, loc);
 
@@ -944,18 +958,19 @@ impl<'a> Parser<'a> {
     }
 
     #[cfg_attr(feature = "dbg", tramer("millis"))]
-    pub fn parse(arena: &'a Bump, content: &'a str, escaped_indexes: &EscapedIndexes) -> Parsed<'a> {
+    pub fn parse(arena: &'a Bump, content: &'a str, file_path: &'a str, escaped_indexes: &EscapedIndexes) -> Parsed<'a> {
         let mut parser = Self {
             arena,
             cursor: 0,
+            file_path,
             parsed: Parsed {
                 defs: prep::Defs(StrHashMap::with_capacity(32)),
                 edges: {
                     let mut edges = StrHashMap::from_iter([(CLEAN_TARGET, prep::Edge {
-                        loc: Loc(420),
+                        loc: Loc::new(420, "aboba"),
                         target: CLEAN_TARGET,
                         shadows: Shadows::None,
-                        target_template: Template::new(CLEAN_TARGET, Loc(420)),
+                        target_template: Template::new(CLEAN_TARGET, Loc::new(420, "aboba")),
                         phony: prep::Phony::Phony {
                             command: None,
                             aliases: const { Vec::new() },
