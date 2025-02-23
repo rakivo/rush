@@ -28,7 +28,7 @@
 " rush.vim - Syntax file for rush-lang
 
 " Define keywords
-syn keyword rushKeyword rule build command description depfile phony default
+syn keyword rushKeyword rule build command description depfile phony default subrush
 
 " Highlight keywords
 hi def link rushKeyword Keyword
