@@ -1,4 +1,5 @@
 use crate::flags::Flags;
+use crate::util::unreachable;
 use crate::types::StrDashSet;
 use crate::db::{Db, Metadata};
 use crate::ux::did_you_mean_compiled;
@@ -96,13 +97,13 @@ impl<'a> CommandRunner<'a> {
         if self.ran_any_edges.load(Ordering::Relaxed) {
             println!()
         }
+
         if self.flags.check_is_up_to_date() {
             match self.not_up_to_date {
                 None => println!("[up to date]"),
                 Some(target) => println!("[{target} is not up to date]")
             }
-        }
-        self.db_write
+        } self.db_write
     }
 
     #[inline]
@@ -160,19 +161,21 @@ impl<'a> CommandRunner<'a> {
     }
 
     fn execute_command(&self, command: &Command, target: &str) -> io::Result<()> {
-        self.ran_any_edges.store(true, Ordering::Relaxed);
+        if self.ran_any_edges.load(Ordering::Relaxed) {
+            _ = self.ran_any_edges.store(true, Ordering::Relaxed)
+        }
 
         if !self.flags.quiet() {
             if self.flags.print_commands() {
                 let output = command.to_string(&self.flags);
 
                 print!("\x1B[2K\r{output}");
-                std::io::stdout().flush().unwrap();
+                _ = std::io::stdout().flush();
                 return Ok(())
             }
 
             print!("\x1B[2K\r{command}", command = command.to_string(&self.flags));
-            _ = std::io::stdout().flush().unwrap()
+            _ = std::io::stdout().flush()
         }
 
         let out = command.execute()
@@ -202,6 +205,7 @@ impl<'a> CommandRunner<'a> {
         Ok(())
     }
 
+    #[inline(always)]
     fn clean(&self) -> &Command {
         self.clean.get_or_init(|| {
             self.context.generate_clean_edge(&self.flags)
@@ -216,9 +220,11 @@ impl<'a> CommandRunner<'a> {
             return
         }
 
-        let Phony::Phony { command, aliases, .. } = &edge.phony else { unreachable!() };
+        let Phony::Phony { command, aliases, .. } = &edge.phony else {
+            unreachable()
+        };
 
-        aliases.iter().filter_map(|_edge| {
+        aliases.par_iter().filter_map(|_edge| {
             match self.context.edges.get(_edge.as_str()) {
                 Some(j) => Some(j),
                 None => {

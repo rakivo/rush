@@ -4,6 +4,15 @@ use std::io::{self, Read, Error, ErrorKind};
 
 use bumpalo::Bump;
 
+#[inline(always)]
+#[cfg_attr(feature = "dbg", track_caller)]
+pub fn unreachable() -> ! {
+    #[cfg(feature = "dbg")] { unreachable!() }
+    #[cfg(not(feature = "dbg"))] unsafe {
+        std::hint::unreachable_unchecked()
+    }
+}
+
 #[inline]
 #[cfg_attr(feature = "dbg", track_caller)]
 pub fn read_file_into_arena<'bump, P>(arena: &'bump Bump, path: P) -> io::Result::<&'bump mut [u8]>
