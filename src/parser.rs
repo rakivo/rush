@@ -453,13 +453,9 @@ pub struct Compiled<'a> {
 
 impl Compiled<'_> {
     pub fn generate_clean_edge(&self, flags: &Flags) -> Command<'_> {
-        let targets = self.edges.values()
+        let mut targets = self.edges.values()
             .filter(|j| matches!(j.phony, comp::Phony::NotPhony { .. }))
             .fold(Vec::with_capacity(64), |mut files, j| {
-                if fs::exists::<&Path>(Db::RUSH_FILE_NAME.as_ref()).unwrap_or(false) {
-                    files.push(Db::RUSH_FILE_NAME)
-                }
-
                 if fs::exists::<&Path>(j.target.as_ref()).unwrap_or(false) {
                     files.push(j.target)
                 }
@@ -470,6 +466,11 @@ impl Compiled<'_> {
                     }
                 } files
             });
+
+
+        if fs::exists::<&Path>(Db::RUSH_FILE_NAME.as_ref()).unwrap_or(false) {
+            targets.push(Db::RUSH_FILE_NAME)
+        }
 
         let (command, description) = if flags.verbose() {
             let targets_str = targets.join(" ");
