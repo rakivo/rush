@@ -1,7 +1,7 @@
 use crate::loc::Loc;
 use crate::types::StrHashSet;
 use crate::dbg_unwrap::DbgUnwrap;
-use crate::parser::comp::{Job, Defs};
+use crate::parser::comp::{Edge, Defs};
 use crate::parser::{prep, comp, Shadows};
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
@@ -17,16 +17,16 @@ pub struct Template<'a> {
     in_used: bool,
     statics_len: usize,
 
-    pub loc: Loc,
+    pub loc: Loc<'a>,
     pub chunks: Vec::<TemplateChunk<'a>>,
 }
 
-impl Template<'_> {
+impl<'a> Template<'a> {
     const AVERAGE_COMPILED_CHUNK_SIZE: usize = 24;
     const CONSTANT_PLACEHOLDERS: &'static [&'static str] = &["in", "out"];
 
     #[cfg_attr(feature = "dbg", track_caller)]
-    pub fn new(s: &str, loc: Loc) -> Template {
+    pub fn new(s: &'a str, loc: Loc<'a>) -> Template<'a> {
         let mut start = 0;
         let mut in_used = false;
         let mut statics_len = 0;
@@ -174,13 +174,13 @@ impl Template<'_> {
     }
 
     #[inline(always)]
-    pub fn compile(&self, job: &Job, defs: &Defs) -> Result::<String, String> {
-        self._compile(job.target, job.inputs_str(self.in_used), &job.shadows, defs)
+    pub fn compile(&self, edge: &Edge, defs: &Defs) -> Result::<String, String> {
+        self._compile(edge.target, edge.inputs_str(self.in_used), &edge.shadows, defs)
     }
 
     #[inline(always)]
-    pub fn compile_prep(&self, job: &prep::Job, defs: &Defs) -> Result::<String, String> {
-        self._compile(job.target, job.inputs_str(self.in_used), &job.shadows, defs)
+    pub fn compile_prep(&self, edge: &prep::Edge, defs: &Defs) -> Result::<String, String> {
+        self._compile(edge.target, edge.inputs_str(self.in_used), &edge.shadows, defs)
     }
 
     #[inline]
@@ -219,15 +219,18 @@ impl Template<'_> {
         } ret
     }
 
-    pub fn compile_def_recursive<'a>(
-        name: &'a str,
-        def: &prep::Def<'a>,
-        defs: &prep::Defs<'a>,
-        compiling: &mut StrHashSet<'a>,
-        compiled_defs: &mut comp::Defs<'a>,
+    pub fn compile_def_recursive<'b>(
+        name: &'b str,
+        def: &prep::Def<'b>,
+        defs: &prep::Defs<'b>,
+        compiling: &mut StrHashSet<'b>,
+        compiled_defs: &mut comp::Defs<'b>,
     ) {
         if compiling.contains(name) {
-            panic!("circular reference detected involving {name}")
+            report_panic!{
+                def.0.loc,
+                "circular reference detected involving {name}"
+            }
         }
 
         if compiled_defs.contains_key(name) { return }
@@ -246,7 +249,10 @@ impl Template<'_> {
                     if !ret.is_empty() && !placeholder.is_empty() { ret.push(' ') }
 
                     if compiling.contains(placeholder) {
-                        panic!("circular reference detected involving {placeholder}")
+                        report_panic!{
+                            def.0.loc,
+                            "circular reference detected involving {placeholder}"
+                        }
                     }
 
                     let compiled = match defs.0.get(placeholder) {
@@ -256,14 +262,20 @@ impl Template<'_> {
                             }
                             compiled_defs.get(placeholder).unwrap_dbg().0.as_str()
                         }
-                        None => panic!("Undefined variable: {placeholder}")
+                        None => report_panic!{
+                            def.0.loc,
+                            "undefined variable: {placeholder}"
+                        }
                     };
 
                     ret.push_str(compiled)
                 }
                 TemplateChunk::JoinedPlaceholder(placeholder) => {
                     if compiling.contains(placeholder) {
-                        panic!("circular reference detected involving {placeholder}")
+                        report_panic!{
+                            def.0.loc,
+                            "circular reference detected involving {placeholder}"
+                        }
                     }
 
                     let compiled = match defs.0.get(placeholder) {
@@ -273,7 +285,10 @@ impl Template<'_> {
                             }
                             compiled_defs.get(placeholder).unwrap_dbg().0.as_str()
                         }
-                        None => panic!("Undefined variable: {placeholder}")
+                        None => report_panic!{
+                            def.0.loc,
+                            "undefined variable: {placeholder}"
+                        }
                     };
 
                     ret.push_str(compiled)

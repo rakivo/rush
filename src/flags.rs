@@ -27,8 +27,6 @@ macro_rules! define_modes {
             ).help($description);
         )*
 
-        pub const MODE_STRS: &[&str] = &[$(concat!("-", $short), concat!("--", $long)), *];
-
         #[repr(u64)]
         enum FlagBit { $([<$name:camel>]), * }
 
@@ -79,8 +77,6 @@ macro_rules! define_flags {
             ).help($description);
         )*
 
-        pub const FLAG_STRS: &[&str] = &[$(concat!("-", $short), concat!("--", $long)), *];
-
         #[cfg_attr(feature = "dbg", derive(Debug))]
         pub struct Flags {
             mode: Mode,
@@ -118,11 +114,6 @@ macro_rules! define_flags {
 
 define_modes! {
     ["h",  "help",           help,                   "print this text and exit"],
-    ["r",  "rush",           rush,                   r"trade `level synchronization` to achieve maximum speed possible.
-                      This optimization assumes that `POLLHUP` reliably indicates process termination, which is true for
-                      most well-behaved processes like compilers (gcc, clang, rustc, etc).
-                      Instead of waiting for the process to terminate using `waitpid`, we rely on `POLLHUP` to indicate the process termination.
-                      This allows us to mark the job as executed faster, reducing latency and improving throughput"],
     ["d",  "default-job",    print_default_job,      "print default job"],
     ["lj", "list-jobs",      list_jobs,              "list all jobs and exit"],
     ["lr", "list-rules",     list_rules,             "list all rules and exit"],

@@ -5,7 +5,6 @@ mod ux;
 mod cr;
 mod db;
 mod util;
-mod poll;
 mod flags;
 mod types;
 mod graph;
@@ -19,9 +18,9 @@ mod edit_distance;
 use db::Db;
 use flags::Flags;
 use cr::CommandRunner;
+use ux::did_you_mean_compiled;
 use graph::build_dependency_graph;
 use parser::{comp, Parser, read_file};
-use ux::{/*check_args, */did_you_mean_compiled};
 
 use std::env;
 use std::process::{exit, ExitCode};
@@ -30,15 +29,6 @@ use bumpalo::Bump;
 use flager::Parser as FlagParser;
 
 fn main() -> ExitCode {
-    // let args = env::args().collect::<Vec::<_>>();
-    // if let Some(undefined_flag) = check_args(&args) {
-    //     eprintln!{
-    //         "did you mean: {program} -t {undefined_flag} [..flags]?",
-    //         program = args[0],
-    //     };
-    //     return ExitCode::FAILURE
-    // }
-
     let flag_parser = FlagParser::new();
     let flags = Flags::new(&flag_parser);
 
@@ -59,12 +49,8 @@ fn main() -> ExitCode {
     let rush_file_path = flags.file_path()
         .map(|s| s.as_str())
         .map(|s| s.strip_prefix("./").unwrap_or(s))
-        .unwrap_or(Parser::RUSH_FILE_PATH);
-
-    unsafe {
-        loc::RUSH_FILE_PATH_PTR = rush_file_path.as_ptr();
-        loc::RUSH_FILE_PATH_LEN = rush_file_path.len();
-    }
+        .unwrap_or(Parser::RUSH_FILE_PATH)
+        .to_owned();
 
     let Some(mmap) = read_file(&rush_file_path) else {
         eprintln!("could not read: {rush_file_path}");
@@ -75,10 +61,10 @@ fn main() -> ExitCode {
     let mut content = String::with_capacity(content_.len());
     let escaped_indexes = Parser::preprocess_content(content_, &mut content);
 
-    let arena_cap = content.len().max(1024 * 1024);
+    let arena_cap = (content.len() as f64 * 2.5) as _;
 
     let arena = Bump::with_capacity(arena_cap);
-    let context = Parser::parse(&arena, &content, &escaped_indexes);
+    let context = Parser::parse(&arena, &content, &rush_file_path, &escaped_indexes);
 
     let context = context.compile(&arena);
 
@@ -87,8 +73,8 @@ fn main() -> ExitCode {
     }
 
     if flags.list_jobs() {
-        let jobs = context.pretty_print_targets();
-        println!("available jobs: [{jobs}]");
+        let edges = context.pretty_print_targets();
+        println!("available jobs: [{edges}]");
         return ExitCode::SUCCESS
     }
 
@@ -99,23 +85,21 @@ fn main() -> ExitCode {
     }
 
     if flags.list_jobs_and_rules() {
-        let jobs = context.pretty_print_targets();
-        println!("available jobs: [{jobs}]");
+        let edges = context.pretty_print_targets();
+        println!("available jobs: [{edges}]");
 
         let rules = context.pretty_print_rules();
         println!("available rules: [{rules}]");
         return ExitCode::SUCCESS
     }
 
-    let clean = context.generate_clean_job(&arena, &flags);
-
-    let default_job = flags.default_target().map(|t| {
-        context.jobs.get(t.as_str()).unwrap_or_else(|| {
+    let default_edge = flags.default_target().map(|t| {
+        context.edges.get(t.as_str()).unwrap_or_else(|| {
             let targets = context.pretty_print_targets();
             eprintln!("no target: {t} found in {rush_file_path}");
             if let Some(compiled) = did_you_mean_compiled(
                 t,
-                &context.jobs,
+                &context.edges,
                 &context.rules,
             ) {
                 println!("did you mean: {compiled}?")
@@ -131,14 +115,14 @@ fn main() -> ExitCode {
     });
     let db = content.and_then(|content| Db::read(content).ok());
 
-    let (graph, default_job, transitive_deps) = build_dependency_graph(
+    let (graph, default_edge, transitive_deps) = build_dependency_graph(
         &arena,
         &context,
-        default_job
+        default_edge
     );
 
     if flags.print_default_job() {
-        if let Some(comp::Job { target, .. }) = default_job.as_ref() {
+        if let Some(comp::Edge { target, .. }) = default_edge.as_ref() {
             println!("default job: {target}");
             return ExitCode::SUCCESS
         } else {
@@ -148,13 +132,12 @@ fn main() -> ExitCode {
     }
 
     _ = CommandRunner::run(
-        clean,
         &context,
         graph,
         transitive_deps,
         flags,
         db,
-        default_job
+        default_edge
     ).write_finish(&context.cache_file_path);
 
     ExitCode::SUCCESS
