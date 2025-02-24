@@ -1,6 +1,6 @@
-use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
+use std::fs::{self, File};
 use std::process::{Command, Output};
 
 const MANIFEST_PATH: &str = env!("CARGO_MANIFEST_DIR");
@@ -31,21 +31,29 @@ fn run_rush(path: &str) -> Output {
         .expect("could not execute command")
 }
 
+#[inline]
+fn remove_rush(path: &str) {
+    if let Err(e) = fs::remove_file(format!("{path}.rush")) {
+        panic!("could not remove: {path}: {e}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn cycled() {
-        let file_path = "cycled";
+        let file_name = "cycled";
 
-        create_rush_file(file_path, r#"rule echo
+        create_rush_file(file_name, r#"rule echo
   command = echo "hello $in"
 
 build hello: echo hello
 build all: hello"#);
 
-        let out = run_rush(file_path);
+        let out = run_rush(file_name);
+        _ = remove_rush(file_name);
 
         assert!(!out.status.success());
 
@@ -60,9 +68,9 @@ build all: hello"#);
 
     #[test]
     fn cycled_path() {
-        let file_path = "cycled_path";
+        let file_name = "cycled_path";
 
-        create_rush_file(file_path, r#"rule echo
+        create_rush_file(file_name, r#"rule echo
   command = echo "Building $out"
 
 build A: echo B
@@ -71,7 +79,8 @@ build C: echo A
 
 default A"#);
 
-        let out = run_rush(file_path);
+        let out = run_rush(file_name);
+        _ = remove_rush(file_name);
 
         assert!(!out.status.success());
 
