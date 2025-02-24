@@ -4,6 +4,19 @@ use std::io::{self, Read, Error, ErrorKind};
 
 use bumpalo::Bump;
 
+#[inline]
+pub fn pretty_print_slice<T>(slice: &[T], sep: &str) -> String
+where
+    T: std::fmt::Display
+{
+    let mut buf = String::with_capacity(256);
+    slice.first().map(|s| buf.push_str(&s.to_string()));
+    slice.iter().skip(1).for_each(|s| {
+        buf.push_str(sep);
+        buf.push_str(&s.to_string())
+    }); buf
+}
+
 #[inline(always)]
 #[cfg_attr(feature = "dbg", track_caller)]
 pub fn unreachable() -> ! {
