@@ -123,7 +123,7 @@ impl<'a> CommandRunner<'a> {
     fn resolve_and_run_target(&self, edge: &Edge<'a>) {
         let levels = {
             let subgraph = self.build_subgraph(edge.target);
-            topological_sort(&subgraph)
+            topological_sort(&subgraph, self.context)
         };
         _ = self.run_levels(&levels)
     }
@@ -153,7 +153,7 @@ impl<'a> CommandRunner<'a> {
             }
             return cr.finish()
         } else {
-            topological_sort(&cr.graph)
+            topological_sort(&cr.graph, context)
         };
 
         _ = cr.run_levels(&levels);

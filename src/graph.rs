@@ -1,7 +1,7 @@
 use crate::util;
 use crate::parser::comp::Phony;
 use crate::dbg_unwrap::DbgUnwrap;
-use crate::parser::{Compiled, DefaultEdge};
+use crate::parser::{comp, Compiled, DefaultEdge};
 use crate::types::{StrHashMap, StrHashSet, StrIndexSet};
 
 use std::sync::Arc;
@@ -46,7 +46,6 @@ pub fn build_dependency_graph<'a>(
             }
         }).unwrap_or_default();
 
-        // check if depfile exists, if it does => read it, extend our deps with the ones that are listed in the .d file
         if let Some(edge) = parsed.edges.get(node) {
             if let Some(depfile_path) = edge.depfile() {
                 if let Ok(depfile) = util::read_file_into_arena_str(arena, depfile_path) {
@@ -124,14 +123,16 @@ pub fn build_dependency_graph<'a>(
     (graph, default_edge, transitive_deps)
 }
 
-pub fn topological_sort<'a>(graph: &Graph<'a>) -> Levels<'a> {
-    let mut levels = Vec::new();
-    let mut in_degree = StrHashMap::<i64>::with_capacity(graph.len());
+pub fn topological_sort<'a>(graph: &Graph<'a>, context: &Compiled) -> Levels<'a> {
+    let mut levels = Vec::with_capacity(8);
+    let mut parent = StrHashMap::with_capacity(graph.len());
+    let mut in_degree = StrHashMap::with_capacity(graph.len());
 
     for (node, deps) in graph.iter() {
         in_degree.entry(node).or_insert(0);
-        for dep in deps.iter() {
-            *in_degree.entry(*dep).or_insert(0) += 1
+        for dep in deps.iter().cloned() {
+            *in_degree.entry(dep).or_insert(0) += 1;
+            _ = parent.entry(dep).or_insert(node)
         }
     }
 
@@ -147,12 +148,13 @@ pub fn topological_sort<'a>(graph: &Graph<'a>) -> Levels<'a> {
             let node = unsafe { queue.pop_front().unwrap_unchecked() };
             curr_level.push(node);
 
-            let Some(deps) = graph.get(node) else { continue };
-            for dep in deps.iter() {
-                let e = unsafe { in_degree.get_mut(dep).unwrap_unchecked() };
-                *e -= 1;
-                if *e == 0 {
-                    queue.push_back(*dep)
+            if let Some(deps) = graph.get(node) {
+                for dep in deps.iter() {
+                    let e = unsafe { in_degree.get_mut(dep).unwrap_unchecked() };
+                    *e -= 1;
+                    if *e == 0 {
+                        queue.push_back(*dep)
+                    }
                 }
             }
         }
@@ -160,8 +162,61 @@ pub fn topological_sort<'a>(graph: &Graph<'a>) -> Levels<'a> {
         levels.push(curr_level)
     }
 
-    if cfg!(feature = "dbg") && in_degree.values().any(|d| d.is_positive()) {
-        panic!("[FATAL] cycle has been detected in the dependency graph")
+    if let Some(cycle_node) = in_degree.iter()
+        .find(|(.., degree)| **degree > 0)
+        .map(|(node, ..)| *node)
+    {
+        fn reconstruct_cycle<'a>(
+            start: &'a str,
+            graph: &Graph<'a>,
+            visited: &mut StrHashSet<'a>,
+            cycle_path: &mut Vec<&'a str>
+        ) {
+            let mut curr = start;
+            loop {
+                if visited.contains(curr) { break }
+
+                visited.insert(curr);
+                cycle_path.push(curr);
+
+                let Some(next) = graph.get(curr).and_then(|deps| deps.first()) else {
+                    break
+                };
+
+                curr = next
+            }
+        }
+
+        let mut cycle_path = Vec::with_capacity(32);
+        reconstruct_cycle(
+            cycle_node,
+            &graph,
+            &mut StrHashSet::with_capacity(graph.len()),
+            &mut cycle_path
+        );
+
+        // the cycled path should end with the edge it began with
+        if let Some(start) = cycle_path.first() {
+            cycle_path.push(start)
+        }
+
+        /* report the cycle */ {
+            let edge = cycle_path[0];
+            let msg = if cycle_path.len() == 2 {
+                format!("edge {edge:?} depends on itself")
+            } else {
+                let pretty = util::pretty_print_slice(&cycle_path, " -> ");
+                format!{
+                    "cycle detected: {pretty}\nnote: edge {edge:?} is causing the cycle"
+                }
+            };
+
+            if let Some(comp::Edge { loc, .. }) = context.edges.get(edge) {
+                report_panic!(loc, "{msg}")
+            } else {
+                panic!("{msg}")
+            }
+        }
     }
 
     levels.reverse();
