@@ -170,7 +170,7 @@ pub fn topological_sort<'a>(graph: &Graph<'a>, context: &Compiled) -> Levels<'a>
             start: &'a str,
             graph: &Graph<'a>,
             visited: &mut StrHashSet<'a>,
-            cycle_path: &mut Vec<&'a str>
+            cycle_path: &mut Vec::<&'a str>
         ) {
             let mut curr = start;
             loop {

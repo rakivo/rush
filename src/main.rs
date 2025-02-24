@@ -48,7 +48,7 @@ fn main() -> ExitCode {
 
     let rush_file_path = flags.file_path()
         .map(|s| s.as_str())
-        .map(|s| s.strip_prefix("./").unwrap_or(s))
+        .map(|s| s.strip_prefix("./").unwrap_or(s).trim())
         .unwrap_or(Parser::RUSH_FILE_PATH)
         .to_owned();
 
