@@ -1,20 +1,21 @@
+use crate::{ux, util};
 use crate::flags::Flags;
 use crate::util::unreachable;
-use crate::types::StrDashSet;
 use crate::db::{Db, Metadata};
-use crate::ux::did_you_mean_compiled;
+use crate::parser::{Rule, Compiled};
 use crate::parser::comp::{Edge, Phony};
+use crate::types::{StrDashSet, StrDashMap};
 use crate::command::{Command, MetadataCache};
-use crate::parser::{Rule, Compiled, DefaultEdge};
 use crate::consts::{CLEAN_TARGET, PHONY_TARGETS};
-use crate::graph::{Graph, Levels, topological_sort};
+use crate::graph::{Graph, Levels, DefaultEdge, topological_sort};
 
 use std::borrow::Cow;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, OnceLock};
 use std::path::{Path, PathBuf};
+use std::collections::VecDeque;
+use std::sync::{Arc, RwLock, OnceLock};
 use std::sync::atomic::{Ordering, AtomicBool, AtomicUsize};
 
 use rayon::prelude::*;
@@ -26,6 +27,9 @@ enum ExecutorFlow { Ok, Stop }
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct CommandRunner<'a> {
+    ran: Arc::<RwLock::<VecDeque::<&'static str>>>,
+    finished: Arc::<StrDashMap::<'static, String>>,
+
     context: &'a Compiled<'a>,
 
     graph: Graph<'a>,
@@ -73,11 +77,37 @@ impl<'a> CommandRunner<'a> {
     ) -> Self {
         let n = context.edges.len();
 
+        let ran = Arc::new(RwLock::new(VecDeque::with_capacity(n)));
+        let finished = Arc::new(StrDashMap::with_capacity_and_hasher(n, FxBuildHasher::default()));
+
+        rayon::spawn({
+            let ran = Arc::clone(&ran);
+            let finished = Arc::clone(&finished);
+            move || {
+                loop {
+                    let Some(out) = ({
+                        let ran = ran.read().unwrap();
+                        let Some(target) = ran.front() else {
+                            continue
+                        };
+                        finished.get(target)
+                    }) else {
+                        continue
+                    };
+
+                    print!("{}", *out);
+                    _ = ran.write().unwrap().pop_front();
+                }
+            }
+        });
+
         Self {
+            ran,
             flags,
             graph,
             context,
             db_read,
+            finished,
             default_edge,
             transitive_deps,
 
@@ -160,7 +190,7 @@ impl<'a> CommandRunner<'a> {
         cr.finish()
     }
 
-    fn execute_command(&self, command: &Command, target: &str) -> io::Result::<()> {
+    fn execute_command(&self, command: &Command, target: &'a str) -> io::Result::<()> {
         if self.ran_any_edges.load(Ordering::Relaxed) {
             _ = self.ran_any_edges.store(true, Ordering::Relaxed)
         }
@@ -169,38 +199,43 @@ impl<'a> CommandRunner<'a> {
             if self.flags.print_commands() {
                 let output = command.to_string(&self.flags);
 
-                print!("\x1B[2K\r{output}");
-                _ = std::io::stdout().flush();
+                print!("{output}");
                 return Ok(())
             }
 
-            print!("\x1B[2K\r{command}", command = command.to_string(&self.flags));
-            _ = std::io::stdout().flush()
+            {
+                let mut stdout = io::stdout().lock();
+                _ = writeln!(stdout, "{command}", command = command.to_string(&self.flags));
+
+                self.ran.write().unwrap().push_back(util::make_static(target));
+            }
         }
 
         let out = command.execute()
             .inspect_err(|e| {
                 eprintln!("[could not execute edge: {target}: {e}]");
             }).map(|out| {
-                if out.status != 0 {
-                    if let Some(&max) = self.flags.max_fail_count() {
-                        self.failed_edges_count.fetch_add(1, Ordering::Relaxed);
-                        let failed_edges_count = self.failed_edges_count.load(Ordering::Relaxed);
-                        if failed_edges_count >= max {
-                            eprintln!{
-                                "[{failed_edges_count} {job} exited with non-zero code, aborting..]",
-                                job = if failed_edges_count > 1 { "jobs are" } else { "job" }
-                            };
-                            std::process::exit(1)
-                        }
+                if out.status == 0 { return out }
+                if let Some(&max) = self.flags.max_fail_count() {
+                    self.failed_edges_count.fetch_add(1, Ordering::Relaxed);
+                    let failed_edges_count = self.failed_edges_count.load(Ordering::Relaxed);
+                    if failed_edges_count >= max {
+                        eprintln!{
+                            "[{failed_edges_count} {job} exited with non-zero code, aborting..]",
+                            job = if failed_edges_count > 1 { "jobs are" } else { "job" }
+                        };
+                        std::process::exit(1)
                     }
                 } out
             })?;
 
         let out = out.to_string(&self.flags);
-        if !out.is_empty() {
-            print!("\n{out}")
-        }
+
+        _ = self.finished.insert(util::make_static(target), out);
+
+        // if !out.is_empty() {
+            // print!("{out}")
+        // }
 
         Ok(())
     }
@@ -240,7 +275,7 @@ impl<'a> CommandRunner<'a> {
                         target = _edge
                     };
 
-                    if let Some(compiled) = did_you_mean_compiled(
+                    if let Some(compiled) = ux::did_you_mean_compiled(
                         _edge,
                         &self.context.edges,
                         &self.context.rules

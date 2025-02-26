@@ -132,7 +132,9 @@ fn find_best_match_for_name_impl<'a>(
     // 2. Edit distance match
     // 3. Sorted word match
     if let Some(c) = candidates.iter().find(|c| {
-        c.to_uppercase() == lookup_uppercase || c.to_uppercase().contains(&lookup_uppercase)
+        c.to_uppercase() == lookup_uppercase         ||
+        c.to_uppercase().contains(&lookup_uppercase) ||
+        lookup_uppercase.contains(&c.to_uppercase())
     }) {
         return Some(*c);
     }

@@ -18,12 +18,11 @@ mod edit_distance;
 use db::Db;
 use flags::Flags;
 use cr::CommandRunner;
-use ux::did_you_mean_compiled;
 use graph::build_dependency_graph;
 use parser::{comp, Parser, read_file};
 
 use std::env;
-use std::process::{exit, ExitCode};
+use std::process::ExitCode;
 
 use bumpalo::Bump;
 use flager::Parser as FlagParser;
@@ -95,17 +94,7 @@ fn main() -> ExitCode {
 
     let default_edge = flags.default_target().map(|t| {
         context.edges.get(t.as_str()).unwrap_or_else(|| {
-            let targets = context.pretty_print_targets();
-            eprintln!("no target: {t} found in {rush_file_path}");
-            if let Some(compiled) = did_you_mean_compiled(
-                t,
-                &context.edges,
-                &context.rules,
-            ) {
-                println!("did you mean: {compiled}?")
-            }
-            eprintln!("available targets: [{targets}]");
-            exit(1)
+            util::report_undefined_target(t, None, &context)
         })
     });
 

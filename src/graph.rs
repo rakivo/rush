@@ -1,7 +1,7 @@
 use crate::util;
-use crate::parser::comp::Phony;
+use crate::parser::Compiled;
 use crate::dbg_unwrap::DbgUnwrap;
-use crate::parser::{comp, Compiled, DefaultEdge};
+use crate::parser::comp::{self, Phony};
 use crate::types::{StrHashMap, StrHashSet, StrIndexSet};
 
 use std::sync::Arc;
@@ -11,13 +11,15 @@ use bumpalo::Bump;
 #[cfg(feature = "dbg")]
 use tramer::tramer;
 
+pub type DefaultEdge<'a> = Option::<&'a comp::Edge<'a>>;
+
 pub type Levels<'a> = Vec::<Vec::<&'a str>>;
 pub type Graph<'a> = StrHashMap::<'a, Arc::<StrIndexSet<'a>>>;
 
 #[cfg_attr(feature = "dbg", tramer("nanos"))]
 pub fn build_dependency_graph<'a>(
     arena: &'a Bump,
-    processed: &'a Compiled,
+    compiled: &'a Compiled,
     default_edge: DefaultEdge<'a>
 ) -> (Graph<'a>, DefaultEdge<'a>, Graph<'a>) {
     fn collect_deps<'a>(
@@ -85,22 +87,22 @@ pub fn build_dependency_graph<'a>(
         deps
     }
 
-    let n = processed.edges.len();
+    let n = compiled.edges.len();
     let mut graph = Graph::with_capacity(n);
     let mut visited = StrHashSet::with_capacity(n);
     let mut transitive_deps = Graph::with_capacity(n);
 
-    for target in processed.edges.keys() {
-        collect_deps(target, arena, processed, &mut graph, &mut visited, &mut transitive_deps);
+    for target in compiled.edges.keys() {
+        collect_deps(target, arena, compiled, &mut graph, &mut visited, &mut transitive_deps);
     }
 
     let default_edge = default_edge.or({
-        if let Some(ref dt) = processed.default_target {
-            let edge = processed.edges.get(dt.as_str());
-            debug_assert!(edge.is_some());
-            edge
+        if let Some(comp::Target { target, loc }) = compiled.default_target.as_ref() {
+            let edge = compiled.edges.get(target.as_str()).unwrap_or_else(|| {
+                util::report_undefined_target(target, Some(loc), &compiled)
+            }); Some(edge)
         } else if graph.is_empty() {
-            let edge = processed.edges.values().next();
+            let edge = compiled.edges.values().next();
             debug_assert!(edge.is_some());
             edge
         } else {
@@ -113,9 +115,9 @@ pub fn build_dependency_graph<'a>(
 
             // find the edges that do not act as an input anywhere,
             // then sort those by their first appearance in the source code row-wise
-            processed.edges.keys()
+            compiled.edges.keys()
                 .filter(|edge| !reverse_graph.contains_key(*edge))
-                .map(|t| unsafe { processed.edges.get(t).unwrap_unchecked() })
+                .map(|t| unsafe { compiled.edges.get(t).unwrap_unchecked() })
                 .min_by(|x, y| x.loc.row.cmp(&y.loc.row))
         }
     });

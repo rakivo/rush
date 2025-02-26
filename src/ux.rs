@@ -6,10 +6,10 @@ use crate::edit_distance::find_best_match_for_name;
 #[inline]
 pub fn did_you_mean_compiled<'a>(
     target: &'a str,
-    edge: &StrHashMap::<'a, Edge>,
+    edges: &StrHashMap::<'a, Edge>,
     rules: &StrHashMap::<'a, Rule>
 ) -> Option::<String> {
-    let candidates = edge.keys()
+    let candidates = edges.keys()
         .chain(rules.keys())
         .cloned()
         .collect::<Vec::<_>>();

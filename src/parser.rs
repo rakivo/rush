@@ -58,8 +58,6 @@ impl<'a> Rule<'a> {
 }
 
 pub type Aliases = Vec::<String>;
-pub type DefaultTarget = Option::<String>;
-pub type DefaultEdge<'a> = Option::<&'a comp::Edge<'a>>;
 pub type Shadows<'a> = Option::<Arc::<StrHashMap::<'a, &'a str>>>;
 
 pub mod prep {
@@ -68,8 +66,8 @@ pub mod prep {
     #[repr(packed)]
     #[cfg_attr(feature = "dbg", derive(Debug))]
     pub struct Target<'a> {
-        pub t: &'a str,
-        pub loc: Loc<'a>
+        pub loc: Loc<'a>,
+        pub target: &'a str
     }
 
     pub type DefaultTarget<'a> = Option::<Target<'a>>;
@@ -164,6 +162,14 @@ pub mod prep {
 
 pub mod comp {
     use super::*;
+
+    #[cfg_attr(feature = "dbg", derive(Debug))]
+    pub struct Target<'a> {
+        pub loc: Loc<'a>,
+        pub target: String
+    }
+
+    pub type DefaultTarget<'a> = Option::<Target<'a>>;
 
     #[cfg_attr(feature = "dbg", derive(Debug))]
     pub enum Phony<'a> {
@@ -426,8 +432,11 @@ impl<'a> Parsed<'a> {
             }
         });
 
-        let default_target = default_target.map(|dt| {
-            Template::new(dt.t, dt.loc).compile_def(&defs)
+        let default_target = default_target.map(|prep::Target { loc, target }| {
+            comp::Target {
+                loc,
+                target: Template::new(target, loc).compile_def(&defs)
+            }
         });
 
         let cache_file_path = if let Some(comp::Def(build_dir)) = defs.get(BUILD_DIR_VARIABLE) {
@@ -445,9 +454,9 @@ impl<'a> Parsed<'a> {
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct Compiled<'a> {
     pub defs: comp::Defs<'a>,
-    pub default_target: DefaultTarget,
     pub cache_file_path: Cow::<'a, str>,
     pub rules: StrHashMap::<'a, Rule<'a>>,
+    pub default_target: comp::DefaultTarget<'a>,
     pub edges: StrHashMap::<'a, comp::Edge<'a>>,
 }
 
@@ -789,8 +798,8 @@ impl<'a> Parser<'a> {
                     },
                     DEFAULT => {
                         self.parsed.default_target = Some(prep::Target {
-                            t: second_token,
-                            loc: get_loc()
+                            loc: get_loc(),
+                            target: second_token
                         });
                     },
                     RULE => {

@@ -1,8 +1,70 @@
+use crate::ux;
+use crate::loc::Loc;
+use crate::parser::Compiled;
+use crate::dbg_unwrap::DbgUnwrap;
+
 use std::fs::File;
 use std::path::Path;
+use std::process::exit;
+use std::fmt::{Arguments, Write};
 use std::io::{self, Read, Error, ErrorKind};
 
 use bumpalo::Bump;
+
+/*
+  only used for extending lifetimes of &str
+  in `cr` module to satisfy std::sync::Arc
+  lifetime requirements.
+
+  SAFETY:
+    the &str's are not leaked, they are
+    allocated on arena, this is *safe* :DDD
+*/
+#[inline]
+pub fn make_static<T: ?Sized>(t: &T) -> &'static T {
+    unsafe { std::mem::transmute(t) }
+}
+
+#[inline]
+#[cfg_attr(feature = "dbg", track_caller)]
+pub fn report_undefined_target(target: &str, loc: Option::<&Loc>, context: &Compiled) -> ! {
+    let targets = context.pretty_print_targets();
+    let mut msg = String::with_capacity(
+        "undefined target: ".len()  +
+        target.len()                +
+        "did you mean: ".len()      +
+        64                          +
+        "available targets: ".len() +
+        256
+    );
+
+    let mut print = |args: Arguments| {
+        msg.write_fmt(args).unwrap_dbg()
+    };
+
+    print(format_args!("undefined target: {target}\n"));
+
+    if let Some(this) = ux::did_you_mean_compiled(
+        target,
+        &context.edges,
+        &context.rules,
+    ) {
+        print(format_args!("note: did you mean: {this}?\n"))
+    }
+
+    print(format_args!("available targets: [{targets}]"));
+
+    if let Some(loc) = loc {
+        eprintln!{
+            "{report}",
+            report = report_fmt!(loc, "{msg}")
+        };
+    } else {
+        eprintln!("{msg}")
+    }
+
+    exit(1)
+}
 
 #[inline]
 pub fn pretty_print_slice<T>(slice: &[T], sep: &str) -> String
