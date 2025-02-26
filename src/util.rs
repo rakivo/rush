@@ -11,7 +11,7 @@ use std::io::{self, Read, Error, ErrorKind};
 
 use bumpalo::Bump;
 
-#[inline]
+#[cold]
 #[cfg_attr(feature = "dbg", track_caller)]
 pub fn report_undefined_target(target: &str, loc: Option::<&Loc>, context: &Compiled) -> ! {
     let targets = context.pretty_print_targets();
@@ -65,7 +65,7 @@ where
     }); buf
 }
 
-#[inline(always)]
+#[cold]
 #[cfg_attr(feature = "dbg", track_caller)]
 pub fn unreachable() -> ! {
     #[cfg(feature = "dbg")] { unreachable!() }

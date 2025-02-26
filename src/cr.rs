@@ -3,7 +3,7 @@ use crate::flags::Flags;
 use crate::util::unreachable;
 use crate::types::StrDashSet;
 use crate::db::{Db, Metadata};
-use crate::parser::{Rule, Compiled};
+use crate::parser::{Id, Rule, Compiled};
 use crate::parser::comp::{Edge, Phony};
 use crate::command::{Command, MetadataCache};
 use crate::consts::{CLEAN_TARGET, PHONY_TARGETS};
@@ -28,8 +28,8 @@ enum ExecutorFlow { Ok, Stop }
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct CommandRunner<'a> {
-    ran: Arc::<RwLock::<VecDeque::<usize>>>,
-    finished: Arc::<DashMap::<usize, String>>,
+    ran: Arc::<RwLock::<VecDeque::<Id>>>,
+    finished: Arc::<DashMap::<Id, String>>,
 
     context: &'a Compiled<'a>,
 
@@ -68,6 +68,36 @@ impl<'a> CommandRunner<'a> {
         }
     }
 
+    #[inline(always)]
+    fn stdout_loop(
+        ran: Arc::<RwLock::<VecDeque::<Id>>>,
+        finished: Arc::<DashMap::<Id, String>>
+    ) {
+        loop {
+            let Some(out) = ({
+                let ran = ran.read().unwrap();
+                let Some(target) = ran.front() else {
+                    continue
+                };
+                finished.get(target)
+            }) else {
+                continue
+            };
+
+            print!("{}", *out);
+            drop(out); // not holding reference into DashMap for too long
+
+            _ = ran.write().unwrap().pop_front()
+
+            /* NOTE:
+                might as well remove target from `finished` here,
+                but why sacrifice speed for memory in 2025?
+             */
+
+            // NOTE: sleep here?
+        }
+    }
+
     fn new(
         context: &'a Compiled<'a>,
         graph: Graph<'a>,
@@ -81,34 +111,10 @@ impl<'a> CommandRunner<'a> {
         let ran = Arc::new(RwLock::new(VecDeque::with_capacity(n)));
         let finished = Arc::new(DashMap::with_capacity(n));
 
-        rayon::spawn({
+        _ = rayon::spawn({
             let ran = Arc::clone(&ran);
             let finished = Arc::clone(&finished);
-            move || {
-                loop {
-                    let Some(out) = ({
-                        let ran = ran.read().unwrap();
-                        let Some(target) = ran.front() else {
-                            continue
-                        };
-                        finished.get(target)
-                    }) else {
-                        continue
-                    };
-
-                    print!("{}", *out);
-                    drop(out); // not holding reference into DashMap for too long
-
-                    _ = ran.write().unwrap().pop_front()
-
-                    /* NOTE:
-                        might as well remove target from `finished` here,
-                        but why sacrifice speed for memory in 2025?
-                    */
-
-                    // NOTE: sleep here?
-                }
-            }
+            move || Self::stdout_loop(ran, finished)
         });
 
         Self {

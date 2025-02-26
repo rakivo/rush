@@ -57,6 +57,7 @@ impl<'a> Rule<'a> {
     }
 }
 
+pub type Id = usize;
 pub type Aliases = Vec::<String>;
 pub type Shadows<'a> = Option::<Arc::<StrHashMap::<'a, &'a str>>>;
 
@@ -188,7 +189,7 @@ pub mod comp {
 
     #[cfg_attr(feature = "dbg", derive(Debug))]
     pub struct Edge<'a> {
-        pub id: usize,
+        pub id: Id,
         pub loc: Loc<'a>,
         pub phony: Phony<'a>,
         pub target: &'a str,
