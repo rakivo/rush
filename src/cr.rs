@@ -1,4 +1,4 @@
-use crate::{ux, util};
+use crate::ux;
 use crate::flags::Flags;
 use crate::util::unreachable;
 use crate::db::{Db, Metadata};
@@ -74,9 +74,9 @@ impl<'a> CommandRunner<'a> {
                 println!("RUNNING LEVEL: {level:#?}")
             }
 
-            level.into_par_iter().filter_map(|t| self.context.edges.get(t)).for_each(|edge| {
-                self.resolve_and_run(edge)
-            })
+            level.into_par_iter()
+                .filter_map(|t| self.context.edges.get(t))
+                .for_each(|edge| self.resolve_and_run(edge))
         }
     }
 
@@ -220,7 +220,7 @@ impl<'a> CommandRunner<'a> {
                 let mut stdout = io::stdout().lock();
                 _ = writeln!(stdout, "{command}", command = command.to_string(&self.flags));
 
-                self.ran.write().unwrap().push_back(util::make_static(target));
+                self.ran.write().unwrap().push_back(make_static(target));
             }
         }
 
@@ -244,11 +244,7 @@ impl<'a> CommandRunner<'a> {
 
         let out = out.to_string(&self.flags);
 
-        _ = self.finished.insert(util::make_static(target), out);
-
-        // if !out.is_empty() {
-            // print!("{out}")
-        // }
+        _ = self.finished.insert(make_static(target), out);
 
         Ok(())
     }
