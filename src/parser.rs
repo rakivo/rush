@@ -188,6 +188,7 @@ pub mod comp {
 
     #[cfg_attr(feature = "dbg", derive(Debug))]
     pub struct Edge<'a> {
+        pub id: usize,
         pub loc: Loc<'a>,
         pub phony: Phony<'a>,
         pub target: &'a str,
@@ -261,7 +262,7 @@ impl<'a> Parsed<'a> {
         let Parsed { defs, edges, rules, phonys, default_target } = self;
 
         let defs = defs.compile();
-        let edges = edges.values().filter_map(|edge| {
+        let edges = edges.values().enumerate().filter_map(|(id, edge)| {
             let target = match edge.target_template.compile_prep(&edge, &defs) {
                 Ok(ok) => arena.alloc_str(&ok) as &_,
                 Err(e) => panic!("{e}\n")
@@ -292,6 +293,7 @@ impl<'a> Parsed<'a> {
                         }).collect::<Vec::<_>>();
 
                     comp::Edge {
+                        id,
                         target,
                         loc: edge.loc,
                         shadows: edge.shadows.as_ref().map(Arc::clone),
@@ -333,6 +335,7 @@ impl<'a> Parsed<'a> {
                         }).collect::<Vec::<_>>();
 
                     let mut edge = comp::Edge {
+                        id,
                         target,
                         loc: edge.loc,
                         shadows: edge.shadows.as_ref().map(Arc::clone),

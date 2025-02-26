@@ -1,10 +1,10 @@
 use crate::ux;
 use crate::flags::Flags;
 use crate::util::unreachable;
+use crate::types::StrDashSet;
 use crate::db::{Db, Metadata};
 use crate::parser::{Rule, Compiled};
 use crate::parser::comp::{Edge, Phony};
-use crate::types::{StrDashSet, StrDashMap};
 use crate::command::{Command, MetadataCache};
 use crate::consts::{CLEAN_TARGET, PHONY_TARGETS};
 use crate::graph::{Graph, Levels, DefaultEdge, topological_sort};
@@ -18,6 +18,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, RwLock, OnceLock};
 use std::sync::atomic::{Ordering, AtomicBool, AtomicUsize};
 
+use dashmap::DashMap;
 use rayon::prelude::*;
 use fxhash::FxBuildHasher;
 
@@ -29,10 +30,6 @@ use fxhash::FxBuildHasher;
     the &str's are not leaked, they are
     allocated on arena, this is *safe* :DDD
 */
-#[inline]
-pub fn make_static<T: ?Sized>(t: &T) -> &'static T {
-    unsafe { std::mem::transmute(t) }
-}
 
 #[derive(PartialEq)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
@@ -40,8 +37,8 @@ enum ExecutorFlow { Ok, Stop }
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct CommandRunner<'a> {
-    ran: Arc::<RwLock::<VecDeque::<&'static str>>>,
-    finished: Arc::<StrDashMap::<'static, String>>,
+    ran: Arc::<RwLock::<VecDeque::<usize>>>,
+    finished: Arc::<DashMap::<usize, String>>,
 
     context: &'a Compiled<'a>,
 
@@ -91,7 +88,7 @@ impl<'a> CommandRunner<'a> {
         let n = context.edges.len();
 
         let ran = Arc::new(RwLock::new(VecDeque::with_capacity(n)));
-        let finished = Arc::new(StrDashMap::with_capacity_and_hasher(n, FxBuildHasher::default()));
+        let finished = Arc::new(DashMap::with_capacity(n));
 
         rayon::spawn({
             let ran = Arc::clone(&ran);
@@ -203,7 +200,7 @@ impl<'a> CommandRunner<'a> {
         cr.finish()
     }
 
-    fn execute_command(&self, command: &Command, target: &'a str) -> io::Result::<()> {
+    fn execute_command(&self, command: &Command, target: &'a str, id: usize) -> io::Result::<()> {
         if self.ran_any_edges.load(Ordering::Relaxed) {
             _ = self.ran_any_edges.store(true, Ordering::Relaxed)
         }
@@ -220,7 +217,7 @@ impl<'a> CommandRunner<'a> {
                 let mut stdout = io::stdout().lock();
                 _ = writeln!(stdout, "{command}", command = command.to_string(&self.flags));
 
-                self.ran.write().unwrap().push_back(make_static(target));
+                self.ran.write().unwrap().push_back(id);
             }
         }
 
@@ -244,7 +241,7 @@ impl<'a> CommandRunner<'a> {
 
         let out = out.to_string(&self.flags);
 
-        _ = self.finished.insert(make_static(target), out);
+        _ = self.finished.insert(id, out);
 
         Ok(())
     }
@@ -252,7 +249,7 @@ impl<'a> CommandRunner<'a> {
     #[inline(always)]
     fn execute_clean(&self) {
         println!("[cleaning..]");
-        _ = self.execute_command(&self.clean(), CLEAN_TARGET).map(|_| {
+        _ = self.execute_command(&self.clean(), CLEAN_TARGET, /* TODO: tf is that */ 420).map(|_| {
             self.executed_edges_curr_level.fetch_add(1, Ordering::Relaxed)
         });
     }
@@ -302,7 +299,7 @@ impl<'a> CommandRunner<'a> {
             let target = Cow::Borrowed(edge.target);
             let command = Cow::Borrowed(command.as_str());
             let command = Command {command, target, description: None};
-            self.execute_command(&command, edge.target).map(|_| {
+            self.execute_command(&command, edge.target, edge.id).map(|_| {
                 self.executed_edges_curr_level.fetch_add(1, Ordering::Relaxed)
             })
         });
@@ -397,7 +394,8 @@ impl<'a> CommandRunner<'a> {
             let description = description.as_deref().map(Into::into);
 
             let command = Command {target, command, description};
-            _ = self.execute_command(&command, edge.target).map(|_| self.executed_edges_curr_level.fetch_add(1, Ordering::Relaxed));
+            _ = self.execute_command(&command, edge.target, edge.id)
+                .map(|_| self.executed_edges_curr_level.fetch_add(1, Ordering::Relaxed));
         } else {
             let mut any_err = false;
             if let Err(err) = rule.command.check(&edge.shadows, &self.context.defs) {
