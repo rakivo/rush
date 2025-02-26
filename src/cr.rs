@@ -83,7 +83,7 @@ impl<'a> CommandRunner<'a> {
         transitive_deps: Graph<'a>,
         flags: Flags,
         db_read: Option::<Db<'a>>,
-        default_edge: DefaultEdge<'a>,
+        default_edge: DefaultEdge<'a>
     ) -> Self {
         let n = context.edges.len();
 
@@ -106,7 +106,16 @@ impl<'a> CommandRunner<'a> {
                     };
 
                     print!("{}", *out);
-                    _ = ran.write().unwrap().pop_front();
+                    drop(out); // not holding reference into DashMap for too long
+
+                    _ = ran.write().unwrap().pop_front()
+
+                    /* NOTE:
+                        might as well remove target from `finished` here,
+                        but why sacrifice speed for memory in 2025?
+                    */
+
+                    // NOTE: sleep here?
                 }
             }
         });
