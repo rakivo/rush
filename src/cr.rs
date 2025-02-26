@@ -21,6 +21,19 @@ use std::sync::atomic::{Ordering, AtomicBool, AtomicUsize};
 use rayon::prelude::*;
 use fxhash::FxBuildHasher;
 
+/*
+  only used for extending lifetimes of &str
+  to satisfy std::sync::Arc lifetime requirements.
+
+  SAFETY:
+    the &str's are not leaked, they are
+    allocated on arena, this is *safe* :DDD
+*/
+#[inline]
+pub fn make_static<T: ?Sized>(t: &T) -> &'static T {
+    unsafe { std::mem::transmute(t) }
+}
+
 #[derive(PartialEq)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 enum ExecutorFlow { Ok, Stop }

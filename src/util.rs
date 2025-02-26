@@ -11,20 +11,6 @@ use std::io::{self, Read, Error, ErrorKind};
 
 use bumpalo::Bump;
 
-/*
-  only used for extending lifetimes of &str
-  in `cr` module to satisfy std::sync::Arc
-  lifetime requirements.
-
-  SAFETY:
-    the &str's are not leaked, they are
-    allocated on arena, this is *safe* :DDD
-*/
-#[inline]
-pub fn make_static<T: ?Sized>(t: &T) -> &'static T {
-    unsafe { std::mem::transmute(t) }
-}
-
 #[inline]
 #[cfg_attr(feature = "dbg", track_caller)]
 pub fn report_undefined_target(target: &str, loc: Option::<&Loc>, context: &Compiled) -> ! {
