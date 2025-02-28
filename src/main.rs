@@ -65,25 +65,25 @@ fn main() -> ExitCode {
     let arena = Bump::with_capacity(arena_cap);
     let context = Parser::parse(&arena, &content, &rush_file_path, &escaped_indexes);
 
-    let context = context.compile(&arena);
+    let context = context.compile(&arena, flags);
 
     #[cfg(feature = "dbg")] {
         println!("real size: {size}", size = arena.allocated_bytes())
     }
 
-    if flags.list_jobs() {
+    if context.flags.list_jobs() {
         let edges = context.pretty_print_targets();
         println!("available jobs: [{edges}]");
         return ExitCode::SUCCESS
     }
 
-    if flags.list_rules() {
+    if context.flags.list_rules() {
         let rules = context.pretty_print_rules();
         println!("available rules: [{rules}]");
         return ExitCode::SUCCESS
     }
 
-    if flags.list_jobs_and_rules() {
+    if context.flags.list_jobs_and_rules() {
         let edges = context.pretty_print_targets();
         println!("available jobs: [{edges}]");
 
@@ -92,7 +92,7 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS
     }
 
-    let default_edge = flags.default_target().map(|t| {
+    let default_edge = context.flags.default_target().map(|t| {
         context.edges.get(t.as_str()).unwrap_or_else(|| {
             util::report_undefined_target(t, None, &context)
         })
@@ -110,7 +110,7 @@ fn main() -> ExitCode {
         default_edge
     );
 
-    if flags.print_default_job() {
+    if context.flags.print_default_job() {
         if let Some(comp::Edge { target, .. }) = default_edge.as_ref() {
             println!("default job: {target}");
             return ExitCode::SUCCESS
@@ -124,7 +124,6 @@ fn main() -> ExitCode {
         &context,
         graph,
         transitive_deps,
-        flags,
         db,
         default_edge
     ).write_finish(&context.cache_file_path);

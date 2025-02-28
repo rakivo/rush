@@ -1,5 +1,4 @@
 use crate::ux;
-use crate::flags::Flags;
 use crate::util::unreachable;
 use crate::types::StrDashSet;
 use crate::db::{Db, Metadata};
@@ -40,7 +39,6 @@ pub struct CommandRunner<'a> {
 
     default_edge: DefaultEdge<'a>,
 
-    flags: Flags,
     failed_edges_count: AtomicUsize,
 
     executed_edges: StrDashSet<'a>,
@@ -102,7 +100,6 @@ impl<'a> CommandRunner<'a> {
         context: &'a Compiled<'a>,
         graph: Graph<'a>,
         transitive_deps: Graph<'a>,
-        flags: Flags,
         db_read: Option::<Db<'a>>,
         default_edge: DefaultEdge<'a>
     ) -> Self {
@@ -119,7 +116,6 @@ impl<'a> CommandRunner<'a> {
 
         Self {
             ran,
-            flags,
             graph,
             context,
             db_read,
@@ -144,7 +140,7 @@ impl<'a> CommandRunner<'a> {
             println!()
         }
 
-        if self.flags.check_is_up_to_date() {
+        if self.context.flags.check_is_up_to_date() {
             match self.not_up_to_date {
                 None => println!("[up to date]"),
                 Some(target) => println!("[{target} is not up to date]")
@@ -178,7 +174,6 @@ impl<'a> CommandRunner<'a> {
         context: &'a Compiled,
         graph: Graph<'a>,
         transitive_deps: Graph<'a>,
-        flags: Flags,
         db_read: Option::<Db<'a>>,
         default_edge: DefaultEdge<'a>,
     ) -> Db<'a> {
@@ -186,7 +181,6 @@ impl<'a> CommandRunner<'a> {
             context,
             graph,
             transitive_deps,
-            flags,
             db_read,
             default_edge
         );
@@ -211,9 +205,9 @@ impl<'a> CommandRunner<'a> {
             _ = self.ran_any_edges.store(true, Ordering::Relaxed)
         }
 
-        if !self.flags.quiet() {
-            if self.flags.print_commands() {
-                let output = command.to_string(&self.flags);
+        if !self.context.flags.quiet() {
+            if self.context.flags.print_commands() {
+                let output = command.to_string(&self.context.flags);
 
                 print!("{output}");
                 return Ok(())
@@ -221,7 +215,7 @@ impl<'a> CommandRunner<'a> {
 
             {
                 let mut stdout = io::stdout().lock();
-                _ = writeln!(stdout, "{command}", command = command.to_string(&self.flags));
+                _ = writeln!(stdout, "{command}", command = command.to_string(&self.context.flags));
 
                 self.ran.write().unwrap().push_back(id);
             }
@@ -232,7 +226,7 @@ impl<'a> CommandRunner<'a> {
                 eprintln!("[could not execute edge: {target}: {e}]");
             }).map(|out| {
                 if out.status == 0 { return out }
-                if let Some(&max) = self.flags.max_fail_count() {
+                if let Some(&max) = self.context.flags.max_fail_count() {
                     self.failed_edges_count.fetch_add(1, Ordering::Relaxed);
                     let failed_edges_count = self.failed_edges_count.load(Ordering::Relaxed);
                     if failed_edges_count >= max {
@@ -245,7 +239,7 @@ impl<'a> CommandRunner<'a> {
                 } out
             })?;
 
-        let out = out.to_string(&self.flags);
+        let out = out.to_string(&self.context.flags);
 
         _ = self.finished.insert(id, out);
 
@@ -263,7 +257,7 @@ impl<'a> CommandRunner<'a> {
     #[inline(always)]
     fn clean(&self) -> &Command {
         self.clean.get_or_init(|| {
-            self.context.generate_clean_edge(&self.flags)
+            self.context.generate_clean_edge(&self.context.flags)
         })
     }
 
@@ -337,7 +331,7 @@ impl<'a> CommandRunner<'a> {
         fn needs_rebuild<'a>(_self: &CommandRunner<'a>, edge: &Edge<'a>, command: &str) -> bool {
             // in `check_is_up_to_date` mode `always_build` is disabled
             // TODO: make that happen in the `Mode` struct
-            if _self.flags.always_build() && !_self.flags.check_is_up_to_date() {
+            if _self.context.flags.always_build() && !_self.context.flags.check_is_up_to_date() {
                 return true
             }
             _self.db_read.as_ref().map_or(false, |db| {
@@ -374,7 +368,7 @@ impl<'a> CommandRunner<'a> {
         };
 
         if needs_rebuild(self, edge, &command) {
-            if self.flags.check_is_up_to_date() {
+            if self.context.flags.check_is_up_to_date() {
                 // self.not_up_to_date = Some(edge.target);
                 return ExecutorFlow::Stop
             }
@@ -414,12 +408,12 @@ impl<'a> CommandRunner<'a> {
                 any_err = true
             }
 
-            if !any_err && self.flags.verbose() ||
+            if !any_err && self.context.flags.verbose() ||
                 self.default_edge.as_ref().map_or(false, |def| {
                     def.target == edge.target || def.aliases().map_or(false, |aliases| {
                         aliases.iter().any(|a| a == edge.target)
                     })
-                }) && !self.flags.check_is_up_to_date()
+                }) && !self.context.flags.check_is_up_to_date()
             {
                 println!("[{target} is already built]", target = edge.target)
             }
