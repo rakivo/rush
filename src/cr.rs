@@ -2,7 +2,7 @@ use crate::ux;
 use crate::util::unreachable;
 use crate::types::StrDashSet;
 use crate::db::{Db, Metadata};
-use crate::parser::{Id, Rule, Compiled};
+use crate::parser::{Rule, Compiled};
 use crate::parser::comp::{Edge, Phony};
 use crate::command::{Command, MetadataCache};
 use crate::consts::{CLEAN_TARGET, PHONY_TARGETS};
@@ -13,11 +13,9 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::collections::VecDeque;
-use std::sync::{Arc, RwLock, OnceLock};
-use std::sync::atomic::{Ordering, AtomicBool, AtomicUsize};
+use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{Ordering, AtomicUsize};
 
-use dashmap::DashMap;
 use rayon::prelude::*;
 use fxhash::FxBuildHasher;
 
@@ -27,9 +25,6 @@ enum ExecutorFlow { Ok, Stop }
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct CommandRunner<'a> {
-    ran: Arc::<RwLock::<VecDeque::<Id>>>,
-    finished: Arc::<DashMap::<Id, String>>,
-
     context: &'a Compiled<'a>,
 
     graph: Graph<'a>,
@@ -42,12 +37,9 @@ pub struct CommandRunner<'a> {
     failed_edges_count: AtomicUsize,
 
     executed_edges: StrDashSet<'a>,
-    executed_edges_curr_level: AtomicUsize,
 
     db_read: Option::<Db<'a>>,
     db_write: Db<'a>,
-
-    ran_any_edges: AtomicBool,
 
     not_up_to_date: Option::<&'a str>,
     metadata_cache: MetadataCache<'a>
@@ -66,84 +58,37 @@ impl<'a> CommandRunner<'a> {
         }
     }
 
-    #[inline(always)]
-    fn stdout_loop(
-        ran: Arc::<RwLock::<VecDeque::<Id>>>,
-        finished: Arc::<DashMap::<Id, String>>
-    ) {
-        loop {
-            let Some(out) = ({
-                let ran = ran.read().unwrap();
-                let Some(target) = ran.front() else {
-                    continue
-                };
-                finished.get(target)
-            }) else {
-                continue
-            };
-
-            print!("{}", *out);
-            drop(out); // not holding reference into DashMap for too long
-
-            _ = ran.write().unwrap().pop_front()
-
-            /* NOTE:
-                might as well remove target from `finished` here,
-                but why sacrifice speed for memory in 2025?
-             */
-
-            // NOTE: sleep here?
-        }
-    }
-
     fn new(
         context: &'a Compiled<'a>,
         graph: Graph<'a>,
         transitive_deps: Graph<'a>,
-        db_read: Option::<Db<'a>>,
-        default_edge: DefaultEdge<'a>
+        db_read: Option<Db<'a>>,
+        default_edge: DefaultEdge<'a>,
     ) -> Self {
         let n = context.edges.len();
 
-        let ran = Arc::new(RwLock::new(VecDeque::with_capacity(n)));
-        let finished = Arc::new(DashMap::with_capacity(n));
-
-        _ = rayon::spawn({
-            let ran = Arc::clone(&ran);
-            let finished = Arc::clone(&finished);
-            move || Self::stdout_loop(ran, finished)
-        });
-
         Self {
-            ran,
             graph,
             context,
             db_read,
-            finished,
             default_edge,
             transitive_deps,
 
             not_up_to_date: None,
             db_write: Db::write(),
             clean: OnceLock::new(),
-            ran_any_edges: AtomicBool::new(false),
             metadata_cache: MetadataCache::new(n),
             failed_edges_count: AtomicUsize::new(0),
-            executed_edges_curr_level: AtomicUsize::new(0),
-            executed_edges: StrDashSet::with_capacity_and_hasher(n, FxBuildHasher::default())
+            executed_edges: StrDashSet::with_capacity_and_hasher(n, FxBuildHasher::default()),
         }
     }
 
     #[inline]
     fn finish(self) -> Db<'a> {
-        if self.ran_any_edges.load(Ordering::Relaxed) {
-            println!()
-        }
-
         if self.context.flags.check_is_up_to_date() {
             match self.not_up_to_date {
                 None => println!("[up to date]"),
-                Some(target) => println!("[{target} is not up to date]")
+                Some(target) => println!("[{target} is not up to date]"),
             }
         } self.db_write
     }
@@ -156,7 +101,7 @@ impl<'a> CommandRunner<'a> {
         subgraph.insert(target, Arc::clone(&deps));
         for dep in deps.iter() {
             if let Some(deps_of_dep) = self.graph.get(dep) {
-                _ = subgraph.insert(&dep, Arc::clone(deps_of_dep))
+                _ = subgraph.insert(&dep, Arc::clone(deps_of_dep));
             }
         } subgraph
     }
@@ -167,23 +112,17 @@ impl<'a> CommandRunner<'a> {
             let subgraph = self.build_subgraph(edge.target);
             topological_sort(&subgraph, self.context)
         };
-        _ = self.run_levels(&levels)
+        _ = self.run_levels(&levels);
     }
 
     pub fn run(
         context: &'a Compiled,
         graph: Graph<'a>,
         transitive_deps: Graph<'a>,
-        db_read: Option::<Db<'a>>,
+        db_read: Option<Db<'a>>,
         default_edge: DefaultEdge<'a>,
     ) -> Db<'a> {
-        let cr = Self::new(
-            context,
-            graph,
-            transitive_deps,
-            db_read,
-            default_edge
-        );
+        let cr = Self::new(context, graph, transitive_deps, db_read, default_edge);
 
         let levels = if let Some(edge) = default_edge {
             if PHONY_TARGETS.contains(&edge.target) {
@@ -191,7 +130,7 @@ impl<'a> CommandRunner<'a> {
             } else {
                 cr.resolve_and_run_target(edge);
             }
-            return cr.finish()
+            return cr.finish();
         } else {
             topological_sort(&cr.graph, context)
         };
@@ -200,32 +139,26 @@ impl<'a> CommandRunner<'a> {
         cr.finish()
     }
 
-    fn execute_command(&self, command: &Command, target: &'a str, id: usize) -> io::Result::<()> {
-        if self.ran_any_edges.load(Ordering::Relaxed) {
-            _ = self.ran_any_edges.store(true, Ordering::Relaxed)
-        }
-
-        if !self.context.flags.quiet() {
+    fn execute_command(&self, command: &Command, target: &'a str) -> io::Result<()> {
+        let command_str = if !self.context.flags.quiet() {
             if self.context.flags.print_commands() {
                 let output = command.to_string(&self.context.flags);
-
-                print!("{output}");
+                print!("{output}\n");
                 return Ok(())
             }
 
-            {
-                let mut stdout = io::stdout().lock();
-                _ = writeln!(stdout, "{command}", command = command.to_string(&self.context.flags));
-
-                self.ran.write().unwrap().push_back(id);
-            }
-        }
+            command.to_string(&self.context.flags)
+        } else {
+            const { String::new() }
+        };
 
         let out = command.execute()
             .inspect_err(|e| {
                 eprintln!("[could not execute edge: {target}: {e}]");
             }).map(|out| {
-                if out.status == 0 { return out }
+                if out.status == 0 {
+                    return out;
+                }
                 if let Some(&max) = self.context.flags.max_fail_count() {
                     self.failed_edges_count.fetch_add(1, Ordering::Relaxed);
                     let failed_edges_count = self.failed_edges_count.load(Ordering::Relaxed);
@@ -236,12 +169,14 @@ impl<'a> CommandRunner<'a> {
                         };
                         std::process::exit(1)
                     }
-                } out
+                }
+                out
             })?;
 
-        let out = out.to_string(&self.context.flags);
-
-        _ = self.finished.insert(id, out);
+        if !self.context.flags.quiet() {
+            let out = out.to_string(&self.context.flags);
+            print!("{command_str}\n{out}")
+        }
 
         Ok(())
     }
@@ -249,9 +184,7 @@ impl<'a> CommandRunner<'a> {
     #[inline(always)]
     fn execute_clean(&self) {
         println!("[cleaning..]");
-        _ = self.execute_command(&self.clean(), CLEAN_TARGET, /* TODO: tf is that */ 420).map(|_| {
-            self.executed_edges_curr_level.fetch_add(1, Ordering::Relaxed)
-        });
+        _ = self.execute_command(&self.clean(), CLEAN_TARGET)
     }
 
     #[inline(always)]
@@ -299,9 +232,7 @@ impl<'a> CommandRunner<'a> {
             let target = Cow::Borrowed(edge.target);
             let command = Cow::Borrowed(command.as_str());
             let command = Command {command, target, description: None};
-            self.execute_command(&command, edge.target, edge.id).map(|_| {
-                self.executed_edges_curr_level.fetch_add(1, Ordering::Relaxed)
-            })
+            self.execute_command(&command, edge.target)
         });
     }
 
@@ -394,8 +325,7 @@ impl<'a> CommandRunner<'a> {
             let description = description.as_deref().map(Into::into);
 
             let command = Command {target, command, description};
-            _ = self.execute_command(&command, edge.target, edge.id)
-                .map(|_| self.executed_edges_curr_level.fetch_add(1, Ordering::Relaxed));
+            _ = self.execute_command(&command, edge.target)
         } else {
             let mut any_err = false;
             if let Err(err) = rule.command.check(&edge.shadows, &self.context.defs) {
