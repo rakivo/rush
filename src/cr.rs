@@ -1,22 +1,23 @@
-use crate::flags::Flags;
+use crate::ux;
 use crate::util::unreachable;
 use crate::types::StrDashSet;
 use crate::db::{Db, Metadata};
-use crate::ux::did_you_mean_compiled;
+use crate::parser::{Id, Rule, Compiled};
 use crate::parser::comp::{Edge, Phony};
 use crate::command::{Command, MetadataCache};
-use crate::parser::{Rule, Compiled, DefaultEdge};
 use crate::consts::{CLEAN_TARGET, PHONY_TARGETS};
-use crate::graph::{Graph, Levels, topological_sort};
+use crate::graph::{Graph, Levels, DefaultEdge, topological_sort};
 
 use std::borrow::Cow;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, OnceLock};
 use std::path::{Path, PathBuf};
+use std::collections::VecDeque;
+use std::sync::{Arc, RwLock, OnceLock};
 use std::sync::atomic::{Ordering, AtomicBool, AtomicUsize};
 
+use dashmap::DashMap;
 use rayon::prelude::*;
 use fxhash::FxBuildHasher;
 
@@ -26,6 +27,9 @@ enum ExecutorFlow { Ok, Stop }
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct CommandRunner<'a> {
+    ran: Arc::<RwLock::<VecDeque::<Id>>>,
+    finished: Arc::<DashMap::<Id, String>>,
+
     context: &'a Compiled<'a>,
 
     graph: Graph<'a>,
@@ -35,7 +39,6 @@ pub struct CommandRunner<'a> {
 
     default_edge: DefaultEdge<'a>,
 
-    flags: Flags,
     failed_edges_count: AtomicUsize,
 
     executed_edges: StrDashSet<'a>,
@@ -57,9 +60,39 @@ impl<'a> CommandRunner<'a> {
                 println!("RUNNING LEVEL: {level:#?}")
             }
 
-            level.into_par_iter().filter_map(|t| self.context.edges.get(t)).for_each(|edge| {
-                self.resolve_and_run(edge)
-            })
+            level.into_par_iter()
+                .filter_map(|t| self.context.edges.get(t))
+                .for_each(|edge| self.resolve_and_run(edge))
+        }
+    }
+
+    #[inline(always)]
+    fn stdout_loop(
+        ran: Arc::<RwLock::<VecDeque::<Id>>>,
+        finished: Arc::<DashMap::<Id, String>>
+    ) {
+        loop {
+            let Some(out) = ({
+                let ran = ran.read().unwrap();
+                let Some(target) = ran.front() else {
+                    continue
+                };
+                finished.get(target)
+            }) else {
+                continue
+            };
+
+            print!("{}", *out);
+            drop(out); // not holding reference into DashMap for too long
+
+            _ = ran.write().unwrap().pop_front()
+
+            /* NOTE:
+                might as well remove target from `finished` here,
+                but why sacrifice speed for memory in 2025?
+             */
+
+            // NOTE: sleep here?
         }
     }
 
@@ -67,17 +100,26 @@ impl<'a> CommandRunner<'a> {
         context: &'a Compiled<'a>,
         graph: Graph<'a>,
         transitive_deps: Graph<'a>,
-        flags: Flags,
         db_read: Option::<Db<'a>>,
-        default_edge: DefaultEdge<'a>,
+        default_edge: DefaultEdge<'a>
     ) -> Self {
         let n = context.edges.len();
 
+        let ran = Arc::new(RwLock::new(VecDeque::with_capacity(n)));
+        let finished = Arc::new(DashMap::with_capacity(n));
+
+        _ = rayon::spawn({
+            let ran = Arc::clone(&ran);
+            let finished = Arc::clone(&finished);
+            move || Self::stdout_loop(ran, finished)
+        });
+
         Self {
-            flags,
+            ran,
             graph,
             context,
             db_read,
+            finished,
             default_edge,
             transitive_deps,
 
@@ -98,7 +140,7 @@ impl<'a> CommandRunner<'a> {
             println!()
         }
 
-        if self.flags.check_is_up_to_date() {
+        if self.context.flags.check_is_up_to_date() {
             match self.not_up_to_date {
                 None => println!("[up to date]"),
                 Some(target) => println!("[{target} is not up to date]")
@@ -132,7 +174,6 @@ impl<'a> CommandRunner<'a> {
         context: &'a Compiled,
         graph: Graph<'a>,
         transitive_deps: Graph<'a>,
-        flags: Flags,
         db_read: Option::<Db<'a>>,
         default_edge: DefaultEdge<'a>,
     ) -> Db<'a> {
@@ -140,7 +181,6 @@ impl<'a> CommandRunner<'a> {
             context,
             graph,
             transitive_deps,
-            flags,
             db_read,
             default_edge
         );
@@ -160,47 +200,48 @@ impl<'a> CommandRunner<'a> {
         cr.finish()
     }
 
-    fn execute_command(&self, command: &Command, target: &str) -> io::Result::<()> {
+    fn execute_command(&self, command: &Command, target: &'a str, id: usize) -> io::Result::<()> {
         if self.ran_any_edges.load(Ordering::Relaxed) {
             _ = self.ran_any_edges.store(true, Ordering::Relaxed)
         }
 
-        if !self.flags.quiet() {
-            if self.flags.print_commands() {
-                let output = command.to_string(&self.flags);
+        if !self.context.flags.quiet() {
+            if self.context.flags.print_commands() {
+                let output = command.to_string(&self.context.flags);
 
-                print!("\x1B[2K\r{output}");
-                _ = std::io::stdout().flush();
+                print!("{output}");
                 return Ok(())
             }
 
-            print!("\x1B[2K\r{command}", command = command.to_string(&self.flags));
-            _ = std::io::stdout().flush()
+            {
+                let mut stdout = io::stdout().lock();
+                _ = writeln!(stdout, "{command}", command = command.to_string(&self.context.flags));
+
+                self.ran.write().unwrap().push_back(id);
+            }
         }
 
         let out = command.execute()
             .inspect_err(|e| {
                 eprintln!("[could not execute edge: {target}: {e}]");
             }).map(|out| {
-                if out.status != 0 {
-                    if let Some(&max) = self.flags.max_fail_count() {
-                        self.failed_edges_count.fetch_add(1, Ordering::Relaxed);
-                        let failed_edges_count = self.failed_edges_count.load(Ordering::Relaxed);
-                        if failed_edges_count >= max {
-                            eprintln!{
-                                "[{failed_edges_count} {job} exited with non-zero code, aborting..]",
-                                job = if failed_edges_count > 1 { "jobs are" } else { "job" }
-                            };
-                            std::process::exit(1)
-                        }
+                if out.status == 0 { return out }
+                if let Some(&max) = self.context.flags.max_fail_count() {
+                    self.failed_edges_count.fetch_add(1, Ordering::Relaxed);
+                    let failed_edges_count = self.failed_edges_count.load(Ordering::Relaxed);
+                    if failed_edges_count >= max {
+                        eprintln!{
+                            "[{failed_edges_count} {job} exited with non-zero code, aborting..]",
+                            job = if failed_edges_count > 1 { "jobs are" } else { "job" }
+                        };
+                        std::process::exit(1)
                     }
                 } out
             })?;
 
-        let out = out.to_string(&self.flags);
-        if !out.is_empty() {
-            print!("\n{out}")
-        }
+        let out = out.to_string(&self.context.flags);
+
+        _ = self.finished.insert(id, out);
 
         Ok(())
     }
@@ -208,7 +249,7 @@ impl<'a> CommandRunner<'a> {
     #[inline(always)]
     fn execute_clean(&self) {
         println!("[cleaning..]");
-        _ = self.execute_command(&self.clean(), CLEAN_TARGET).map(|_| {
+        _ = self.execute_command(&self.clean(), CLEAN_TARGET, /* TODO: tf is that */ 420).map(|_| {
             self.executed_edges_curr_level.fetch_add(1, Ordering::Relaxed)
         });
     }
@@ -216,7 +257,7 @@ impl<'a> CommandRunner<'a> {
     #[inline(always)]
     fn clean(&self) -> &Command {
         self.clean.get_or_init(|| {
-            self.context.generate_clean_edge(&self.flags)
+            self.context.generate_clean_edge(&self.context.flags)
         })
     }
 
@@ -240,7 +281,7 @@ impl<'a> CommandRunner<'a> {
                         target = _edge
                     };
 
-                    if let Some(compiled) = did_you_mean_compiled(
+                    if let Some(compiled) = ux::did_you_mean_compiled(
                         _edge,
                         &self.context.edges,
                         &self.context.rules
@@ -258,7 +299,7 @@ impl<'a> CommandRunner<'a> {
             let target = Cow::Borrowed(edge.target);
             let command = Cow::Borrowed(command.as_str());
             let command = Command {command, target, description: None};
-            self.execute_command(&command, edge.target).map(|_| {
+            self.execute_command(&command, edge.target, edge.id).map(|_| {
                 self.executed_edges_curr_level.fetch_add(1, Ordering::Relaxed)
             })
         });
@@ -290,7 +331,7 @@ impl<'a> CommandRunner<'a> {
         fn needs_rebuild<'a>(_self: &CommandRunner<'a>, edge: &Edge<'a>, command: &str) -> bool {
             // in `check_is_up_to_date` mode `always_build` is disabled
             // TODO: make that happen in the `Mode` struct
-            if _self.flags.always_build() && !_self.flags.check_is_up_to_date() {
+            if _self.context.flags.always_build() && !_self.context.flags.check_is_up_to_date() {
                 return true
             }
             _self.db_read.as_ref().map_or(false, |db| {
@@ -327,7 +368,7 @@ impl<'a> CommandRunner<'a> {
         };
 
         if needs_rebuild(self, edge, &command) {
-            if self.flags.check_is_up_to_date() {
+            if self.context.flags.check_is_up_to_date() {
                 // self.not_up_to_date = Some(edge.target);
                 return ExecutorFlow::Stop
             }
@@ -353,7 +394,8 @@ impl<'a> CommandRunner<'a> {
             let description = description.as_deref().map(Into::into);
 
             let command = Command {target, command, description};
-            _ = self.execute_command(&command, edge.target).map(|_| self.executed_edges_curr_level.fetch_add(1, Ordering::Relaxed));
+            _ = self.execute_command(&command, edge.target, edge.id)
+                .map(|_| self.executed_edges_curr_level.fetch_add(1, Ordering::Relaxed));
         } else {
             let mut any_err = false;
             if let Err(err) = rule.command.check(&edge.shadows, &self.context.defs) {
@@ -366,12 +408,12 @@ impl<'a> CommandRunner<'a> {
                 any_err = true
             }
 
-            if !any_err && self.flags.verbose() ||
+            if !any_err && self.context.flags.verbose() ||
                 self.default_edge.as_ref().map_or(false, |def| {
                     def.target == edge.target || def.aliases().map_or(false, |aliases| {
                         aliases.iter().any(|a| a == edge.target)
                     })
-                }) && !self.flags.check_is_up_to_date()
+                }) && !self.context.flags.check_is_up_to_date()
             {
                 println!("[{target} is already built]", target = edge.target)
             }

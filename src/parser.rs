@@ -57,9 +57,8 @@ impl<'a> Rule<'a> {
     }
 }
 
+pub type Id = usize;
 pub type Aliases = Vec::<String>;
-pub type DefaultTarget = Option::<String>;
-pub type DefaultEdge<'a> = Option::<&'a comp::Edge<'a>>;
 pub type Shadows<'a> = Option::<Arc::<StrHashMap::<'a, &'a str>>>;
 
 pub mod prep {
@@ -68,8 +67,8 @@ pub mod prep {
     #[repr(packed)]
     #[cfg_attr(feature = "dbg", derive(Debug))]
     pub struct Target<'a> {
-        pub t: &'a str,
-        pub loc: Loc<'a>
+        pub loc: Loc<'a>,
+        pub target: &'a str
     }
 
     pub type DefaultTarget<'a> = Option::<Target<'a>>;
@@ -166,6 +165,14 @@ pub mod comp {
     use super::*;
 
     #[cfg_attr(feature = "dbg", derive(Debug))]
+    pub struct Target<'a> {
+        pub loc: Loc<'a>,
+        pub target: String
+    }
+
+    pub type DefaultTarget<'a> = Option::<Target<'a>>;
+
+    #[cfg_attr(feature = "dbg", derive(Debug))]
     pub enum Phony<'a> {
         Phony {
             command: Option::<String>,
@@ -182,6 +189,7 @@ pub mod comp {
 
     #[cfg_attr(feature = "dbg", derive(Debug))]
     pub struct Edge<'a> {
+        pub id: Id,
         pub loc: Loc<'a>,
         pub phony: Phony<'a>,
         pub target: &'a str,
@@ -251,11 +259,11 @@ impl<'a> Parsed<'a> {
     }
 
     #[cfg_attr(feature = "dbg", tramer("nanos"))]
-    pub fn compile(self, arena: &'a Bump) -> Compiled<'a> {
+    pub fn compile(self, arena: &'a Bump, flags: Flags) -> Compiled<'a> {
         let Parsed { defs, edges, rules, phonys, default_target } = self;
 
         let defs = defs.compile();
-        let edges = edges.values().filter_map(|edge| {
+        let edges = edges.values().enumerate().filter_map(|(id, edge)| {
             let target = match edge.target_template.compile_prep(&edge, &defs) {
                 Ok(ok) => arena.alloc_str(&ok) as &_,
                 Err(e) => panic!("{e}\n")
@@ -286,6 +294,7 @@ impl<'a> Parsed<'a> {
                         }).collect::<Vec::<_>>();
 
                     comp::Edge {
+                        id,
                         target,
                         loc: edge.loc,
                         shadows: edge.shadows.as_ref().map(Arc::clone),
@@ -327,6 +336,7 @@ impl<'a> Parsed<'a> {
                         }).collect::<Vec::<_>>();
 
                     let mut edge = comp::Edge {
+                        id,
                         target,
                         loc: edge.loc,
                         shadows: edge.shadows.as_ref().map(Arc::clone),
@@ -426,8 +436,11 @@ impl<'a> Parsed<'a> {
             }
         });
 
-        let default_target = default_target.map(|dt| {
-            Template::new(dt.t, dt.loc).compile_def(&defs)
+        let default_target = default_target.map(|prep::Target { loc, target }| {
+            comp::Target {
+                loc,
+                target: Template::new(target, loc).compile_def(&defs)
+            }
         });
 
         let cache_file_path = if let Some(comp::Def(build_dir)) = defs.get(BUILD_DIR_VARIABLE) {
@@ -438,16 +451,17 @@ impl<'a> Parsed<'a> {
             Cow::Borrowed(Db::RUSH_FILE_NAME)
         };
 
-        Compiled {edges, rules, defs, default_target, cache_file_path}
+        Compiled {edges, rules, defs, flags, default_target, cache_file_path}
     }
 }
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct Compiled<'a> {
+    pub flags: Flags,
     pub defs: comp::Defs<'a>,
-    pub default_target: DefaultTarget,
     pub cache_file_path: Cow::<'a, str>,
     pub rules: StrHashMap::<'a, Rule<'a>>,
+    pub default_target: comp::DefaultTarget<'a>,
     pub edges: StrHashMap::<'a, comp::Edge<'a>>,
 }
 
@@ -789,8 +803,8 @@ impl<'a> Parser<'a> {
                     },
                     DEFAULT => {
                         self.parsed.default_target = Some(prep::Target {
-                            t: second_token,
-                            loc: get_loc()
+                            loc: get_loc(),
+                            target: second_token
                         });
                     },
                     RULE => {
