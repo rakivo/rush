@@ -10,13 +10,13 @@ dbg_hardcore = ["dbg"]
 
 [dependencies]
 fnv = "1.0.7"
-rayon = "1.10.0"
 libc = "0.2.169"
 paste = "1.0.15"
 flager = "0.0.9"
 memmap2 = "0.9.5"
 indexmap = "2.7.1"
 bumpalo = "3.17.0"
+crossbeam-channel = "0.5.14"
 tramer = { version = "0.1.0", optional = true }
 nix = { version = "0.29.0", features = ["poll"] }
 dashmap = { version = "6.1.0", features = ["inline"] }

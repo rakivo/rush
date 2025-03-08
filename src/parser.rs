@@ -259,7 +259,7 @@ impl<'a> Parsed<'a> {
     }
 
     #[cfg_attr(feature = "dbg", tramer("nanos"))]
-    pub fn compile(self, arena: &'a Bump, flags: Flags) -> Compiled<'a> {
+    pub fn compile(self, arena: &'a Bump) -> Compiled<'a> {
         let Parsed { defs, edges, rules, phonys, default_target } = self;
 
         let defs = defs.compile();
@@ -451,13 +451,12 @@ impl<'a> Parsed<'a> {
             Cow::Borrowed(Db::RUSH_FILE_NAME)
         };
 
-        Compiled {edges, rules, defs, flags, default_target, cache_file_path}
+        Compiled {edges, rules, defs, default_target, cache_file_path}
     }
 }
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct Compiled<'a> {
-    pub flags: Flags,
     pub defs: comp::Defs<'a>,
     pub cache_file_path: Cow::<'a, str>,
     pub rules: StrHashMap::<'a, Rule<'a>>,

@@ -1,19 +1,25 @@
 use crate::flags::Flags;
 use crate::graph::Graph;
-use crate::parser::comp::Edge;
 use crate::types::StrDashMap;
+use crate::parser::comp::Edge;
 use crate::consts::CLEAN_TARGET;
+use crate::poll::{Poller, Subprocess};
 
 use std::fs::File;
+use std::sync::Arc;
 use std::path::Path;
 use std::borrow::Cow;
 use std::ffi::CString;
 use std::{io, ptr, mem};
 use std::time::SystemTime;
+use std::sync::atomic::Ordering;
+use std::os::fd::{AsFd, AsRawFd};
 use std::os::fd::{IntoRawFd, FromRawFd};
 
 use dashmap::DashMap;
 use fxhash::FxBuildHasher;
+use crossbeam_channel::Sender;
+use nix::poll::{PollFd, PollFlags};
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct Command<'a> {
@@ -57,14 +63,24 @@ impl<'a> Command<'a> {
         Ok((r, w))
     }
 
-    pub fn execute(&self) -> io::Result::<Output> {
-        let ref command = self.command;
+    pub fn execute(
+        &self,
+        poller: &Poller,
+        poll_fds_sender: Sender::<PollFd>,
+    ) -> io::Result::<()> {
+        let cmd = CString::new(self.command.as_bytes())?;
+        let args = [
+            c"/bin/sh".as_ptr(),
+            c"-c".as_ptr(),
+            cmd.as_ptr(),
+            ptr::null(),
+        ];
 
-        let (mut stdout_reader, stdout_writer) = Self::create_pipe()?;
-        let (mut stderr_reader, stderr_writer) = Self::create_pipe()?;
+        let (stdout_reader, stdout_writer) = Self::create_pipe()?;
+        let (stderr_reader, stderr_writer) = Self::create_pipe()?;
 
-        let cmd = CString::new(command.as_bytes())?;
-        let args = [c"/bin/sh".as_ptr(), c"-c".as_ptr(), cmd.as_ptr(), ptr::null()];
+        let stdout_reader_fd = stdout_reader.as_raw_fd();
+        let stderr_reader_fd = stderr_reader.as_raw_fd();
 
         let stdout_writer_fd = stdout_writer.into_raw_fd();
         let stderr_writer_fd = stderr_writer.into_raw_fd();
@@ -82,7 +98,6 @@ impl<'a> Command<'a> {
         }
 
         let env = [c"PATH=/usr/bin:/bin".as_ptr(), ptr::null()];
-
         let mut pid = 0;
         let ret = unsafe {
             libc::posix_spawn(
@@ -91,7 +106,7 @@ impl<'a> Command<'a> {
                 &file_actions,
                 &attr,
                 args.as_ptr() as *const *mut _,
-                env.as_ptr() as *const *mut _
+                env.as_ptr() as *const *mut _,
             )
         };
 
@@ -104,46 +119,55 @@ impl<'a> Command<'a> {
             libc::close(stderr_writer_fd);
         }
 
-        let stdout = io::read_to_string(&mut stdout_reader)?;
-        let stderr = io::read_to_string(&mut stderr_reader)?;
+        {
+            let target = Box::from(self.target.clone());
+            let command = Box::from(self.command.clone());
+            let description = self.description.clone().map(Box::from);
+            let subprocess = Arc::new(Subprocess {pid, target, command, description});
 
-        let mut status = 0;
-        unsafe {
-            libc::waitpid(pid, &mut status, 0);
+            poller.fd_to_subprocess.insert(stdout_reader_fd, Arc::clone(&subprocess));
+            poller.fd_to_subprocess.insert(stderr_reader_fd, subprocess);
         }
 
-        unsafe {
-            libc::posix_spawn_file_actions_destroy(&mut file_actions);
-            libc::posix_spawnattr_destroy(&mut attr);
+        poller.active_fds.fetch_add(1, Ordering::Relaxed);
+
+        // TODO: dont leak here
+        let stdout_poll_fd = {
+            let stdout_reader_fd: &'static _ = Box::leak(Box::new(stdout_reader));
+            PollFd::new(stdout_reader_fd.as_fd(), PollFlags::POLLIN)
+        };
+
+        let stderr_poll_fd = {
+            let stderr_reader_fd: &'static _ = Box::leak(Box::new(stderr_reader));
+            PollFd::new(stderr_reader_fd.as_fd(), PollFlags::POLLIN)
+        };
+
+        #[cfg(feature = "dbg_hardcore")] {
+            {
+                let stdout_fd = stdout_poll_fd.as_fd().as_raw_fd();
+                let mut stdout = format!("sending: FD: {stdout_fd:?} ");
+                if let Some(revents) = stdout_poll_fd.revents() {
+                    let revents = format!("revents: {revents:?}");
+                    stdout.push_str(&revents)
+                }
+                println!("{stdout}");
+            }
+
+            {
+                let stderr_fd = stderr_poll_fd.as_fd().as_raw_fd();
+                let mut stderr = format!("sending: FD: {stderr_fd:?} ");
+                if let Some(revents) = stdout_poll_fd.revents() {
+                    let revents = format!("revents: {revents:?}");
+                    stderr.push_str(&revents)
+                }
+                println!("{stderr}");
+            }
         }
 
-        Ok(Output {status, stdout, stderr})
-    }
-}
+        _ = poll_fds_sender.send(stdout_poll_fd);
+        _ = poll_fds_sender.send(stderr_poll_fd);
 
-pub struct Output {
-    pub status: i32,
-    pub stdout: String,
-    pub stderr: String,
-}
-
-impl Output {
-    #[inline]
-    pub fn to_string(&self, flags: &Flags) -> String {
-        if flags.quiet() {
-            return const { String::new() }
-        }
-
-        let Output { stdout, stderr, .. } = self;
-        let n = stdout.len() + stderr.len();
-        let mut buf = String::with_capacity(n);
-        if !stdout.is_empty() {
-            buf.push_str(&stdout);
-        }
-        if !stderr.is_empty() {
-            buf.push_str(&stderr);
-        }
-        buf
+        Ok(())
     }
 }
 
