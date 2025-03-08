@@ -2,6 +2,7 @@ use crate::ux;
 use crate::util::unreachable;
 use crate::types::StrDashSet;
 use crate::db::{Db, Metadata};
+use crate::dbg_unwrap::DbgUnwrap;
 use crate::parser::{Id, Rule, Compiled};
 use crate::parser::comp::{Edge, Phony};
 use crate::command::{Command, MetadataCache};
@@ -21,6 +22,10 @@ use dashmap::DashMap;
 use rayon::prelude::*;
 use fxhash::FxBuildHasher;
 
+/*
+create a queue, not necessarily as a data type, which will be a queue of commands. we print the first command, we wait for its output, we print the the output and only then check for other commands to print, maybe they're already finished then pop em and print the output
+*/
+
 #[derive(PartialEq)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 enum ExecutorFlow { Ok, Stop }
@@ -28,6 +33,7 @@ enum ExecutorFlow { Ok, Stop }
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct CommandRunner<'a> {
     ran: Arc::<RwLock::<VecDeque::<Id>>>,
+    cmds: Arc::<DashMap::<Id, String>>,
     finished: Arc::<DashMap::<Id, String>>,
 
     context: &'a Compiled<'a>,
@@ -66,15 +72,23 @@ impl<'a> CommandRunner<'a> {
     #[inline(always)]
     fn stdout_loop(
         ran: Arc::<RwLock::<VecDeque::<Id>>>,
+        cmds: Arc::<DashMap::<Id, String>>,
         finished: Arc::<DashMap::<Id, String>>
     ) {
+        let mut waiting_for_output = false;
         loop {
             let Some(out) = ({
                 let ran = ran.read().unwrap();
-                let Some(target) = ran.front() else {
+                let Some(id) = ran.front() else {
                     continue
                 };
-                finished.get(target)
+                if !waiting_for_output {
+                    // it exists in `ran` -> it exists in `cmds`
+                    let command = cmds.get(&id).unwrap_dbg();
+                    println!("{}", *command);
+                    waiting_for_output = true
+                }
+                finished.get(id)
             }) else {
                 continue
             };
@@ -82,6 +96,7 @@ impl<'a> CommandRunner<'a> {
             print!("{}", *out);
             drop(out); // not holding reference into DashMap for too long
 
+            waiting_for_output = false;
             _ = ran.write().unwrap().pop_front()
 
             /* NOTE:
@@ -103,16 +118,19 @@ impl<'a> CommandRunner<'a> {
         let n = context.edges.len();
 
         let ran = Arc::new(RwLock::new(VecDeque::with_capacity(n)));
+        let cmds = Arc::new(DashMap::with_capacity(n));
         let finished = Arc::new(DashMap::with_capacity(n));
 
         _ = rayon::spawn({
             let ran = Arc::clone(&ran);
+            let cmds = Arc::clone(&cmds);
             let finished = Arc::clone(&finished);
-            move || Self::stdout_loop(ran, finished)
+            move || Self::stdout_loop(ran, cmds, finished)
         });
 
         Self {
             ran,
+            cmds,
             graph,
             context,
             db_read,
@@ -200,12 +218,10 @@ impl<'a> CommandRunner<'a> {
                 return Ok(())
             }
 
-            {
-                let mut stdout = io::stdout().lock();
-                _ = writeln!(stdout, "{command}", command = command.to_string(&self.context.flags));
 
-                self.ran.write().unwrap().push_back(id);
-            }
+            let command = command.to_string(&self.context.flags);
+            self.cmds.insert(id, command);
+            self.ran.write().unwrap().push_back(id);
         }
 
         let out = command.execute()
