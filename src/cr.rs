@@ -100,9 +100,9 @@ impl<'a> CommandRunner<'a> {
             _ = ran.write().unwrap().pop_front()
 
             /* NOTE:
-                might as well remove target from `finished` here,
+                might as well remove id from `finished` and `cmds` here,
                 but why sacrifice speed for memory in 2025?
-             */
+            */
 
             // NOTE: sleep here?
         }
