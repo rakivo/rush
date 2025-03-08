@@ -22,10 +22,6 @@ use dashmap::DashMap;
 use rayon::prelude::*;
 use fxhash::FxBuildHasher;
 
-/*
-create a queue, not necessarily as a data type, which will be a queue of commands. we print the first command, we wait for its output, we print the the output and only then check for other commands to print, maybe they're already finished then pop em and print the output
-*/
-
 #[derive(PartialEq)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 enum ExecutorFlow { Ok, Stop }
