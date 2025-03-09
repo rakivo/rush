@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use crate::loc::Loc;
 use crate::types::StrHashSet;
 use crate::dbg_unwrap::DbgUnwrap;
@@ -135,7 +137,7 @@ impl<'a> Template<'a> {
         String::with_capacity(self.statics_len + self.chunks.len() * Self::AVERAGE_COMPILED_CHUNK_SIZE)
     }
 
-    fn _compile(&self, target_str: &str, input_str: &str, shadows: &Shadows, defs: &Defs) -> Result::<String, String> {
+    fn _compile(&self, target_str: &str, input_str: &str, loc: Loc, shadows: &Shadows, defs: &Defs) -> Result::<String, String> {
         let mut ret = self.allocate_result();
         for chunk in self.chunks.iter() {
             match chunk {
@@ -155,8 +157,15 @@ impl<'a> Template<'a> {
                             .ok_or(report_fmt!(self.loc, "undefined variable: {placeholder}")),
                     }?;
 
+                    let compiled = if compiled.as_bytes().first() == Some(&b'$') {
+                        let template = Template::new(compiled, loc);
+                        Cow::Owned(template.compile_def(defs))
+                    } else {
+                        Cow::Borrowed(compiled)
+                    };
+
                     if !ret.is_empty() && !compiled.is_empty() { ret.push(' ') }
-                    ret.push_str(compiled)
+                    ret.push_str(&compiled)
                 }
                 TemplateChunk::JoinedPlaceholder(placeholder) => {
                     ret.push_str(match *placeholder {
@@ -175,12 +184,12 @@ impl<'a> Template<'a> {
 
     #[inline(always)]
     pub fn compile(&self, edge: &Edge, defs: &Defs) -> Result::<String, String> {
-        self._compile(edge.target, edge.inputs_str(self.in_used), &edge.shadows, defs)
+        self._compile(edge.target, edge.inputs_str(self.in_used), edge.loc, &edge.shadows, defs)
     }
 
     #[inline(always)]
     pub fn compile_prep(&self, edge: &prep::Edge, defs: &Defs) -> Result::<String, String> {
-        self._compile(edge.target, edge.inputs_str(self.in_used), &edge.shadows, defs)
+        self._compile(edge.target, edge.inputs_str(self.in_used), edge.loc, &edge.shadows, defs)
     }
 
     #[inline]
