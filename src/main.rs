@@ -1,3 +1,5 @@
+// TODO(#64): Allow escaping dollars
+
 #[macro_use]
 mod loc;
 
