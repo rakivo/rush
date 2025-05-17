@@ -1,8 +1,8 @@
 use crate::flags::Flags;
 use crate::graph::Graph;
 use crate::types::StrDashMap;
-use crate::parser::comp::Edge;
 use crate::consts::CLEAN_TARGET;
+use crate::parser::comp::{self, Edge};
 use crate::poll::{Poller, Subprocess};
 
 use std::fs::File;
@@ -198,12 +198,20 @@ impl<'a> MetadataCache<'a> {
 
     #[inline]
     pub fn needs_rebuild(&self, edge: &Edge<'a>, transitive_deps: &Graph<'a>) -> bool {
+        let inputs = match &edge.phony {
+            comp::Phony::Phony { .. } => return true,
+            comp::Phony::NotPhony { inputs, .. } => inputs,
+        };
+
         // TODO: do something here if dependent file does not exist
-        let mtimes = unsafe {
-            transitive_deps.get(edge.target).unwrap_unchecked()
-        }.iter().filter_map(|dep| {
-            self.mtime(*dep).ok()
-        }).collect::<Vec::<_>>();
+        let mtimes = inputs
+            .iter()
+            .map(|path| self.mtime(*path))
+            .collect::<Result<Vec<_>, _>>();
+
+        let Ok(mtimes) = mtimes else {
+            return true;
+        };
 
         let Ok(target_mtime) = self.mtime(edge.target) else {
             return true
