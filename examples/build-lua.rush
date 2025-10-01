@@ -1,11 +1,13 @@
-cflags = -std=gnu99 -lm -O2 -Wall -Wextra -DLUA_COMPAT_5_3
+cflags = -std=gnu99 -O2 -Wall -Wextra -DLUA_COMPAT_5_3 -lm
 
 rule cc
+  description = compile $in to $out
+  command = gcc -MD -MF $out.d -o $out -c $in $cflags
   depfile = $out.d
-  command = gcc -MD -MF $out.d $cflags -o $out -c $in
 
 rule link
-  command = gcc $cflags -o $out $in
+  description = link $in into $out
+  command = gcc -o $out $in $cflags
 
 build src/lapi.o: cc src/lapi.c
 build src/lauxlib.o: cc src/lauxlib.c
@@ -46,3 +48,6 @@ build lua: link src/lapi.o src/lauxlib.o src/lbaselib.o src/lcode.o             
   src/lmem.o src/loadlib.o src/lobject.o src/lopcodes.o src/loslib.o src/lparser.o $
   src/lstate.o src/lstring.o src/lstrlib.o src/ltable.o src/ltablib.o src/ltm.o    $
   src/lua.o src/lundump.o src/lutf8lib.o src/lvm.o src/lzio.o
+
+build clean:
+  command = rm -f src/*.o lua
