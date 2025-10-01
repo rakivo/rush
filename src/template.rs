@@ -1,10 +1,8 @@
-use std::borrow::Cow;
-
-use crate::loc::Loc;
-use crate::types::StrHashSet;
 use crate::dbg_unwrap::DbgUnwrap;
-use crate::parser::comp::{Edge, Defs};
-use crate::parser::{prep, comp, Shadows};
+use crate::loc::Loc;
+use crate::parser::comp::{Defs, Edge};
+use crate::parser::{comp, prep, Shadows};
+use crate::types::StrHashSet;
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub enum TemplateChunk<'a> {
@@ -20,7 +18,7 @@ pub struct Template<'a> {
     statics_len: usize,
 
     pub loc: Loc<'a>,
-    pub chunks: Vec::<TemplateChunk<'a>>,
+    pub chunks: Vec<TemplateChunk<'a>>,
 }
 
 impl<'a> Template<'a> {
@@ -36,13 +34,15 @@ impl<'a> Template<'a> {
 
         #[inline(always)]
         fn is_joined_static(s: &str) -> bool {
-            s.as_bytes().first().map_or(false, |b| !b.is_ascii_whitespace())
+            s.as_bytes()
+                .first()
+                .is_some_and(|b| !b.is_ascii_whitespace())
         }
 
         while let Some(i) = s[start..].find('$') {
             let i = start + i;
             if i > start {
-                let ref not_trimmed = s[start..i];
+                let not_trimmed = &s[start..i];
                 let trimmed = not_trimmed.trim();
                 if !trimmed.is_empty() {
                     let chunk = if is_joined_static(not_trimmed) {
@@ -70,8 +70,10 @@ impl<'a> Template<'a> {
             };
 
             let is_joined_placeholder = || -> bool {
-                if i == 0 { return false }
-                !s[i-1..placeholder_end].as_bytes()
+                if i == 0 {
+                    return false;
+                }
+                !s.as_bytes()[i - 1..placeholder_end]
                     .iter()
                     .any(|b| b.is_ascii_whitespace())
             };
@@ -93,15 +95,17 @@ impl<'a> Template<'a> {
 
                 chunks.push(chunk);
             } else {
-                report_panic!(loc, "empty placeholder")
+                ereportln!(loc, "empty placeholder")
             }
 
             start = placeholder_end;
-            if curly_syntax { start += 1 }
+            if curly_syntax {
+                start += 1
+            }
         }
 
         if start < s.len() {
-            let ref not_trimmed = s[start..];
+            let not_trimmed = &s[start..];
             let trimmed = not_trimmed.trim();
             if !trimmed.is_empty() {
                 let chunk = if is_joined_static(not_trimmed) {
@@ -114,82 +118,127 @@ impl<'a> Template<'a> {
             }
         }
 
-        Template { loc, in_used, statics_len, chunks }
+        Template {
+            loc,
+            in_used,
+            statics_len,
+            chunks,
+        }
     }
 
     #[inline]
-    pub fn check(&self, shadows: &Shadows, defs: &Defs) -> Result::<(), String> {
-        for placeholder in self.chunks.iter().filter_map(|c| {
-            match c {
-                TemplateChunk::Placeholder(p) |
-                TemplateChunk::JoinedPlaceholder(p) if !Self::CONSTANT_PLACEHOLDERS.contains(p) => Some(p),
-                _ => None
-            }
+    pub fn check(&self, shadows: &Shadows, defs: &Defs) -> bool {
+        let mut any_err = false;
+
+        for placeholder in self.chunks.iter().filter_map(|c| match c {
+            TemplateChunk::Placeholder(p) |
+            TemplateChunk::JoinedPlaceholder(p)
+                if !Self::CONSTANT_PLACEHOLDERS.contains(p) => Some(p),
+
+            _ => None,
         }) {
-            if !shadows.as_ref().map_or(false, |s| s.contains_key(placeholder)) && !defs.contains_key(placeholder) {
-                return Err(report_fmt!(self.loc, "undefined variable: {placeholder}"))
+            if !shadows
+                .as_ref()
+                .is_some_and(|s| s.contains_key(placeholder))
+                && !defs.contains_key(placeholder)
+            {
+                ereportln!(self.loc, "warning: undefined variable: {placeholder}");
+                any_err = true;
             }
-        } Ok(())
+        }
+
+        any_err
     }
 
     #[inline(always)]
     fn allocate_result(&self) -> String {
-        String::with_capacity(self.statics_len + self.chunks.len() * Self::AVERAGE_COMPILED_CHUNK_SIZE)
+        String::with_capacity(
+            self.statics_len + self.chunks.len() * Self::AVERAGE_COMPILED_CHUNK_SIZE,
+        )
     }
 
-    fn _compile(&self, target_str: &str, input_str: &str, loc: Loc, shadows: &Shadows, defs: &Defs) -> Result::<String, String> {
+    fn _compile(
+        &self,
+        target_str: &str,
+        input_str: &str,
+        loc: Loc,
+        shadows: &Shadows,
+        defs: &Defs,
+    ) -> String {
         let mut ret = self.allocate_result();
         for chunk in self.chunks.iter() {
             match chunk {
                 TemplateChunk::Static(s) => {
-                    if !ret.is_empty() && !s.is_empty() { ret.push(' ') }
+                    if !ret.is_empty() && !s.is_empty() {
+                        ret.push(' ')
+                    }
                     ret.push_str(s)
                 }
                 TemplateChunk::JoinedStatic(s) => ret.push_str(s),
                 TemplateChunk::Placeholder(placeholder) => {
                     let compiled = match *placeholder {
-                        "in" => Ok(input_str),
-                        "out" => Ok(target_str),
+                        "in" => input_str,
+                        "out" => target_str,
                         _ => shadows
                             .as_ref()
-                            .and_then(|shadows| shadows.get(placeholder).map(|shadow| *shadow))
+                            .and_then(|shadows| shadows.get(placeholder).copied())
                             .or_else(|| defs.get(placeholder).map(|def| def.0.as_str()))
-                            .ok_or(report_fmt!(self.loc, "undefined variable: {placeholder}")),
-                    }?;
-
-                    let compiled = if compiled.as_bytes().first() == Some(&b'$') {
-                        let template = Template::new(compiled, loc);
-                        Cow::Owned(template.compile_def(defs))
-                    } else {
-                        Cow::Borrowed(compiled)
+                            .unwrap_or_else(|| {
+                                ereportln!(self.loc, "warning: undefined variable: {placeholder}");
+                                "" // use empty string as fallback
+                            }),
                     };
 
-                    if !ret.is_empty() && !compiled.is_empty() { ret.push(' ') }
-                    ret.push_str(&compiled)
+                    if compiled.as_bytes().first() == Some(&b'$') {
+                        let template = Template::new(compiled, loc);
+                        ret.push_str(&template.compile_def(defs));
+                    } else {
+                        if !ret.is_empty() && !compiled.is_empty() {
+                            ret.push(' ')
+                        }
+                        ret.push_str(compiled);
+                    }
                 }
                 TemplateChunk::JoinedPlaceholder(placeholder) => {
-                    ret.push_str(match *placeholder {
-                        "in" => Ok(input_str),
-                        "out" => Ok(target_str),
+                    let compiled = match *placeholder {
+                        "in" => input_str,
+                        "out" => target_str,
                         _ => shadows
                             .as_ref()
-                            .and_then(|shadows| shadows.get(placeholder).map(|shadow| *shadow))
+                            .and_then(|shadows| shadows.get(placeholder).copied())
                             .or_else(|| defs.get(placeholder).map(|def| def.0.as_str()))
-                            .ok_or(report_fmt!(self.loc, "undefined variable: {placeholder}"))
-                    }?);
+                            .unwrap_or_else(|| {
+                                ereportln!(self.loc, "warning: undefined variable: {placeholder}");
+                                "" // use empty string as fallback
+                            }),
+                    };
+                    ret.push_str(compiled);
                 }
             }
-        } Ok(ret)
+        }
+        ret
     }
 
     #[inline(always)]
-    pub fn compile(&self, edge: &Edge, defs: &Defs) -> Result::<String, String> {
-        self._compile(edge.target, edge.inputs_str(self.in_used), edge.loc, &edge.shadows, defs)
+    pub fn compile(&self, edge: &Edge, defs: &Defs) -> String {
+        self._compile(
+            edge.target,
+            edge.inputs_str(self.in_used),
+            edge.loc,
+            &edge.shadows,
+            defs,
+        )
     }
 
     #[inline(always)]
-    pub fn compile_prep(&self, edge: &prep::Edge, defs: &Defs) -> Result::<String, String> {
-        self._compile(edge.target, edge.inputs_str(self.in_used), edge.loc, &edge.shadows, defs)
+    pub fn compile_prep(&self, edge: &prep::Edge, defs: &Defs) -> String {
+        self._compile(
+            edge.target,
+            edge.inputs_str(self.in_used),
+            edge.loc,
+            &edge.shadows,
+            defs,
+        )
     }
 
     #[inline]
@@ -199,33 +248,52 @@ impl<'a> Template<'a> {
         for chunk in self.chunks.iter() {
             match chunk {
                 TemplateChunk::Static(s) => {
-                    if !ret.is_empty() && !s.is_empty() { ret.push(' ') }
+                    if !ret.is_empty() && !s.is_empty() {
+                        ret.push(' ')
+                    }
                     ret.push_str(s)
-                },
+                }
                 TemplateChunk::JoinedStatic(s) => ret.push_str(s),
                 TemplateChunk::Placeholder(placeholder) => {
                     let compiled = match *placeholder {
-                        "in" => report_panic!(self.loc, "$in is not allowed in variables definitions"),
-                        "out" => report_panic!(self.loc, "$out is not allowed in variables definitions"),
-                        _ => defs.get(placeholder).map(|def| def.0.as_str()).unwrap_or_else(|| {
-                            report_panic!(self.loc, "undefined variable: {placeholder}")
-                        })
+                        "in" => {
+                            report_panic!(self.loc, "$in is not allowed in variables definitions")
+                        }
+                        "out" => {
+                            report_panic!(self.loc, "$out is not allowed in variables definitions")
+                        }
+                        _ => defs
+                            .get(placeholder)
+                            .map(|def| def.0.as_str())
+                            .unwrap_or_else(|| {
+                                ereportln!{
+                                    self.loc,
+                                    "undefined variable: {placeholder}"
+                                };
+                                "" // use empty string as fallback
+                            }),
                     };
 
-                    if !ret.is_empty() && !placeholder.is_empty() { ret.push(' ') }
+                    if !ret.is_empty() && !placeholder.is_empty() {
+                        ret.push(' ')
+                    }
                     ret.push_str(compiled)
-                },
-                TemplateChunk::JoinedPlaceholder(placeholder) => {
-                    ret.push_str(match *placeholder {
-                        "in" => report_panic!(self.loc, "$in is not allowed in variables definitions"),
-                        "out" => report_panic!(self.loc, "$out is not allowed in variables definitions"),
-                        _ => defs.get(placeholder).map(|def| def.0.as_str()).unwrap_or_else(|| {
+                }
+                TemplateChunk::JoinedPlaceholder(placeholder) => ret.push_str(match *placeholder {
+                    "in" => report_panic!(self.loc, "$in is not allowed in variables definitions"),
+                    "out" => {
+                        report_panic!(self.loc, "$out is not allowed in variables definitions")
+                    }
+                    _ => defs
+                        .get(placeholder)
+                        .map(|def| def.0.as_str())
+                        .unwrap_or_else(|| {
                             report_panic!(self.loc, "undefined variable: {placeholder}")
                         })
-                    })
-                }
+                }),
             }
-        } ret
+        }
+        ret
     }
 
     pub fn compile_def_recursive<'b>(
@@ -242,7 +310,9 @@ impl<'a> Template<'a> {
             }
         }
 
-        if compiled_defs.contains_key(name) { return }
+        if compiled_defs.contains_key(name) {
+            return;
+        }
 
         compiling.insert(name);
 
@@ -250,12 +320,16 @@ impl<'a> Template<'a> {
         for chunk in def.0.chunks.iter() {
             match chunk {
                 TemplateChunk::Static(s) => {
-                    if !ret.is_empty() && !s.is_empty() { ret.push(' ') }
+                    if !ret.is_empty() && !s.is_empty() {
+                        ret.push(' ')
+                    }
                     ret.push_str(s)
                 }
                 TemplateChunk::JoinedStatic(s) => ret.push_str(s),
                 TemplateChunk::Placeholder(placeholder) => {
-                    if !ret.is_empty() && !placeholder.is_empty() { ret.push(' ') }
+                    if !ret.is_empty() && !placeholder.is_empty() {
+                        ret.push(' ')
+                    }
 
                     if compiling.contains(placeholder) {
                         report_panic!{
@@ -267,13 +341,22 @@ impl<'a> Template<'a> {
                     let compiled = match defs.0.get(placeholder) {
                         Some(def) => {
                             if !compiled_defs.contains_key(placeholder) {
-                                Template::compile_def_recursive(placeholder, def, defs, compiling, compiled_defs);
+                                Template::compile_def_recursive(
+                                    placeholder,
+                                    def,
+                                    defs,
+                                    compiling,
+                                    compiled_defs,
+                                );
                             }
                             compiled_defs.get(placeholder).unwrap_dbg().0.as_str()
                         }
-                        None => report_panic!{
-                            def.0.loc,
-                            "undefined variable: {placeholder}"
+                        None => {
+                            ereportln!{
+                                def.0.loc,
+                                "undefined variable: {placeholder}"
+                            };
+                            "" // use empty string as fallback
                         }
                     };
 
@@ -290,13 +373,22 @@ impl<'a> Template<'a> {
                     let compiled = match defs.0.get(placeholder) {
                         Some(def) => {
                             if !compiled_defs.contains_key(placeholder) {
-                                Template::compile_def_recursive(placeholder, def, defs, compiling, compiled_defs);
+                                Template::compile_def_recursive(
+                                    placeholder,
+                                    def,
+                                    defs,
+                                    compiling,
+                                    compiled_defs,
+                                );
                             }
                             compiled_defs.get(placeholder).unwrap_dbg().0.as_str()
                         }
-                        None => report_panic!{
-                            def.0.loc,
-                            "undefined variable: {placeholder}"
+                        None => {
+                            ereportln!{
+                                def.0.loc,
+                                "undefined variable: {placeholder}"
+                            };
+                            "" // use empty string as fallback
                         }
                     };
 

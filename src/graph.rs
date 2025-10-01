@@ -1,26 +1,26 @@
-use crate::util;
-use crate::parser::Compiled;
 use crate::dbg_unwrap::DbgUnwrap;
 use crate::parser::comp::{self, Phony};
+use crate::parser::Compiled;
 use crate::types::{StrHashMap, StrHashSet, StrIndexSet};
+use crate::util;
 
-use std::sync::Arc;
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use bumpalo::Bump;
 #[cfg(feature = "dbg")]
 use tramer::tramer;
 
-pub type DefaultEdge<'a> = Option::<&'a comp::Edge<'a>>;
+pub type DefaultEdge<'a> = Option<&'a comp::Edge<'a>>;
 
-pub type Levels<'a> = Vec::<Vec::<&'a str>>;
-pub type Graph<'a> = StrHashMap::<'a, Arc::<StrIndexSet<'a>>>;
+pub type Levels<'a> = Vec<Vec<&'a str>>;
+pub type Graph<'a> = StrHashMap<'a, Arc<StrIndexSet<'a>>>;
 
 #[cfg_attr(feature = "dbg", tramer("nanos"))]
 pub fn build_dependency_graph<'a>(
     arena: &'a Bump,
     compiled: &'a Compiled,
-    default_edge: DefaultEdge<'a>
+    default_edge: DefaultEdge<'a>,
 ) -> (Graph<'a>, DefaultEdge<'a>, Graph<'a>) {
     fn collect_deps<'a>(
         node: &'a str,
@@ -28,25 +28,26 @@ pub fn build_dependency_graph<'a>(
         parsed: &'a Compiled,
         graph: &mut Graph<'a>,
         visited: &mut StrHashSet<'a>,
-        transitive_deps: &mut Graph<'a>
-    ) -> Arc::<StrIndexSet<'a>> {
+        transitive_deps: &mut Graph<'a>,
+    ) -> Arc<StrIndexSet<'a>> {
         if visited.contains(node) {
             return transitive_deps.get(node).cloned().unwrap_or_default();
         }
 
         visited.insert(node);
 
-        let mut deps = parsed.edges.get(node).map(|edge| {
-            match &edge.phony {
-                Phony::Phony { .. } => { StrIndexSet::default() },
-                Phony::NotPhony { deps, inputs, .. } => {
-                    inputs.iter()
-                        .chain(deps.iter())
-                        .cloned()
-                        .collect::<StrIndexSet>()
-                }
-            }
-        }).unwrap_or_default();
+        let mut deps = parsed
+            .edges
+            .get(node)
+            .map(|edge| match &edge.phony {
+                Phony::Phony { .. } => StrIndexSet::default(),
+                Phony::NotPhony { deps, inputs, .. } => inputs
+                    .iter()
+                    .chain(deps.iter())
+                    .cloned()
+                    .collect::<StrIndexSet>(),
+            })
+            .unwrap_or_default();
 
         if let Some(edge) = parsed.edges.get(node) {
             if let Some(depfile_path) = edge.depfile() {
@@ -66,14 +67,15 @@ pub fn build_dependency_graph<'a>(
             path.starts_with("/usr/include/") || path.starts_with("/usr/lib/")
         }
 
-        let transitive = deps.iter()
+        let non_system_deps_count = deps.iter()
             .filter(|dep| !is_system_header(dep))
-            .fold(Vec::with_capacity(deps.len()), |mut transitive, dep|
-        {
-            let deps = collect_deps(&dep, arena, parsed, graph, visited, transitive_deps);
-            transitive.extend(deps.iter().map(|h| *h));
-            transitive
-        });
+            .count();
+
+        let mut transitive = Vec::with_capacity(non_system_deps_count * 2);
+        for dep in deps.iter().filter(|dep| !is_system_header(dep)) {
+            let deps = collect_deps(dep, arena, parsed, graph, visited, transitive_deps);
+            transitive.extend(deps.iter().copied());
+        }
 
         deps.extend(transitive);
 
@@ -93,29 +95,46 @@ pub fn build_dependency_graph<'a>(
     let mut transitive_deps = Graph::with_capacity(n);
 
     for target in compiled.edges.keys() {
-        collect_deps(target, arena, compiled, &mut graph, &mut visited, &mut transitive_deps);
+        collect_deps(
+            target,
+            arena,
+            compiled,
+            &mut graph,
+            &mut visited,
+            &mut transitive_deps,
+        );
     }
 
     let default_edge = default_edge.or({
         if let Some(comp::Target { target, loc }) = compiled.default_target.as_ref() {
-            let edge = compiled.edges.get(target.as_str()).unwrap_or_else(|| {
-                util::report_undefined_target(target, Some(loc), &compiled)
-            }); Some(edge)
+            let edge = compiled
+                .edges
+                .get(target.as_str())
+                .unwrap_or_else(|| {
+                    util::report_undefined_target(target, Some(loc), compiled)
+                });
+
+            Some(edge)
         } else if graph.is_empty() {
             let edge = compiled.edges.values().next();
             debug_assert!(edge.is_some());
             edge
         } else {
-            let mut reverse_graph = StrHashMap::with_capacity(n);
+            let mut reverse_graph = StrHashMap::<StrHashSet>::with_capacity(n);
             for (node, deps) in graph.iter() {
                 for dep in deps.iter() {
-                    reverse_graph.entry(*dep).or_insert_with(StrHashSet::default).insert(node);
+                    reverse_graph
+                        .entry(*dep)
+                        .or_default()
+                        .insert(node);
                 }
             }
 
             // find the edges that do not act as an input anywhere,
             // then sort those by their first appearance in the source code row-wise
-            compiled.edges.keys()
+            compiled
+                .edges
+                .keys()
                 .filter(|edge| !reverse_graph.contains_key(*edge))
                 .map(|t| unsafe { compiled.edges.get(t).unwrap_unchecked() })
                 .min_by(|x, y| x.loc.row.cmp(&y.loc.row))
@@ -134,14 +153,15 @@ pub fn topological_sort<'a>(graph: &Graph<'a>, context: &Compiled) -> Levels<'a>
         in_degree.entry(node).or_insert(0);
         for dep in deps.iter().cloned() {
             *in_degree.entry(dep).or_insert(0) += 1;
-            _ = parent.entry(dep).or_insert(node)
+            parent.entry(dep).or_insert(node);
         }
     }
 
-    let mut queue = in_degree.iter()
+    let mut queue = in_degree
+        .iter()
         .filter(|(.., degree)| **degree == 0)
         .map(|(node, ..)| *node)
-        .collect::<VecDeque::<_>>();
+        .collect::<VecDeque<_>>();
 
     while !queue.is_empty() {
         let n = queue.len();
@@ -164,7 +184,8 @@ pub fn topological_sort<'a>(graph: &Graph<'a>, context: &Compiled) -> Levels<'a>
         levels.push(curr_level)
     }
 
-    if let Some(cycle_node) = in_degree.iter()
+    if let Some(cycle_node) = in_degree
+        .iter()
         .find(|(.., degree)| **degree > 0)
         .map(|(node, ..)| *node)
     {
@@ -172,17 +193,19 @@ pub fn topological_sort<'a>(graph: &Graph<'a>, context: &Compiled) -> Levels<'a>
             start: &'a str,
             graph: &Graph<'a>,
             visited: &mut StrHashSet<'a>,
-            cycle_path: &mut Vec::<&'a str>
+            cycle_path: &mut Vec<&'a str>,
         ) {
             let mut curr = start;
             loop {
-                if visited.contains(curr) { break }
+                if visited.contains(curr) {
+                    break;
+                }
 
                 visited.insert(curr);
                 cycle_path.push(curr);
 
                 let Some(next) = graph.get(curr).and_then(|deps| deps.first()) else {
-                    break
+                    break;
                 };
 
                 curr = next
@@ -192,9 +215,9 @@ pub fn topological_sort<'a>(graph: &Graph<'a>, context: &Compiled) -> Levels<'a>
         let mut cycle_path = Vec::with_capacity(32);
         reconstruct_cycle(
             cycle_node,
-            &graph,
+            graph,
             &mut StrHashSet::with_capacity(graph.len()),
-            &mut cycle_path
+            &mut cycle_path,
         );
 
         // the cycled path should end with the edge it began with
@@ -202,13 +225,14 @@ pub fn topological_sort<'a>(graph: &Graph<'a>, context: &Compiled) -> Levels<'a>
             cycle_path.push(start)
         }
 
-        /* report the cycle */ {
+        /* report the cycle */
+        {
             let edge = cycle_path[0];
             let msg = if cycle_path.len() == 2 {
                 format!("edge {edge:?} depends on itself")
             } else {
                 let pretty = util::pretty_print_slice(&cycle_path, " -> ");
-                format!{
+                format! {
                     "cycle detected: {pretty}\nnote: edge {edge:?} is causing the cycle"
                 }
             };

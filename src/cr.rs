@@ -1,30 +1,33 @@
-use crate::ux;
-use crate::flags::Flags;
-use crate::util::unreachable;
-use crate::types::StrHashSet;
-use crate::db::{Db, Metadata};
-use crate::parser::comp::{Edge, Phony};
-use crate::parser::{Rule, Compiled};
+use crate::cli::Cli;
 use crate::command::{Command, MetadataCache};
 use crate::consts::{CLEAN_TARGET, PHONY_TARGETS};
-use crate::poll::{Poller, FdSender, PollingThread};
-use crate::graph::{Graph, Levels, DefaultEdge, topological_sort};
+use crate::db::{Db, Metadata};
+use crate::graph::{topological_sort, DefaultEdge, Graph, Levels};
+use crate::parser::comp::{Edge, Phony};
+use crate::parser::{Compiled, Rule};
+use crate::poll::{FdSender, Poller, PollingThread};
+use crate::types::StrHashSet;
+use crate::util::unreachable;
+use crate::ux;
 
-use std::thread;
 use std::borrow::Cow;
-use std::time::Duration;
 use std::fs::{self, File};
-use std::io::{self, Write};
 use std::hash::{Hash, Hasher};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::sync::atomic::{Ordering, AtomicBool, AtomicUsize};
+use std::thread;
+use std::time::Duration;
 
 use dashmap::DashMap;
 
 #[derive(PartialEq)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
-enum ExecutorFlow { Ok, Stop }
+enum ExecutorFlow {
+    Ok,
+    Stop,
+}
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct CommandRunner<'a> {
@@ -33,9 +36,9 @@ pub struct CommandRunner<'a> {
     graph: Graph<'a>,
     transitive_deps: Graph<'a>,
 
-    clean: OnceLock::<Command<'a>>,
+    clean: OnceLock<Command<'a>>,
 
-    poller: Arc::<Poller>,
+    poller: Arc<Poller>,
     polling_thread: PollingThread,
 
     fd_sender: FdSender,
@@ -46,23 +49,26 @@ pub struct CommandRunner<'a> {
 
     executed_edges: StrHashSet<'a>,
 
-    db_read: Option::<Db<'a>>,
+    db_read: Option<Db<'a>>,
     db_write: Db<'a>,
 
-    not_up_to_date: Option::<&'a str>,
-    metadata_cache: MetadataCache<'a>
+    not_up_to_date: Option<&'a str>,
+    metadata_cache: MetadataCache<'a>,
 }
 
 impl std::ops::Deref for CommandRunner<'_> {
     type Target = Poller;
     #[inline(always)]
-    fn deref(&self) -> &Self::Target { &self.poller }
+    fn deref(&self) -> &Self::Target {
+        &self.poller
+    }
 }
 
 impl<'a> CommandRunner<'a> {
     fn run_levels(&mut self, levels: &Levels<'a>) {
-        'outer: for level in levels.into_iter() {
-            #[cfg(feature = "dbg")] {
+        'outer: for level in levels {
+            #[cfg(feature = "dbg")]
+            {
                 println!("RUNNING LEVEL: {level:#?}")
             }
 
@@ -71,17 +77,23 @@ impl<'a> CommandRunner<'a> {
                 self.executed_jobs = 0
             }
 
-            for edge in level.into_iter().filter_map(|t| self.context.edges.get(t)) {
+            for edge in level.iter().filter_map(|t| self.context.edges.get(t)) {
                 self.resolve_and_run(edge);
-                if self.stop.load(Ordering::Relaxed) { break 'outer }
+                if self.stop.load(Ordering::Relaxed) {
+                    break 'outer;
+                }
             }
 
             loop {
                 let jobs_done = self.jobs_done.load(Ordering::Relaxed);
-                if jobs_done >= self.executed_jobs { break }
-                #[cfg(feature = "dbg")] {
+                if jobs_done >= self.executed_jobs {
+                    break;
+                }
+                #[cfg(feature = "dbg")]
+                {
                     println!("{jobs_done} < {e}", e = self.executed_jobs)
-                } thread::sleep(Duration::from_millis(50))
+                }
+                thread::sleep(Duration::from_millis(50))
             }
 
             {
@@ -95,8 +107,8 @@ impl<'a> CommandRunner<'a> {
         context: &'a Compiled,
         graph: Graph<'a>,
         transitive_deps: Graph<'a>,
-        flags: Flags,
-        db_read: Option::<Db<'a>>,
+        flags: Cli,
+        db_read: Option<Db<'a>>,
         default_edge: DefaultEdge<'a>,
     ) -> Self {
         let n = context.edges.len();
@@ -105,7 +117,7 @@ impl<'a> CommandRunner<'a> {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicUsize::new(0)),
             Arc::new(AtomicUsize::new(0)),
-            Arc::new(DashMap::new())
+            Arc::new(DashMap::new()),
         );
         Self {
             graph,
@@ -128,10 +140,10 @@ impl<'a> CommandRunner<'a> {
 
     #[inline]
     fn finish(self) -> Db<'a> {
-        if self.flags.check_is_up_to_date() {
+        if self.flags.check_is_up_to_date {
             match self.not_up_to_date {
                 None => println!("[up to date]"),
-                Some(target) => println!("[{target} is not up to date]")
+                Some(target) => println!("[{target} is not up to date]"),
             }
         }
         self.stop.store(true, Ordering::Relaxed);
@@ -141,15 +153,20 @@ impl<'a> CommandRunner<'a> {
 
     #[inline]
     fn build_subgraph(&self, target: &'a str) -> Graph<'a> {
-        let deps = self.transitive_deps.get(target).cloned().unwrap_or_default();
+        let deps = self
+            .transitive_deps
+            .get(target)
+            .cloned()
+            .unwrap_or_default();
         let mut subgraph = Graph::with_capacity(deps.len() + 1);
 
         subgraph.insert(target, Arc::clone(&deps));
         for dep in deps.iter() {
             if let Some(deps_of_dep) = self.graph.get(dep) {
-                _ = subgraph.insert(&dep, Arc::clone(deps_of_dep))
+                _ = subgraph.insert(dep, Arc::clone(deps_of_dep))
             }
-        } subgraph
+        }
+        subgraph
     }
 
     #[inline]
@@ -158,15 +175,15 @@ impl<'a> CommandRunner<'a> {
             let subgraph = self.build_subgraph(edge.target);
             topological_sort(&subgraph, self.context)
         };
-        _ = self.run_levels(&levels)
+        self.run_levels(&levels);
     }
 
     pub fn run(
         context: &'a Compiled,
         graph: Graph<'a>,
         transitive_deps: Graph<'a>,
-        flags: Flags,
-        db_read: Option::<Db<'a>>,
+        flags: Cli,
+        db_read: Option<Db<'a>>,
         default_edge: DefaultEdge<'a>,
     ) -> Db<'a> {
         let mut cr = Self::new(
@@ -175,7 +192,7 @@ impl<'a> CommandRunner<'a> {
             transitive_deps,
             flags,
             db_read,
-            default_edge
+            default_edge,
         );
 
         let levels = if let Some(edge) = default_edge {
@@ -184,126 +201,143 @@ impl<'a> CommandRunner<'a> {
             } else {
                 cr.resolve_and_run_target(edge);
             }
-            return cr.finish()
+            return cr.finish();
         } else {
-            topological_sort(&cr.graph, &context)
+            topological_sort(&cr.graph, context)
         };
 
-        _ = cr.run_levels(&levels);
+        cr.run_levels(&levels);
         cr.finish()
     }
 
     #[inline]
-    fn execute_command(&self, command: &Command, target: &str) -> io::Result::<()> {
-        if self.flags.print_commands() {
+    fn execute_command(&self, command: &Command, target: &str) -> io::Result<()> {
+        if self.flags.print_commands {
             let output = command.to_string(&self.flags);
             println!("{output}");
-            return Ok(())
+            return Ok(());
         }
 
-        command.execute(&self.poller, FdSender::clone(&self.fd_sender)).map_err(|e| {
-            println!("[could not execute edge: {target}: {e}]");
-            e
-        })
+        command
+            .execute(&self.poller, FdSender::clone(&self.fd_sender))
+            .map_err(|e| {
+                println!("[could not execute edge: {target}: {e}]");
+                e
+            })
     }
 
     #[inline(always)]
     fn execute_clean(&mut self) {
         println!("[cleaning..]");
-        _ = self.execute_command(&self.clean(), CLEAN_TARGET).map(|_| self.executed_jobs += 1)
+        _ = self
+            .execute_command(self.clean(), CLEAN_TARGET)
+            .map(|_| self.executed_jobs += 1)
     }
 
     #[inline(always)]
-    fn clean(&self) -> &Command {
-        self.clean.get_or_init(|| {
-            self.context.generate_clean_edge(&self.flags)
-        })
+    fn clean(&self) -> &Command<'_> {
+        self.clean
+            .get_or_init(|| self.context.generate_clean_edge(&self.flags))
     }
 
     fn run_phony(&mut self, edge: &'a Edge<'a>) {
         if edge.target == CLEAN_TARGET {
             self.execute_clean();
-            return
+            return;
         }
 
-        let Phony::Phony { command, aliases, .. } = &edge.phony else {
+        let Phony::Phony {
+            command, aliases, ..
+        } = &edge.phony else {
             unreachable()
         };
 
-        aliases.iter().filter_map(|_edge| {
-            match self.context.edges.get(_edge.as_str()) {
+        aliases
+            .iter()
+            .filter_map(|_edge| match self.context.edges.get(_edge.as_str()) {
                 Some(j) => Some(j),
                 None => {
-                    let mut msg = report_fmt!{
+                    let mut msg = report_fmt! {
                         edge.loc,
                         "undefined edge: {target}\nNOTE: in phony jobs you can only alias jobs\n",
                         target = _edge
                     };
 
-                    if let Some(compiled) = ux::did_you_mean_compiled(
-                        _edge,
-                        &self.context.edges,
-                        &self.context.rules
-                    ) {
+                    if let Some(compiled) =
+                        ux::did_you_mean_compiled(_edge, &self.context.edges, &self.context.rules)
+                    {
                         let msg_ = format!("\nnote: did you mean: {compiled}?");
                         msg.push_str(&msg_)
                     }
 
                     report_panic!("{msg}")
                 }
-            }
-        }).for_each(|edge| self.resolve_and_run_target(edge));
+            })
+            .for_each(|edge| self.resolve_and_run_target(edge));
 
         _ = command.as_ref().map(|command| {
             let target = Cow::Borrowed(edge.target);
             let command = Cow::Borrowed(command.as_str());
-            let command = Command {command, target, description: None};
-            self.execute_command(&command, edge.target).map(|_| self.executed_jobs += 1)
+            let command = Command {
+                command,
+                target,
+                description: None,
+            };
+            self.execute_command(&command, edge.target)
+                .map(|_| self.executed_jobs += 1)
         });
     }
 
     fn execute_edge(&mut self, edge: &Edge<'a>, rule: &Rule) -> ExecutorFlow {
         #[inline(always)]
         fn hash(command: &str) -> u64 {
-            let mut hasher = fnv::FnvHasher::default();
+            let mut hasher = fxhash::FxHasher::default();
             command.hash(&mut hasher);
             hasher.finish()
         }
 
         #[inline]
-        fn compile_command<'a>(_self: &CommandRunner<'a>, edge: &Edge<'a>, rule: &Rule) -> Option::<String> {
-            rule.command.compile(edge, &_self.context.defs).map_err(|e| {
-                println!("{e}");
-                rule.description.as_ref()
-                    .and_then(|d| d.check(&edge.shadows, &_self.context.defs).err())
-                    .map(|err| println!("{err}"));
-            }).map(|command| {
-                _self.db_write.metadata_write(edge.target, Metadata {
-                    command_hash: hash(&command)
-                }); command
-            }).ok()
+        fn compile_command<'a>(
+            _self: &CommandRunner<'a>,
+            edge: &Edge<'a>,
+            rule: &Rule,
+        ) -> Option<String> {
+            let command = rule.command.compile(edge, &_self.context.defs);
+
+            if let Some(d) = rule.description.as_ref() {
+                d.check(&edge.shadows, &_self.context.defs);
+            }
+
+            _self.db_write.metadata_write(
+                edge.target,
+                Metadata {
+                    command_hash: hash(&command),
+                },
+            );
+
+            Some(command)
         }
 
         #[inline]
         fn needs_rebuild<'a>(_self: &CommandRunner<'a>, edge: &Edge<'a>, command: &str) -> bool {
             // in `check_is_up_to_date` mode `always_build` is disabled
             // TODO: make that happen in the `Mode` struct
-            if _self.flags.always_build() && !_self.flags.check_is_up_to_date() {
-                return true
+            if _self.flags.always_build && !_self.flags.check_is_up_to_date {
+                return true;
             }
-            _self.db_read.as_ref().map_or(false, |db| {
-                db.metadata_read(edge.target).map_or(false, |md| {
-                    md.command_hash != hash(command)
-                })
-            }) || _self.metadata_cache.needs_rebuild(edge, &_self.transitive_deps)
+            _self.db_read.as_ref().is_some_and(|db| {
+                db.metadata_read(edge.target).is_some_and(
+                    |md| md.command_hash != hash(command)
+                )
+            }) || _self.metadata_cache.needs_rebuild(edge)
         }
 
         #[inline]
-        fn create_dirs_if_needed(path: &str) -> io::Result::<()> {
+        fn create_dirs_if_needed(path: &str) -> io::Result<()> {
             let path: &Path = path.as_ref();
             if let Some(parent) = path.parent() {
                 if !parent.exists() {
-                    _ = fs::create_dir_all(parent)?
+                    fs::create_dir_all(parent)?
                 }
 
                 let mut path_buf = PathBuf::from(parent);
@@ -312,79 +346,85 @@ impl<'a> CommandRunner<'a> {
                 if let Ok(mut file) = File::create_new(path_buf) {
                     _ = file.write(b"*")
                 }
-            } Ok(())
+            }
+            Ok(())
         }
 
         if edge.target == CLEAN_TARGET {
             self.execute_clean();
-            return ExecutorFlow::Ok
+            return ExecutorFlow::Ok;
         }
 
         let Some(command) = compile_command(self, edge, rule) else {
-            return ExecutorFlow::Ok
+            return ExecutorFlow::Ok;
         };
 
         if needs_rebuild(self, edge, &command) {
-            if self.flags.check_is_up_to_date() {
+            if self.flags.check_is_up_to_date {
                 // self.not_up_to_date = Some(edge.target);
-                return ExecutorFlow::Stop
+                return ExecutorFlow::Stop;
             }
 
             if let Err(e) = create_dirs_if_needed(edge.target) {
-                println!{
+                println! {
                     "[could not create build directory for target: {target}: {e}]",
                     target = edge.target
                 };
-                return ExecutorFlow::Ok
+                return ExecutorFlow::Ok;
             }
 
-            let description = rule.description.as_ref()
-                .and_then(|d| {
-                    d.compile(&edge, &self.context.defs)
-                        .map_err(|e| {
-                            println!("{e}");
-                        }).ok()
-                });
+            let description = rule.description.as_ref().map(|d| {
+                d.compile(edge, &self.context.defs)
+            });
 
             let target = Cow::Borrowed(edge.target);
             let command = Cow::Borrowed(command.as_ref());
             let description = description.as_deref().map(Into::into);
 
-            let command = Command {target, command, description};
-            _ = self.execute_command(&command, edge.target).map(|_| self.executed_jobs += 1)
+            let command = Command {
+                target,
+                command,
+                description,
+            };
+            _ = self
+                .execute_command(&command, edge.target)
+                .map(|_| self.executed_jobs += 1)
         } else {
             let mut any_err = false;
-            if let Err(err) = rule.command.check(&edge.shadows, &self.context.defs) {
-                println!("{err}");
-                any_err = true
+            any_err |= rule.command.check(&edge.shadows, &self.context.defs);
+
+            if let Some(d) = &rule.description {
+                any_err |= d.check(&edge.shadows, &self.context.defs);
             }
 
-            if let Some(Err(err)) = rule.description.as_ref().map(|d| d.check(&edge.shadows, &self.context.defs)) {
-                println!("{err}");
-                any_err = true
-            }
+            let should_print = !any_err && (
+                self.flags.verbose ||
+                self.default_edge.as_ref().is_some_and(|def| {
+                    def.target == edge.target ||
+                    def.aliases().is_some_and(
+                        |aliases| aliases.iter().any(|a| a == edge.target)
+                    )
+                })
+            );
 
-            if !any_err && self.flags.verbose() ||
-                self.default_edge.as_ref().map_or(false, |def| {
-                    def.target == edge.target || def.aliases().map_or(false, |aliases| {
-                        aliases.iter().any(|a| a == edge.target)
-                    })
-                }) && !self.flags.check_is_up_to_date()
-            {
+            if should_print && !self.flags.check_is_up_to_date {
                 println!("[{target} is already built]", target = edge.target)
             }
-        } ExecutorFlow::Ok
+        }
+        ExecutorFlow::Ok
     }
 
     fn resolve_and_run(&mut self, edge: &'a Edge<'a>) {
         // TODO: reserve total amount of edges here
         let mut stack = vec![edge];
         while let Some(edge) = stack.pop() {
-            if self.executed_edges.contains(edge.target) { continue }
+            if self.executed_edges.contains(edge.target) {
+                continue;
+            }
 
             let Phony::NotPhony { rule, inputs, .. } = &edge.phony else {
                 self.run_phony(edge);
-                return
+                return;
             };
 
             let mut all_deps_resolved = true;
@@ -394,23 +434,28 @@ impl<'a> CommandRunner<'a> {
                         stack.push(edge);
                         stack.push(dep_edge);
                         all_deps_resolved = false;
-                        break
+                        break;
                     } else {
-                        #[cfg(feature = "dbg")] {
+                        #[cfg(feature = "dbg")]
+                        {
                             println!("[dependency {input} is assumed to exist]")
                         }
                     }
                 }
             }
 
-            if !all_deps_resolved { continue }
+            if !all_deps_resolved {
+                continue;
+            }
 
             let Some(ref edge_rule) = rule else { continue };
             if let Some(rule) = self.context.rules.get(edge_rule) {
                 self.executed_edges.insert(edge.target);
-                if self.execute_edge(edge, rule) == ExecutorFlow::Stop { break }
+                if self.execute_edge(edge, rule) == ExecutorFlow::Stop {
+                    break;
+                }
             } else {
-                report_panic!{
+                report_panic! {
                     edge.loc,
                     "no rule named: {rule} found for job {target}\n",
                     rule = edge_rule,

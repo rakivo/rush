@@ -1,73 +1,81 @@
-use crate::flags::Flags;
-use crate::graph::Graph;
-use crate::types::StrDashMap;
+use crate::cli::Cli;
 use crate::consts::CLEAN_TARGET;
 use crate::parser::comp::{self, Edge};
 use crate::poll::{Poller, Subprocess};
+use crate::types::StrDashMap;
 
-use std::fs::File;
-use std::sync::Arc;
-use std::path::Path;
 use std::borrow::Cow;
 use std::ffi::CString;
-use std::{io, ptr, mem};
-use std::time::SystemTime;
-use std::sync::atomic::Ordering;
+use std::fs::File;
 use std::os::fd::{AsFd, AsRawFd};
-use std::os::fd::{IntoRawFd, FromRawFd};
+use std::os::fd::{FromRawFd, IntoRawFd};
+use std::path::Path;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::SystemTime;
+use std::{io, mem, ptr};
 
+use crossbeam_channel::Sender;
 use dashmap::DashMap;
 use fxhash::FxBuildHasher;
-use crossbeam_channel::Sender;
 use nix::poll::{PollFd, PollFlags};
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct Command<'a> {
-    pub target: Cow::<'a, str>,
-    pub command: Cow::<'a, str>,
-    pub description: Option::<Cow::<'a, str>>
+    pub target: Cow<'a, str>,
+    pub command: Cow<'a, str>,
+    pub description: Option<Cow<'a, str>>,
 }
 
 // Custom implementation of `Command` to avoid fork + exec overhead
 impl<'a> Command<'a> {
     #[inline]
-    pub fn to_string(&self, flags: &Flags) -> String {
-        let Command { target, command, description } = self;
+    pub fn to_string(&self, flags: &Cli) -> String {
+        let Command {
+            target,
+            command,
+            description,
+        } = self;
         let n = description.as_ref().map_or(0, |d| 1 + d.len() + 1) + command.len() + 1;
         let mut buf = String::with_capacity(n);
-        if flags.verbose() {
+        if flags.verbose {
             if let Some(ref d) = description {
-                if *target != CLEAN_TARGET { buf.push('[') }
+                if *target != CLEAN_TARGET {
+                    buf.push('[')
+                }
                 buf.push_str(d);
-                if *target != CLEAN_TARGET { buf.push(']') }
+                if *target != CLEAN_TARGET {
+                    buf.push(']')
+                }
                 buf.push('\n');
             }
-            buf.push_str(&command)
+            buf.push_str(command)
         } else if let Some(ref d) = description {
-            if *target != CLEAN_TARGET { buf.push('[') }
+            if *target != CLEAN_TARGET {
+                buf.push('[')
+            }
             buf.push_str(d);
-            if *target != CLEAN_TARGET { buf.push(']') }
+            if *target != CLEAN_TARGET {
+                buf.push(']')
+            }
         } else {
-            buf.push_str(&command)
-        } buf
+            buf.push_str(command)
+        }
+        buf
     }
 
     #[inline]
-    fn create_pipe() -> io::Result::<(File, File)> {
+    fn create_pipe() -> io::Result<(File, File)> {
         let mut fds = [0; 2];
         if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
-            return Err(io::Error::last_os_error())
+            return Err(io::Error::last_os_error());
         }
         let r = unsafe { File::from_raw_fd(fds[0]) };
         let w = unsafe { File::from_raw_fd(fds[1]) };
         Ok((r, w))
     }
 
-    pub fn execute(
-        &self,
-        poller: &Poller,
-        poll_fds_sender: Sender::<PollFd>,
-    ) -> io::Result::<()> {
+    pub fn execute(&self, poller: &Poller, poll_fds_sender: Sender<PollFd>) -> io::Result<()> {
         let cmd = CString::new(self.command.as_bytes())?;
         let args = [
             c"/bin/sh".as_ptr(),
@@ -88,8 +96,16 @@ impl<'a> Command<'a> {
         let mut file_actions = unsafe { mem::zeroed() };
         unsafe {
             libc::posix_spawn_file_actions_init(&mut file_actions);
-            libc::posix_spawn_file_actions_adddup2(&mut file_actions, stdout_writer_fd, libc::STDOUT_FILENO);
-            libc::posix_spawn_file_actions_adddup2(&mut file_actions, stderr_writer_fd, libc::STDERR_FILENO);
+            libc::posix_spawn_file_actions_adddup2(
+                &mut file_actions,
+                stdout_writer_fd,
+                libc::STDOUT_FILENO,
+            );
+            libc::posix_spawn_file_actions_adddup2(
+                &mut file_actions,
+                stderr_writer_fd,
+                libc::STDERR_FILENO,
+            );
         }
 
         let mut attr = unsafe { mem::zeroed() };
@@ -111,7 +127,7 @@ impl<'a> Command<'a> {
         };
 
         if ret != 0 {
-            return Err(io::Error::last_os_error())
+            return Err(io::Error::last_os_error());
         }
 
         unsafe {
@@ -123,9 +139,16 @@ impl<'a> Command<'a> {
             let target = Box::from(self.target.clone());
             let command = Box::from(self.command.clone());
             let description = self.description.clone().map(Box::from);
-            let subprocess = Arc::new(Subprocess {pid, target, command, description});
+            let subprocess = Arc::new(Subprocess {
+                pid,
+                target,
+                command,
+                description,
+            });
 
-            poller.fd_to_subprocess.insert(stdout_reader_fd, Arc::clone(&subprocess));
+            poller
+                .fd_to_subprocess
+                .insert(stdout_reader_fd, Arc::clone(&subprocess));
             poller.fd_to_subprocess.insert(stderr_reader_fd, subprocess);
         }
 
@@ -142,7 +165,8 @@ impl<'a> Command<'a> {
             PollFd::new(stderr_reader_fd.as_fd(), PollFlags::POLLIN)
         };
 
-        #[cfg(feature = "dbg_hardcore")] {
+        #[cfg(feature = "dbg_hardcore")]
+        {
             {
                 let stdout_fd = stdout_poll_fd.as_fd().as_raw_fd();
                 let mut stdout = format!("sending: FD: {stdout_fd:?} ");
@@ -173,19 +197,19 @@ impl<'a> Command<'a> {
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct MetadataCache<'a> {
-    files: StrDashMap::<'a, SystemTime>
+    files: StrDashMap<'a, SystemTime>,
 }
 
 impl<'a> MetadataCache<'a> {
     #[inline]
     pub fn new(files_count: usize) -> Self {
         Self {
-            files: DashMap::with_capacity_and_hasher(files_count, FxBuildHasher::default())
+            files: DashMap::with_capacity_and_hasher(files_count, FxBuildHasher::default()),
         }
     }
 
     #[inline]
-    pub fn mtime(&self, f: &'a str) -> io::Result::<SystemTime> {
+    pub fn mtime(&self, f: &'a str) -> io::Result<SystemTime> {
         if let Some(mtime) = self.files.get(f) {
             Ok(*mtime)
         } else {
@@ -197,7 +221,7 @@ impl<'a> MetadataCache<'a> {
     }
 
     #[inline]
-    pub fn needs_rebuild(&self, edge: &Edge<'a>, transitive_deps: &Graph<'a>) -> bool {
+    pub fn needs_rebuild(&self, edge: &Edge<'a>) -> bool {
         let inputs = match &edge.phony {
             comp::Phony::Phony { .. } => return true,
             comp::Phony::NotPhony { inputs, .. } => inputs,
@@ -206,7 +230,7 @@ impl<'a> MetadataCache<'a> {
         // TODO: do something here if dependent file does not exist
         let mtimes = inputs
             .iter()
-            .map(|path| self.mtime(*path))
+            .map(|path| self.mtime(path))
             .collect::<Result<Vec<_>, _>>();
 
         let Ok(mtimes) = mtimes else {
@@ -214,7 +238,7 @@ impl<'a> MetadataCache<'a> {
         };
 
         let Ok(target_mtime) = self.mtime(edge.target) else {
-            return true
+            return true;
         };
 
         mtimes.into_iter().any(|src_mtime| src_mtime > target_mtime)

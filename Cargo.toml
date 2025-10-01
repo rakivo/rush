@@ -1,23 +1,34 @@
 [package]
-name = "rush"
+name    = "rush"
 version = "0.1.0"
 edition = "2021"
 authors = ["Mark Tyrkba <marktyrkba456@gmail.com>"]
+license = "Apache-2.0 OR MIT"
+description = "Simple, Peak Performance Build System"
+repository = "https://github.com/rakivo/rush"
+keywords    = ["build", "automation", "ninja", "parallel", "tasks"]
+categories  = ["development-tools::build-utilities"]
 
 [features]
 dbg = ["dep:tramer"]
 dbg_hardcore = ["dbg"]
 
 [dependencies]
-fnv = "1.0.7"
-libc = "0.2.169"
-paste = "1.0.15"
-flager = "0.0.9"
-memmap2 = "0.9.5"
-indexmap = "2.7.1"
-bumpalo = "3.17.0"
-crossbeam-channel = "0.5.14"
-tramer = { version = "0.1.0", optional = true }
-nix = { version = "0.29.0", features = ["poll"] }
-dashmap = { version = "6.1.0", features = ["inline"] }
-fxhash = { git = "https://github.com/rakivo/fxhash", rev = "2b61551" }
+libc                = { version = "0.2.169", default-features = false }
+paste               = { version = "1.0.15",  default-features = false }
+memmap2             = { version = "0.9.5",   default-features = false }
+indexmap            = { version = "2.7.1",   default-features = false }
+bumpalo             = { version = "3.17.0",  default-features = false }
+rustc-edit-distance = { version = "0.1.0",   default-features = false }
+tramer              = { version = "0.1.0",   default-features = false, optional = true }
+crossbeam-channel   = { version = "0.5.14",  default-features = false, features = ["std"] }
+nix                 = { version = "0.29.0",  default-features = false, features = ["poll"] }
+dashmap             = { version = "6.1.0",   default-features = false, features = ["inline"] }
+clap                = { version = "4.5",     default-features = false, features = ["std", "help", "derive"] }
+
+[dependencies.fxhash]
+git = "https://github.com/rakivo/fxhash"
+rev = "2b61551"
+features = []
+default-features = false
+

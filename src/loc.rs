@@ -2,20 +2,24 @@
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct Loc<'a> {
     pub row: usize,
-    pub file_path: &'a str
+    pub file_path: &'a str,
 }
 
 impl<'a> Loc<'a> {
     #[inline(always)]
-    pub fn new(row: usize, file_path: &'a str) -> Self  {
+    pub fn new(row: usize, file_path: &'a str) -> Self {
         Self { row, file_path }
     }
 
     #[inline(always)]
     #[cfg_attr(feature = "dbg", track_caller)]
     pub fn report(literal: &str) -> ! {
-        #[cfg(feature = "dbg")] { panic!("{literal}") }
-        #[cfg(not(feature = "dbg"))] {
+        #[cfg(feature = "dbg")]
+        {
+            panic!("{literal}")
+        }
+        #[cfg(not(feature = "dbg"))]
+        {
             eprintln!("{literal}");
             std::process::exit(1)
         }
@@ -40,6 +44,17 @@ macro_rules! report_fmt {
             msg = $lit
         }
     }
+}
+
+#[macro_export]
+macro_rules! ereportln {
+    ($loc: expr, $($arg: tt)*) => {{
+        use std::io::{self, Write};
+        let s = $crate::report_fmt!($loc, $($arg)*);
+        let mut stderr = io::stderr();
+        stderr.write_all(s.as_bytes()).unwrap();
+        stderr.flush().unwrap();
+    }};
 }
 
 #[macro_export]
