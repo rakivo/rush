@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Mark Tyrkba <marktyrkba456@gmail.com>"]
 license = "Apache-2.0 OR MIT"
+readme = "README.md"
 description = "Simple, Peak Performance Build System"
 repository = "https://github.com/rakivo/rush"
 keywords    = ["build", "automation", "ninja", "parallel", "tasks"]
@@ -31,4 +32,32 @@ git = "https://github.com/rakivo/fxhash"
 rev = "2b61551"
 features = []
 default-features = false
+
+[profile.dev]
+opt-level = 0
+debug = 2
+split-debuginfo = 'packed'
+strip = "none"                    # don’t strip symbols
+lto = false
+overflow-checks = true
+
+[profile.release]
+opt-level = 3
+panic = "abort"
+codegen-units = 1
+lto = "fat"
+debug = false
+strip = true
+overflow-checks = false
+
+# also: set RUSTFLAGS="-C force-frame-pointers=yes"
+[profile.profiling]
+inherits = "release"
+debug = true                      # keep DWARF symbols
+split-debuginfo = "packed"        # so perf can find them easily (Linux)
+strip = "none"                    # don’t strip symbols
+lto = false
+codegen-units = 16
+overflow-checks = false
+panic = "abort"                   # optional: less noise, smaller code
 
