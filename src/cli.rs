@@ -1,4 +1,4 @@
-use clap::{Parser, ArgAction};
+use clap::{ArgAction, Parser};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about)]

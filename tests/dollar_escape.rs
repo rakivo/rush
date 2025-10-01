@@ -43,56 +43,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cycled() {
-        let file_name = "cycled";
+    fn dollar_escape() {
+        let file_name = "dollar_escape";
 
         create_rush_file(
             file_name,
-            r#"rule echo
-  command = echo "hello $in"
+            r#"
+rule echo
+  command = echo "hello $$in"
 
-build hello: echo hello
-build all: hello"#,
+build hello: echo
+"#,
         );
 
         let out = run_rush(file_name);
         _ = remove_rush(file_name);
 
-        assert!(!out.status.success());
+        assert!(out.status.success());
 
-        let stderr = unsafe { std::str::from_utf8_unchecked(&out.stderr) };
+        let stdout = unsafe { std::str::from_utf8_unchecked(&out.stdout) };
 
-        assert! {
-            stderr.contains(r#"cycled.rush:4: edge "hello" depends on itself"#)
-        }
-    }
-
-    #[test]
-    fn cycled_path() {
-        let file_name = "cycled_path";
-
-        create_rush_file(
-            file_name,
-            r#"rule echo
-  command = echo "Building $out"
-
-build A: echo B
-build B: echo C
-build C: echo A
-
-default A"#,
-        );
-
-        let out = run_rush(file_name);
-        _ = remove_rush(file_name);
-
-        assert!(!out.status.success());
-
-        let stderr = unsafe { std::str::from_utf8_unchecked(&out.stderr) };
-
-        assert! {
-            stderr.contains(r#"cycled_path.rush:4: cycle detected: A -> B -> C -> A
-        note: edge "A" is causing the cycle"#)
-        }
+        assert!(stdout.contains("hello $in"));
     }
 }

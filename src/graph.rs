@@ -67,9 +67,7 @@ pub fn build_dependency_graph<'a>(
             path.starts_with("/usr/include/") || path.starts_with("/usr/lib/")
         }
 
-        let non_system_deps_count = deps.iter()
-            .filter(|dep| !is_system_header(dep))
-            .count();
+        let non_system_deps_count = deps.iter().filter(|dep| !is_system_header(dep)).count();
 
         let mut transitive = Vec::with_capacity(non_system_deps_count * 2);
         for dep in deps.iter().filter(|dep| !is_system_header(dep)) {
@@ -110,9 +108,7 @@ pub fn build_dependency_graph<'a>(
             let edge = compiled
                 .edges
                 .get(target.as_str())
-                .unwrap_or_else(|| {
-                    util::report_undefined_target(target, Some(loc), compiled)
-                });
+                .unwrap_or_else(|| util::report_undefined_target(target, Some(loc), compiled));
 
             Some(edge)
         } else if graph.is_empty() {
@@ -123,10 +119,7 @@ pub fn build_dependency_graph<'a>(
             let mut reverse_graph = StrHashMap::<StrHashSet>::with_capacity(n);
             for (node, deps) in graph.iter() {
                 for dep in deps.iter() {
-                    reverse_graph
-                        .entry(*dep)
-                        .or_default()
-                        .insert(node);
+                    reverse_graph.entry(*dep).or_default().insert(node);
                 }
             }
 

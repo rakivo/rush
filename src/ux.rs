@@ -1,7 +1,7 @@
-use rustc_edit_distance::find_best_match_for_name;
 use crate::parser::comp::Edge;
 use crate::parser::Rule;
 use crate::types::StrHashMap;
+use rustc_edit_distance::find_best_match_for_name;
 
 #[inline]
 pub fn did_you_mean_compiled<'a>(

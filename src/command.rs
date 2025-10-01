@@ -154,7 +154,7 @@ impl<'a> Command<'a> {
 
         poller.active_fds.fetch_add(1, Ordering::Relaxed);
 
-        // TODO: dont leak here
+        // TODO(#69): should we care about leaking 4-byte FD's?
         let stdout_poll_fd = {
             let stdout_reader_fd: &'static _ = Box::leak(Box::new(stdout_reader));
             PollFd::new(stdout_reader_fd.as_fd(), PollFlags::POLLIN)
@@ -227,7 +227,7 @@ impl<'a> MetadataCache<'a> {
             comp::Phony::NotPhony { inputs, .. } => inputs,
         };
 
-        // TODO: do something here if dependent file does not exist
+        // TODO(#66): Should we do something here if the dependent file does not exist?
         let mtimes = inputs
             .iter()
             .map(|path| self.mtime(path))

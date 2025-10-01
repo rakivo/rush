@@ -248,7 +248,8 @@ impl<'a> CommandRunner<'a> {
 
         let Phony::Phony {
             command, aliases, ..
-        } = &edge.phony else {
+        } = &edge.phony
+        else {
             unreachable()
         };
 
@@ -320,15 +321,12 @@ impl<'a> CommandRunner<'a> {
 
         #[inline]
         fn needs_rebuild<'a>(_self: &CommandRunner<'a>, edge: &Edge<'a>, command: &str) -> bool {
-            // in `check_is_up_to_date` mode `always_build` is disabled
-            // TODO: make that happen in the `Mode` struct
             if _self.flags.always_build && !_self.flags.check_is_up_to_date {
                 return true;
             }
             _self.db_read.as_ref().is_some_and(|db| {
-                db.metadata_read(edge.target).is_some_and(
-                    |md| md.command_hash != hash(command)
-                )
+                db.metadata_read(edge.target)
+                    .is_some_and(|md| md.command_hash != hash(command))
             }) || _self.metadata_cache.needs_rebuild(edge)
         }
 
@@ -373,9 +371,10 @@ impl<'a> CommandRunner<'a> {
                 return ExecutorFlow::Ok;
             }
 
-            let description = rule.description.as_ref().map(|d| {
-                d.compile(edge, &self.context.defs)
-            });
+            let description = rule
+                .description
+                .as_ref()
+                .map(|d| d.compile(edge, &self.context.defs));
 
             let target = Cow::Borrowed(edge.target);
             let command = Cow::Borrowed(command.as_ref());
@@ -397,15 +396,14 @@ impl<'a> CommandRunner<'a> {
                 any_err |= d.check(&edge.shadows, &self.context.defs);
             }
 
-            let should_print = !any_err && (
-                self.flags.verbose ||
-                self.default_edge.as_ref().is_some_and(|def| {
-                    def.target == edge.target ||
-                    def.aliases().is_some_and(
-                        |aliases| aliases.iter().any(|a| a == edge.target)
-                    )
-                })
-            );
+            let should_print = !any_err
+                && (self.flags.verbose
+                    || self.default_edge.as_ref().is_some_and(|def| {
+                        def.target == edge.target
+                            || def
+                                .aliases()
+                                .is_some_and(|aliases| aliases.iter().any(|a| a == edge.target))
+                    }));
 
             if should_print && !self.flags.check_is_up_to_date {
                 println!("[{target} is already built]", target = edge.target)
@@ -415,7 +413,6 @@ impl<'a> CommandRunner<'a> {
     }
 
     fn resolve_and_run(&mut self, edge: &'a Edge<'a>) {
-        // TODO: reserve total amount of edges here
         let mut stack = vec![edge];
         while let Some(edge) = stack.pop() {
             if self.executed_edges.contains(edge.target) {

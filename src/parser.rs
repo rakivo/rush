@@ -12,10 +12,10 @@ use crate::ux::did_you_mean_compiled;
 
 use std::borrow::Cow;
 use std::collections::HashSet;
+use std::fmt::Write;
 use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
 use std::mem;
-use std::fmt::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -287,108 +287,113 @@ impl<'a> Parsed<'a> {
         } = self;
 
         let defs = defs.compile();
-        let edges = edges.values().map(|edge| {
-            let target = arena.alloc_str(
-                &edge.target_template.compile_prep(edge, &defs)
-            ) as _;
+        let edges = edges
+            .values()
+            .map(|edge| {
+                let target = arena.alloc_str(&edge.target_template.compile_prep(edge, &defs)) as _;
 
-            let edge = match &edge.phony {
-                prep::Phony::Phony {
-                    command,
-                    aliases_templates,
-                    aliases,
-                } => {
-                    if edge.target != CLEAN_TARGET && !phonys.contains(edge.target) {
-                        report_panic! {
-                            edge.loc,
-                            "mark {target} as phony for it to have a command",
-                            target = edge.target
+                let edge = match &edge.phony {
+                    prep::Phony::Phony {
+                        command,
+                        aliases_templates,
+                        aliases,
+                    } => {
+                        if edge.target != CLEAN_TARGET && !phonys.contains(edge.target) {
+                            report_panic! {
+                                edge.loc,
+                                "mark {target} as phony for it to have a command",
+                                target = edge.target
+                            }
+                        }
+
+                        let command = command.as_ref().map(|c| c.compile_prep(edge, &defs));
+
+                        let aliases = aliases_templates
+                            .iter()
+                            .zip(aliases.iter())
+                            .map(|(template, ..)| template.compile_prep(edge, &defs))
+                            .collect::<Vec<_>>();
+
+                        comp::Edge {
+                            target,
+                            loc: edge.loc,
+                            shadows: edge.shadows.as_ref().map(Arc::clone),
+                            phony: comp::Phony::Phony { command, aliases },
                         }
                     }
+                    prep::Phony::NotPhony {
+                        rule,
+                        inputs,
+                        inputs_str,
+                        inputs_templates,
+                        deps,
+                        deps_templates,
+                    } => {
+                        let mut inputs_str = String::with_capacity(inputs_str.len() + 10);
+                        let inputs = inputs_templates
+                            .iter()
+                            .zip(inputs.iter())
+                            .map(|(template, ..)| {
+                                let t = template.compile_prep(edge, &defs);
+                                inputs_str.push_str(&t);
+                                inputs_str.push(' ');
+                                arena.alloc_str(&t) as &_
+                            })
+                            .collect::<Vec<_>>();
 
-                    let command = command.as_ref().map(|c| c.compile_prep(edge, &defs));
-
-                    let aliases = aliases_templates
-                        .iter()
-                        .zip(aliases.iter())
-                        .map(|(template, ..)| template.compile_prep(edge, &defs))
-                        .collect::<Vec<_>>();
-
-                    comp::Edge {
-                        target,
-                        loc: edge.loc,
-                        shadows: edge.shadows.as_ref().map(Arc::clone),
-                        phony: comp::Phony::Phony { command, aliases },
-                    }
-                }
-                prep::Phony::NotPhony {
-                    rule,
-                    inputs,
-                    inputs_str,
-                    inputs_templates,
-                    deps,
-                    deps_templates,
-                } => {
-                    let mut inputs_str = String::with_capacity(inputs_str.len() + 10);
-                    let inputs = inputs_templates
-                        .iter()
-                        .zip(inputs.iter())
-                        .map(|(template, ..)| {
-                            let t = template.compile_prep(edge, &defs);
-                            inputs_str.push_str(&t);
-                            inputs_str.push(' ');
-                            arena.alloc_str(&t) as &_
-                        })
-                        .collect::<Vec<_>>();
-
-                    if !inputs_str.is_empty() {
-                        _ = inputs_str.pop()
-                    }
-                    let inputs_str = arena.alloc_str(&inputs_str) as &_;
-
-                    let deps = deps_templates
-                        .iter()
-                        .zip(deps.iter())
-                        .map(|(template, ..)| {
-                            let t = template.compile_prep(edge, &defs);
-                            arena.alloc_str(&t) as _
-                        })
-                        .collect::<Vec<_>>();
-
-                    let mut edge = comp::Edge {
-                        target,
-                        loc: edge.loc,
-                        shadows: edge.shadows.as_ref().map(Arc::clone),
-                        phony: comp::Phony::NotPhony {
-                            deps,
-                            inputs,
-                            inputs_str,
-                            rule: *rule,
-                            depfile: None,
-                        },
-                    };
-
-                    if let Some(Some(rule)) = edge.rule().map(|rule| rules.get(rule)) {
-                        if let Some(ref depfile_template) = rule.depfile {
-                            let depfile_path = depfile_template.compile(&edge, &defs);
-
-                            let comp::Phony::NotPhony { depfile, .. } = &mut edge.phony else {
-                                unsafe { std::hint::unreachable_unchecked() }
-                            };
-
-                            *depfile = Some(depfile_path)
+                        if !inputs_str.is_empty() {
+                            _ = inputs_str.pop()
                         }
+                        let inputs_str = arena.alloc_str(&inputs_str) as &_;
+
+                        let deps = deps_templates
+                            .iter()
+                            .zip(deps.iter())
+                            .map(|(template, ..)| {
+                                let t = template.compile_prep(edge, &defs);
+                                arena.alloc_str(&t) as _
+                            })
+                            .collect::<Vec<_>>();
+
+                        let mut edge = comp::Edge {
+                            target,
+                            loc: edge.loc,
+                            shadows: edge.shadows.as_ref().map(Arc::clone),
+                            phony: comp::Phony::NotPhony {
+                                deps,
+                                inputs,
+                                inputs_str,
+                                rule: *rule,
+                                depfile: None,
+                            },
+                        };
+
+                        if let Some(Some(rule)) = edge.rule().map(|rule| rules.get(rule)) {
+                            if let Some(ref depfile_template) = rule.depfile {
+                                let depfile_path = depfile_template.compile(&edge, &defs);
+
+                                let comp::Phony::NotPhony { depfile, .. } = &mut edge.phony else {
+                                    unsafe { std::hint::unreachable_unchecked() }
+                                };
+
+                                *depfile = Some(depfile_path)
+                            }
+                        }
+
+                        edge
                     }
+                };
 
-                    edge
-                }
-            };
-
-            (target, edge)
-        }).collect::<StrHashMap<_>>();
+                (target, edge)
+            })
+            .collect::<StrHashMap<_>>();
 
         edges.values().for_each(|edge| {
-            if let comp::Phony::NotPhony { rule: Some(ref rule), .. } = &edge.phony {
+            if let comp::Phony::NotPhony {
+                rule: Some(ref rule),
+                ..
+            } = &edge.phony
+            {
                 if !rules.contains_key(rule) {
                     let mut msg = report_fmt!(edge.loc, "undefined rule: {rule}");
 
@@ -611,7 +616,8 @@ impl<'a> Parser<'a> {
             name,
             already_inserted,
             ..
-        } = &self.context {
+        } = &self.context
+        {
             if !already_inserted {
                 report_panic!(loc, "rule {name} without a command")
             }
@@ -638,9 +644,7 @@ impl<'a> Parser<'a> {
                 || not_trimmed
                     .find(|c: char| c.is_ascii_whitespace())
                     .map(|first_space| (first_space, &not_trimmed[..first_space]))
-                    .is_some_and(|(_, first_token)| {
-                        matches!(first_token, BUILD | PHONY | RULE)
-                    })
+                    .is_some_and(|(_, first_token)| matches!(first_token, BUILD | PHONY | RULE))
             {
                 self.finish_edge();
                 self.finish_rule();
@@ -683,11 +687,9 @@ impl<'a> Parser<'a> {
             line[second_space + 1..].trim()
         };
 
-        let parse_def = || -> prep::Def<'a> {
-            prep::Def(Template::new(parse_shadow(), get_loc()))
-        };
+        let parse_def = || -> prep::Def<'a> { prep::Def(Template::new(parse_shadow(), get_loc())) };
 
-        // TODO: we should move context here and this match should return another updated context
+        // TODO(#67): we should move context here and this match should return another updated context
         match &mut self.context {
             Context::Job {
                 target, shadows, ..
@@ -800,7 +802,7 @@ impl<'a> Parser<'a> {
                             },
                         };
 
-                        // TODO: preprocess allocated string in-place, without additional allocation
+                        // TODO(#68): preprocess allocated string in-place, without additional allocation?
                         let buf = self.arena.alloc_slice_fill_default(content.len());
 
                         let mut string =
@@ -1027,25 +1029,20 @@ impl<'a> Parser<'a> {
                 default_target: None,
                 defs: prep::Defs(StrHashMap::with_capacity(32)),
                 edges: {
-                    let mut edges = StrHashMap::from_iter(
-                        [(
-                            CLEAN_TARGET,
-                            prep::Edge {
-                                loc: Loc::new(420, "aboba"),
-                                target: CLEAN_TARGET,
-                                shadows: Shadows::None,
-                                target_template: Template::new(
-                                    CLEAN_TARGET,
-                                    Loc::new(420, "aboba"),
-                                ),
-                                phony: prep::Phony::Phony {
-                                    command: None,
-                                    aliases: const { Vec::new() },
-                                    aliases_templates: const { Vec::new() },
-                                },
+                    let mut edges = StrHashMap::from_iter([(
+                        CLEAN_TARGET,
+                        prep::Edge {
+                            loc: Loc::new(420, "aboba"),
+                            target: CLEAN_TARGET,
+                            shadows: Shadows::None,
+                            target_template: Template::new(CLEAN_TARGET, Loc::new(420, "aboba")),
+                            phony: prep::Phony::Phony {
+                                command: None,
+                                aliases: const { Vec::new() },
+                                aliases_templates: const { Vec::new() },
                             },
-                        )]
-                    );
+                        },
+                    )]);
                     _ = edges.try_reserve(32);
                     edges
                 },

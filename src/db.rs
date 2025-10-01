@@ -1,14 +1,14 @@
 use crate::parser::read_file;
 use crate::types::StrDashMap;
 
-use std::fs;
 use std::fmt::Display;
-use std::path::Path;
+use std::fs;
 use std::io::{self, Write};
+use std::path::Path;
 
-use memmap2::Mmap;
 use dashmap::mapref::one::Ref;
 use fxhash::FxBuildHasher;
+use memmap2::Mmap;
 
 #[repr(transparent)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
