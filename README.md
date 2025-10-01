@@ -5,7 +5,7 @@ It’s designed for speed and clarity — making it easy to build projects from 
 
 # Quick start
 ```console
-$ cargo install rush
+$ cargo install rush-build
 ```
 
 ## Minimal showcase

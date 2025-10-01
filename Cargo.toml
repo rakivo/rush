@@ -1,5 +1,5 @@
 [package]
-name    = "rush"
+name    = "rush-build"
 version = "0.1.0"
 edition = "2021"
 authors = ["Mark Tyrkba <marktyrkba456@gmail.com>"]
