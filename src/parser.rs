@@ -800,7 +800,7 @@ impl<'a> Parser<'a> {
                             },
                         };
 
-                        // TODO: preprocess allocated string in-place, without additional allocation?
+                        // TODO(#68): preprocess allocated string in-place, without additional allocation?
                         let buf = self.arena.alloc_slice_fill_default(content.len());
 
                         let mut string =
@@ -1065,4 +1065,3 @@ impl<'a> Parser<'a> {
         parser.parsed
     }
 }
-     
