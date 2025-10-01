@@ -90,9 +90,6 @@ default A"#,
 
         let stderr = unsafe { std::str::from_utf8_unchecked(&out.stderr) };
 
-        assert! {
-            stderr.contains(r#"cycled_path.rush:4: cycle detected: A -> B -> C -> A
-        note: edge "A" is causing the cycle"#)
-        }
+        assert!(stderr.contains("cycled_path.rush:4: cycle detected: A -> B -> C -> A\nnote: edge \"A\" is causing the cycle"));
     }
 }
