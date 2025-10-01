@@ -1,4 +1,3 @@
-// TODO(#64): Allow escaping dollars
 
 #![allow(clippy::collapsible_if)]
 
