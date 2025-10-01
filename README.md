@@ -59,6 +59,12 @@ build clean:
   command = rm -f src/*.o lua
 ```
 
+> [!Warning]
+Currently, Rush only supports Unix-like systems (Linux, macOS).
+Windows is not supported yet, and we do not have any active developers testing on Windows.
+Contributions to improve Windows support are welcome!
+---
+
 ## Documentation
 - For the complete example, and an example that builds Ninja itself using rush, go to [`examples/`](https://github.com/rakivo/rush/tree/master/examples) directory.
 - Ninja syntax compatibility: mostly supported, currently without generators and some other minor differences.
