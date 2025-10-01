@@ -61,7 +61,13 @@ build clean:
 
 > [!Warning]
 Currently, Rush only supports Unix-like systems (Linux, macOS).
-Windows is not supported yet, and we do not have any active developers testing on Windows.
+
+ **macOS support**
+- Fully supported on **Intel Macs (x86_64)**.
+- **Apple Silicon (M1/M2)** Macs: partially supported — some features may not work yet.
+
+ **Windows support**
+- Windows is not supported yet, and we do not have any active developers testing on Windows.
 Contributions to improve Windows support are welcome!
 ---
 
