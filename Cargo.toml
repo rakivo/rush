@@ -1,5 +1,5 @@
 [package]
-name    = "rush-build"
+name = "rush-build"
 version = "0.1.0"
 edition = "2021"
 authors = ["Mark Tyrkba <marktyrkba456@gmail.com>"]
@@ -7,8 +7,8 @@ license = "Apache-2.0 OR MIT"
 readme = "README.md"
 description = "Simple, Peak Performance Build System"
 repository = "https://github.com/rakivo/rush"
-keywords    = ["build", "automation", "ninja", "parallel", "tasks"]
-categories  = ["development-tools::build-utilities"]
+keywords = ["build", "automation", "ninja", "parallel", "tasks"]
+categories = ["development-tools", "command-line-utilities"]
 
 [features]
 dbg = ["dep:tramer"]
