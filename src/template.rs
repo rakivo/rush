@@ -39,8 +39,17 @@ impl<'a> Template<'a> {
                 .is_some_and(|b| !b.is_ascii_whitespace())
         }
 
-        while let Some(i) = s[start..].find('$') {
-            let i = start + i;
+        while let Some(mut i) = s[start..].find('$') {
+            i += start;
+
+            if s.as_bytes().get(i + 1) == Some(&b'$') {
+                let static_chunk = &s[start..i + 1];
+                chunks.push(TemplateChunk::Static(static_chunk));
+                statics_len += static_chunk.len();
+                start = i + 2;
+                continue;
+            }
+
             if i > start {
                 let not_trimmed = &s[start..i];
                 let trimmed = not_trimmed.trim();
