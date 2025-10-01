@@ -47,6 +47,17 @@ macro_rules! report_fmt {
 }
 
 #[macro_export]
+macro_rules! ereportln {
+    ($loc: expr, $($arg: tt)*) => {{
+        use std::io::{self, Write};
+        let s = $crate::report_fmt!($loc, $($arg)*);
+        let mut stderr = io::stderr();
+        stderr.write_all(s.as_bytes()).unwrap();
+        stderr.flush().unwrap();
+    }};
+}
+
+#[macro_export]
 macro_rules! report_panic {
     ($literal: literal) => { $crate::loc::Loc::report(&std::fmt::format(format_args!($literal))) };
     ($loc: expr, $($arg: tt)*) => { $crate::loc::Loc::report(&report_fmt!($loc, $($arg)*)) }

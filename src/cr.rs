@@ -1,7 +1,7 @@
+use crate::cli::Cli;
 use crate::command::{Command, MetadataCache};
 use crate::consts::{CLEAN_TARGET, PHONY_TARGETS};
 use crate::db::{Db, Metadata};
-use crate::flags::Flags;
 use crate::graph::{topological_sort, DefaultEdge, Graph, Levels};
 use crate::parser::comp::{Edge, Phony};
 use crate::parser::{Compiled, Rule};
@@ -66,7 +66,7 @@ impl std::ops::Deref for CommandRunner<'_> {
 
 impl<'a> CommandRunner<'a> {
     fn run_levels(&mut self, levels: &Levels<'a>) {
-        'outer: for level in levels.into_iter() {
+        'outer: for level in levels {
             #[cfg(feature = "dbg")]
             {
                 println!("RUNNING LEVEL: {level:#?}")
@@ -77,7 +77,7 @@ impl<'a> CommandRunner<'a> {
                 self.executed_jobs = 0
             }
 
-            for edge in level.into_iter().filter_map(|t| self.context.edges.get(t)) {
+            for edge in level.iter().filter_map(|t| self.context.edges.get(t)) {
                 self.resolve_and_run(edge);
                 if self.stop.load(Ordering::Relaxed) {
                     break 'outer;
@@ -107,7 +107,7 @@ impl<'a> CommandRunner<'a> {
         context: &'a Compiled,
         graph: Graph<'a>,
         transitive_deps: Graph<'a>,
-        flags: Flags,
+        flags: Cli,
         db_read: Option<Db<'a>>,
         default_edge: DefaultEdge<'a>,
     ) -> Self {
@@ -140,7 +140,7 @@ impl<'a> CommandRunner<'a> {
 
     #[inline]
     fn finish(self) -> Db<'a> {
-        if self.flags.check_is_up_to_date() {
+        if self.flags.check_is_up_to_date {
             match self.not_up_to_date {
                 None => println!("[up to date]"),
                 Some(target) => println!("[{target} is not up to date]"),
@@ -163,7 +163,7 @@ impl<'a> CommandRunner<'a> {
         subgraph.insert(target, Arc::clone(&deps));
         for dep in deps.iter() {
             if let Some(deps_of_dep) = self.graph.get(dep) {
-                _ = subgraph.insert(&dep, Arc::clone(deps_of_dep))
+                _ = subgraph.insert(dep, Arc::clone(deps_of_dep))
             }
         }
         subgraph
@@ -175,14 +175,14 @@ impl<'a> CommandRunner<'a> {
             let subgraph = self.build_subgraph(edge.target);
             topological_sort(&subgraph, self.context)
         };
-        _ = self.run_levels(&levels)
+        self.run_levels(&levels);
     }
 
     pub fn run(
         context: &'a Compiled,
         graph: Graph<'a>,
         transitive_deps: Graph<'a>,
-        flags: Flags,
+        flags: Cli,
         db_read: Option<Db<'a>>,
         default_edge: DefaultEdge<'a>,
     ) -> Db<'a> {
@@ -203,16 +203,16 @@ impl<'a> CommandRunner<'a> {
             }
             return cr.finish();
         } else {
-            topological_sort(&cr.graph, &context)
+            topological_sort(&cr.graph, context)
         };
 
-        _ = cr.run_levels(&levels);
+        cr.run_levels(&levels);
         cr.finish()
     }
 
     #[inline]
     fn execute_command(&self, command: &Command, target: &str) -> io::Result<()> {
-        if self.flags.print_commands() {
+        if self.flags.print_commands {
             let output = command.to_string(&self.flags);
             println!("{output}");
             return Ok(());
@@ -230,7 +230,7 @@ impl<'a> CommandRunner<'a> {
     fn execute_clean(&mut self) {
         println!("[cleaning..]");
         _ = self
-            .execute_command(&self.clean(), CLEAN_TARGET)
+            .execute_command(self.clean(), CLEAN_TARGET)
             .map(|_| self.executed_jobs += 1)
     }
 
@@ -322,12 +322,13 @@ impl<'a> CommandRunner<'a> {
         fn needs_rebuild<'a>(_self: &CommandRunner<'a>, edge: &Edge<'a>, command: &str) -> bool {
             // in `check_is_up_to_date` mode `always_build` is disabled
             // TODO: make that happen in the `Mode` struct
-            if _self.flags.always_build() && !_self.flags.check_is_up_to_date() {
+            if _self.flags.always_build && !_self.flags.check_is_up_to_date {
                 return true;
             }
-            _self.db_read.as_ref().map_or(false, |db| {
-                db.metadata_read(edge.target)
-                    .map_or(false, |md| md.command_hash != hash(command))
+            _self.db_read.as_ref().is_some_and(|db| {
+                db.metadata_read(edge.target).is_some_and(
+                    |md| md.command_hash != hash(command)
+                )
             }) || _self.metadata_cache.needs_rebuild(edge)
         }
 
@@ -336,7 +337,7 @@ impl<'a> CommandRunner<'a> {
             let path: &Path = path.as_ref();
             if let Some(parent) = path.parent() {
                 if !parent.exists() {
-                    _ = fs::create_dir_all(parent)?
+                    fs::create_dir_all(parent)?
                 }
 
                 let mut path_buf = PathBuf::from(parent);
@@ -359,7 +360,7 @@ impl<'a> CommandRunner<'a> {
         };
 
         if needs_rebuild(self, edge, &command) {
-            if self.flags.check_is_up_to_date() {
+            if self.flags.check_is_up_to_date {
                 // self.not_up_to_date = Some(edge.target);
                 return ExecutorFlow::Stop;
             }
@@ -373,7 +374,7 @@ impl<'a> CommandRunner<'a> {
             }
 
             let description = rule.description.as_ref().map(|d| {
-                d.compile(&edge, &self.context.defs)
+                d.compile(edge, &self.context.defs)
             });
 
             let target = Cow::Borrowed(edge.target);
@@ -397,14 +398,16 @@ impl<'a> CommandRunner<'a> {
             }
 
             let should_print = !any_err && (
-                self.flags.verbose() ||
-                self.default_edge.as_ref().map_or(false, |def| {
+                self.flags.verbose ||
+                self.default_edge.as_ref().is_some_and(|def| {
                     def.target == edge.target ||
-                    def.aliases().map_or(false, |aliases| aliases.iter().any(|a| a == edge.target))
+                    def.aliases().is_some_and(
+                        |aliases| aliases.iter().any(|a| a == edge.target)
+                    )
                 })
             );
 
-            if should_print && !self.flags.check_is_up_to_date() {
+            if should_print && !self.flags.check_is_up_to_date {
                 println!("[{target} is already built]", target = edge.target)
             }
         }

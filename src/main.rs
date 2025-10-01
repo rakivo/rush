@@ -1,5 +1,7 @@
 // TODO(#64): Allow escaping dollars
 
+#![allow(clippy::collapsible_if)]
+
 #[macro_use]
 mod loc;
 
@@ -8,8 +10,7 @@ mod consts;
 mod cr;
 mod db;
 mod dbg_unwrap;
-mod edit_distance;
-mod flags;
+mod cli;
 mod graph;
 mod parser;
 mod poll;
@@ -20,7 +21,7 @@ mod ux;
 
 use cr::CommandRunner;
 use db::Db;
-use flags::Flags;
+use cli::Cli;
 use graph::build_dependency_graph;
 use parser::{comp, read_file, Parser};
 
@@ -28,18 +29,12 @@ use std::env;
 use std::process::ExitCode;
 
 use bumpalo::Bump;
-use flager::Parser as FlagParser;
+use clap::Parser as _;
 
 fn main() -> ExitCode {
-    let flag_parser = FlagParser::new();
-    let flags = Flags::new(&flag_parser);
+    let flags = Cli::parse();
 
-    if flags.help() {
-        Flags::print_help();
-        return ExitCode::SUCCESS;
-    }
-
-    if let Some(cd) = flags.change_dir() {
+    if let Some(cd) = &flags.change_dir {
         if let Err(e) = env::set_current_dir(cd) {
             eprintln!("[could not enter {cd:?}]: {e}");
             return ExitCode::FAILURE;
@@ -49,8 +44,8 @@ fn main() -> ExitCode {
     }
 
     let rush_file_path = flags
-        .file_path()
-        .map(|s| s.as_str())
+        .file_path
+        .as_ref()
         .map(|s| s.strip_prefix("./").unwrap_or(s).trim())
         .unwrap_or(Parser::RUSH_FILE_PATH)
         .to_owned();
@@ -60,14 +55,14 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
 
-    let content_ = unsafe { std::str::from_utf8_unchecked(&mmap[..]) };
-    let mut content = String::with_capacity(content_.len());
-    let escaped_indexes = Parser::preprocess_content(content_, &mut content);
+    let s = unsafe { std::str::from_utf8_unchecked(&mmap[..]) };
+    let mut pp = String::with_capacity(s.len());
+    let escaped_indexes = Parser::preprocess_content(s, &mut pp);
 
-    let arena_cap = (content.len() as f64 * 2.5) as _;
+    let arena_cap = (pp.len() as f64 * 2.5) as _;
 
     let arena = Bump::with_capacity(arena_cap);
-    let context = Parser::parse(&arena, &content, &rush_file_path, &escaped_indexes);
+    let context = Parser::parse(&arena, &pp, &rush_file_path, &escaped_indexes);
 
     let context = context.compile(&arena);
 
@@ -76,19 +71,19 @@ fn main() -> ExitCode {
         println!("real size: {size}", size = arena.allocated_bytes())
     }
 
-    if flags.list_jobs() {
+    if flags.list_jobs {
         let edges = context.pretty_print_targets();
         println!("available jobs: [{edges}]");
         return ExitCode::SUCCESS;
     }
 
-    if flags.list_rules() {
+    if flags.list_rules {
         let rules = context.pretty_print_rules();
         println!("available rules: [{rules}]");
         return ExitCode::SUCCESS;
     }
 
-    if flags.list_jobs_and_rules() {
+    if flags.list_jobs_and_rules {
         let edges = context.pretty_print_targets();
         println!("available jobs: [{edges}]");
 
@@ -97,7 +92,7 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    let default_edge = flags.default_target().map(|t| {
+    let default_edge = flags.default_target.as_ref().map(|t| {
         context
             .edges
             .get(t.as_str())
@@ -113,7 +108,7 @@ fn main() -> ExitCode {
     let (graph, default_edge, transitive_deps) =
         build_dependency_graph(&arena, &context, default_edge);
 
-    if flags.print_default_job() {
+    if flags.print_default_job {
         if let Some(comp::Edge { target, .. }) = default_edge.as_ref() {
             println!("default job: {target}");
             return ExitCode::SUCCESS;

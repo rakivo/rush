@@ -1,5 +1,5 @@
+use crate::cli::Cli;
 use crate::consts::CLEAN_TARGET;
-use crate::flags::Flags;
 use crate::parser::comp::{self, Edge};
 use crate::poll::{Poller, Subprocess};
 use crate::types::StrDashMap;
@@ -30,7 +30,7 @@ pub struct Command<'a> {
 // Custom implementation of `Command` to avoid fork + exec overhead
 impl<'a> Command<'a> {
     #[inline]
-    pub fn to_string(&self, flags: &Flags) -> String {
+    pub fn to_string(&self, flags: &Cli) -> String {
         let Command {
             target,
             command,
@@ -38,7 +38,7 @@ impl<'a> Command<'a> {
         } = self;
         let n = description.as_ref().map_or(0, |d| 1 + d.len() + 1) + command.len() + 1;
         let mut buf = String::with_capacity(n);
-        if flags.verbose() {
+        if flags.verbose {
             if let Some(ref d) = description {
                 if *target != CLEAN_TARGET {
                     buf.push('[')
@@ -49,7 +49,7 @@ impl<'a> Command<'a> {
                 }
                 buf.push('\n');
             }
-            buf.push_str(&command)
+            buf.push_str(command)
         } else if let Some(ref d) = description {
             if *target != CLEAN_TARGET {
                 buf.push('[')
@@ -59,7 +59,7 @@ impl<'a> Command<'a> {
                 buf.push(']')
             }
         } else {
-            buf.push_str(&command)
+            buf.push_str(command)
         }
         buf
     }
@@ -230,7 +230,7 @@ impl<'a> MetadataCache<'a> {
         // TODO: do something here if dependent file does not exist
         let mtimes = inputs
             .iter()
-            .map(|path| self.mtime(*path))
+            .map(|path| self.mtime(path))
             .collect::<Result<Vec<_>, _>>();
 
         let Ok(mtimes) = mtimes else {

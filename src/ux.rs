@@ -1,4 +1,4 @@
-use crate::edit_distance::find_best_match_for_name;
+use rustc_edit_distance::find_best_match_for_name;
 use crate::parser::comp::Edge;
 use crate::parser::Rule;
 use crate::types::StrHashMap;

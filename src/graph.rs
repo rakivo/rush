@@ -73,7 +73,7 @@ pub fn build_dependency_graph<'a>(
 
         let mut transitive = Vec::with_capacity(non_system_deps_count * 2);
         for dep in deps.iter().filter(|dep| !is_system_header(dep)) {
-            let deps = collect_deps(&dep, arena, parsed, graph, visited, transitive_deps);
+            let deps = collect_deps(dep, arena, parsed, graph, visited, transitive_deps);
             transitive.extend(deps.iter().copied());
         }
 
@@ -110,19 +110,22 @@ pub fn build_dependency_graph<'a>(
             let edge = compiled
                 .edges
                 .get(target.as_str())
-                .unwrap_or_else(|| util::report_undefined_target(target, Some(loc), &compiled));
+                .unwrap_or_else(|| {
+                    util::report_undefined_target(target, Some(loc), compiled)
+                });
+
             Some(edge)
         } else if graph.is_empty() {
             let edge = compiled.edges.values().next();
             debug_assert!(edge.is_some());
             edge
         } else {
-            let mut reverse_graph = StrHashMap::with_capacity(n);
+            let mut reverse_graph = StrHashMap::<StrHashSet>::with_capacity(n);
             for (node, deps) in graph.iter() {
                 for dep in deps.iter() {
                     reverse_graph
                         .entry(*dep)
-                        .or_insert_with(StrHashSet::default)
+                        .or_default()
                         .insert(node);
                 }
             }
@@ -212,7 +215,7 @@ pub fn topological_sort<'a>(graph: &Graph<'a>, context: &Compiled) -> Levels<'a>
         let mut cycle_path = Vec::with_capacity(32);
         reconstruct_cycle(
             cycle_node,
-            &graph,
+            graph,
             &mut StrHashSet::with_capacity(graph.len()),
             &mut cycle_path,
         );

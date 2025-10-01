@@ -2,12 +2,13 @@ use crate::parser::read_file;
 use crate::types::StrDashMap;
 
 use std::fs;
-use std::io::{self, Write};
+use std::fmt::Display;
 use std::path::Path;
+use std::io::{self, Write};
 
+use memmap2::Mmap;
 use dashmap::mapref::one::Ref;
 use fxhash::FxBuildHasher;
-use memmap2::Mmap;
 
 #[repr(transparent)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
@@ -15,10 +16,9 @@ pub struct Metadata {
     pub command_hash: u64,
 }
 
-impl ToString for Metadata {
-    #[inline(always)]
-    fn to_string(&self) -> String {
-        self.command_hash.to_string()
+impl Display for Metadata {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.command_hash.fmt(f)
     }
 }
 
@@ -85,11 +85,11 @@ impl<'a> Db<'a> {
     pub fn write_finish(&self, cache_file_path: &str) -> io::Result<()> {
         if self.map.is_empty() {
             if fs::exists::<&Path>(cache_file_path.as_ref()).unwrap_or(false) {
-                _ = fs::remove_file(cache_file_path)?
+                fs::remove_file(cache_file_path)?
             }
 
             if fs::exists::<&Path>(Self::RUSH_FILE_NAME.as_ref()).unwrap_or(false) {
-                _ = fs::remove_file(Self::RUSH_FILE_NAME)?
+                fs::remove_file(Self::RUSH_FILE_NAME)?
             }
 
             return Ok(());

@@ -1,9 +1,9 @@
+use crate::cli::Cli;
 use crate::command::Command;
 use crate::consts::syntax::*;
 use crate::consts::{BUILD_DIR_VARIABLE, CLEAN_TARGET, PHONY_TARGETS};
 use crate::db::Db;
 use crate::dbg_unwrap::DbgUnwrap;
-use crate::flags::Flags;
 use crate::loc::Loc;
 use crate::template::Template;
 use crate::types::{StrHashMap, StrHashSet};
@@ -15,6 +15,7 @@ use std::collections::HashSet;
 use std::fs::{self, File};
 use std::hash::{Hash, Hasher};
 use std::mem;
+use std::fmt::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -30,7 +31,7 @@ where
     P: AsRef<Path>,
 {
     let file = File::open(path).ok()?;
-    Some(unsafe { Mmap::map(&file) }.ok()?)
+    unsafe { Mmap::map(&file) }.ok()
 }
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
@@ -63,7 +64,6 @@ pub type Shadows<'a> = Option<Arc<StrHashMap<'a, &'a str>>>;
 pub mod prep {
     use super::*;
 
-    #[repr(packed)]
     #[cfg_attr(feature = "dbg", derive(Debug))]
     pub struct Target<'a> {
         pub loc: Loc<'a>,
@@ -118,7 +118,7 @@ pub mod prep {
         }
 
         #[inline]
-        pub(super) fn into_phony(&mut self, command_: Option<Template<'a>>) -> Phony<'a> {
+        pub(super) fn take_phony(&mut self, command_: Option<Template<'a>>) -> Phony<'a> {
             match &mut self.phony {
                 Phony::NotPhony {
                     rule, inputs, deps, ..
@@ -127,8 +127,8 @@ pub mod prep {
                     if let Some(rule) = rule {
                         aliases.push(*rule)
                     }
-                    aliases.extend(mem::take(inputs).into_iter());
-                    aliases.extend(mem::take(deps).into_iter());
+                    aliases.extend(mem::take(inputs));
+                    aliases.extend(mem::take(deps));
                     Phony::Phony {
                         command: command_,
                         aliases_templates: aliases
@@ -287,123 +287,116 @@ impl<'a> Parsed<'a> {
         } = self;
 
         let defs = defs.compile();
-        let edges = edges
-            .values()
-            .enumerate()
-            .filter_map(|(_, edge)| {
-                let target = arena.alloc_str(
-                    &edge.target_template.compile_prep(&edge, &defs)
-                ) as _;
+        let edges = edges.values().map(|edge| {
+            let target = arena.alloc_str(
+                &edge.target_template.compile_prep(edge, &defs)
+            ) as _;
 
-                let edge = match &edge.phony {
-                    prep::Phony::Phony {
-                        command,
-                        aliases_templates,
-                        aliases,
-                    } => {
-                        if edge.target != CLEAN_TARGET && !phonys.contains(edge.target) {
-                            report_panic! {
-                                edge.loc,
-                                "mark {target} as phony for it to have a command",
-                                target = edge.target
-                            }
-                        }
-
-                        let command = command.as_ref().map(|c| c.compile_prep(edge, &defs));
-
-                        let aliases = aliases_templates
-                            .iter()
-                            .zip(aliases.iter())
-                            .map(|(template, ..)| template.compile_prep(&edge, &defs))
-                            .collect::<Vec<_>>();
-
-                        comp::Edge {
-                            target,
-                            loc: edge.loc,
-                            shadows: edge.shadows.as_ref().map(Arc::clone),
-                            phony: comp::Phony::Phony { command, aliases },
+            let edge = match &edge.phony {
+                prep::Phony::Phony {
+                    command,
+                    aliases_templates,
+                    aliases,
+                } => {
+                    if edge.target != CLEAN_TARGET && !phonys.contains(edge.target) {
+                        report_panic! {
+                            edge.loc,
+                            "mark {target} as phony for it to have a command",
+                            target = edge.target
                         }
                     }
-                    prep::Phony::NotPhony {
-                        rule,
-                        inputs,
-                        inputs_str,
-                        inputs_templates,
-                        deps,
-                        deps_templates,
-                    } => {
-                        let mut inputs_str = String::with_capacity(inputs_str.len() + 10);
-                        let inputs = inputs_templates
-                            .iter()
-                            .zip(inputs.iter())
-                            .map(|(template, ..)| {
-                                let t = template.compile_prep(&edge, &defs);
-                                inputs_str.push_str(&t);
-                                inputs_str.push(' ');
-                                arena.alloc_str(&t) as &_
-                            })
-                            .collect::<Vec<_>>();
 
-                        if !inputs_str.is_empty() {
-                            _ = inputs_str.pop()
-                        }
-                        let inputs_str = arena.alloc_str(&inputs_str) as &_;
+                    let command = command.as_ref().map(|c| c.compile_prep(edge, &defs));
 
-                        let deps = deps_templates
-                            .iter()
-                            .zip(deps.iter())
-                            .map(|(template, ..)| {
-                                let t = template.compile_prep(&edge, &defs);
-                                arena.alloc_str(&t) as _
-                            })
-                            .collect::<Vec<_>>();
+                    let aliases = aliases_templates
+                        .iter()
+                        .zip(aliases.iter())
+                        .map(|(template, ..)| template.compile_prep(edge, &defs))
+                        .collect::<Vec<_>>();
 
-                        let mut edge = comp::Edge {
-                            target,
-                            loc: edge.loc,
-                            shadows: edge.shadows.as_ref().map(Arc::clone),
-                            phony: comp::Phony::NotPhony {
-                                deps,
-                                inputs,
-                                inputs_str,
-                                rule: *rule,
-                                depfile: None,
-                            },
-                        };
-
-                        if let Some(Some(rule)) = edge.rule().map(|rule| rules.get(rule)) {
-                            if let Some(ref depfile_template) = rule.depfile {
-                                let depfile_path = depfile_template.compile(&edge, &defs);
-
-                                let comp::Phony::NotPhony { depfile, .. } = &mut edge.phony else {
-                                    unsafe { std::hint::unreachable_unchecked() }
-                                };
-
-                                *depfile = Some(depfile_path)
-                            }
-                        }
-
-                        edge
+                    comp::Edge {
+                        target,
+                        loc: edge.loc,
+                        shadows: edge.shadows.as_ref().map(Arc::clone),
+                        phony: comp::Phony::Phony { command, aliases },
                     }
-                };
+                }
+                prep::Phony::NotPhony {
+                    rule,
+                    inputs,
+                    inputs_str,
+                    inputs_templates,
+                    deps,
+                    deps_templates,
+                } => {
+                    let mut inputs_str = String::with_capacity(inputs_str.len() + 10);
+                    let inputs = inputs_templates
+                        .iter()
+                        .zip(inputs.iter())
+                        .map(|(template, ..)| {
+                            let t = template.compile_prep(edge, &defs);
+                            inputs_str.push_str(&t);
+                            inputs_str.push(' ');
+                            arena.alloc_str(&t) as &_
+                        })
+                        .collect::<Vec<_>>();
 
-                Some((target, edge))
-            })
-            .collect::<StrHashMap<_>>();
+                    if !inputs_str.is_empty() {
+                        _ = inputs_str.pop()
+                    }
+                    let inputs_str = arena.alloc_str(&inputs_str) as &_;
+
+                    let deps = deps_templates
+                        .iter()
+                        .zip(deps.iter())
+                        .map(|(template, ..)| {
+                            let t = template.compile_prep(edge, &defs);
+                            arena.alloc_str(&t) as _
+                        })
+                        .collect::<Vec<_>>();
+
+                    let mut edge = comp::Edge {
+                        target,
+                        loc: edge.loc,
+                        shadows: edge.shadows.as_ref().map(Arc::clone),
+                        phony: comp::Phony::NotPhony {
+                            deps,
+                            inputs,
+                            inputs_str,
+                            rule: *rule,
+                            depfile: None,
+                        },
+                    };
+
+                    if let Some(Some(rule)) = edge.rule().map(|rule| rules.get(rule)) {
+                        if let Some(ref depfile_template) = rule.depfile {
+                            let depfile_path = depfile_template.compile(&edge, &defs);
+
+                            let comp::Phony::NotPhony { depfile, .. } = &mut edge.phony else {
+                                unsafe { std::hint::unreachable_unchecked() }
+                            };
+
+                            *depfile = Some(depfile_path)
+                        }
+                    }
+
+                    edge
+                }
+            };
+
+            (target, edge)
+        }).collect::<StrHashMap<_>>();
 
         edges.values().for_each(|edge| {
-            if let comp::Phony::NotPhony { rule, .. } = &edge.phony {
-                if let Some(ref rule) = rule {
-                    if !rules.contains_key(rule) {
-                        let mut msg = report_fmt!(edge.loc, "undefined rule: {rule}");
+            if let comp::Phony::NotPhony { rule: Some(ref rule), .. } = &edge.phony {
+                if !rules.contains_key(rule) {
+                    let mut msg = report_fmt!(edge.loc, "undefined rule: {rule}");
 
-                        if let Some(compiled) = did_you_mean_compiled(rule, &edges, &rules) {
-                            let msg_ = format!("\nnote: did you mean: {compiled}?");
-                            msg.push_str(&msg_)
-                        }
-
-                        report_panic!("{msg}")
+                    if let Some(compiled) = did_you_mean_compiled(rule, &edges, &rules) {
+                        _ = write!(&mut msg, "\nnote: did you mean: {compiled}?");
                     }
+
+                    report_panic!("{msg}")
                 }
             }
         });
@@ -493,7 +486,7 @@ pub struct Compiled<'a> {
 }
 
 impl Compiled<'_> {
-    pub fn generate_clean_edge(&self, flags: &Flags) -> Command<'_> {
+    pub fn generate_clean_edge(&self, flags: &Cli) -> Command<'_> {
         let mut targets = self
             .edges
             .values()
@@ -516,10 +509,10 @@ impl Compiled<'_> {
         }
 
         let count = targets.len().to_string();
+        let targets_str = targets.join(" ");
+        let command = format!("rm -f {targets_str}");
 
-        let (command, description) = if flags.verbose() {
-            let targets_str = targets.join(" ");
-            let command = format!("rm -f {targets_str}");
+        let description = if flags.verbose {
             let mut description = String::with_capacity(
                 (1 + "deleted".len() + targets.len() + 1 + 1) * 24
                     + 1
@@ -528,20 +521,15 @@ impl Compiled<'_> {
                     + "files".len()
                     + 1,
             );
-            for target in targets.iter() {
-                description.push_str("[cleaned ");
-                description.push_str(target);
-                description.push_str("]\n");
+
+            for target in &targets {
+                _ = writeln!(description, "[cleaned {target}]");
             }
-            description.push_str("[cleaned ");
-            description.push_str(&count);
-            description.push_str(" files]");
-            (command, description)
+
+            _ = write!(description, "[cleaned {count} files]");
+            description
         } else {
-            let targets_str = targets.join(" ");
-            let command = format!("rm -f {targets_str}");
-            let description = format!("[cleaned {count} files]");
-            (command, description)
+            format!("[cleaned {count} files]")
         };
 
         Command {
@@ -568,7 +556,6 @@ impl Compiled<'_> {
     }
 }
 
-#[repr(packed)]
 #[derive(Copy, Clone)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 struct DepfilePath<'a> {
@@ -576,7 +563,6 @@ struct DepfilePath<'a> {
     path: &'a str,
 }
 
-#[repr(packed)]
 #[derive(Copy, Clone)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
 struct Description<'a> {
@@ -620,32 +606,26 @@ impl<'a> Parser<'a> {
     #[inline]
     #[cfg_attr(feature = "dbg", track_caller)]
     fn finish_rule(&self) {
-        match &self.context {
-            Context::Rule {
-                loc,
-                name,
-                already_inserted,
-                ..
-            } => {
-                if !already_inserted {
-                    report_panic!(loc, "rule {name} without a command")
-                }
+        if let Context::Rule {
+            loc,
+            name,
+            already_inserted,
+            ..
+        } = &self.context {
+            if !already_inserted {
+                report_panic!(loc, "rule {name} without a command")
             }
-            _ => {}
-        };
+        }
     }
 
     #[inline]
     fn finish_edge(&mut self) {
-        match &mut self.context {
-            Context::Job { target, shadows } => {
-                let edge = self.parsed.edge_mut(target);
-                if let Some(shadows) = shadows.take() {
-                    edge.shadows.replace(Arc::new(shadows));
-                }
+        if let Context::Job { target, shadows } = &mut self.context {
+            let edge = self.parsed.edge_mut(target);
+            if let Some(shadows) = shadows.take() {
+                edge.shadows.replace(Arc::new(shadows));
             }
-            _ => {}
-        };
+        }
     }
 
     fn parse_line(&mut self, not_trimmed: &'a str, trimmed: &'a str) {
@@ -654,11 +634,11 @@ impl<'a> Parser<'a> {
                 || not_trimmed
                     .as_bytes()
                     .first()
-                    .map_or(false, |c| c.is_ascii_alphanumeric()))
+                    .is_some_and(|c| c.is_ascii_alphanumeric()))
                 || not_trimmed
                     .find(|c: char| c.is_ascii_whitespace())
                     .map(|first_space| (first_space, &not_trimmed[..first_space]))
-                    .map_or(false, |(_, first_token)| {
+                    .is_some_and(|(_, first_token)| {
                         matches!(first_token, BUILD | PHONY | RULE)
                     })
             {
@@ -717,7 +697,7 @@ impl<'a> Parser<'a> {
                     let command_loc = get_loc();
                     let command = Template::new(command_, command_loc);
                     let edge = self.parsed.edge_mut(target);
-                    edge.phony = edge.into_phony(Some(command));
+                    edge.phony = edge.take_phony(Some(command));
                 }
                 name => {
                     let def = parse_shadow();
@@ -799,7 +779,7 @@ impl<'a> Parser<'a> {
                     }
                 }
                 _ => {
-                    if line.chars().next() != Some(COMMENT) {
+                    if !line.starts_with(COMMENT) {
                         report_panic! {
                             get_loc(),
                             "undefined property: `{first_token}`, existing properties are: `command`, `description`"
@@ -832,7 +812,7 @@ impl<'a> Parser<'a> {
                         let ptr = string.as_ptr();
 
                         let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
-                        let content = unsafe { std::str::from_utf8_unchecked(&slice) };
+                        let content = unsafe { std::str::from_utf8_unchecked(slice) };
 
                         // this memory belongs to arena -> it is going to be deallocated
                         mem::forget(string);
@@ -840,7 +820,7 @@ impl<'a> Parser<'a> {
                         let old_file_path = self.file_path;
                         self.file_path = path;
 
-                        _ = self.parse_lines(content, &escaped_indexes);
+                        self.parse_lines(content, &escaped_indexes);
 
                         self.file_path = old_file_path
                     }
@@ -855,7 +835,7 @@ impl<'a> Parser<'a> {
                         }
                         self.parsed.phonys.insert(phony);
                         if let Some(edge) = self.parsed.edges.get_mut(phony) {
-                            edge.phony = edge.into_phony(None)
+                            edge.phony = edge.take_phony(None)
                         }
                     }
                     DEFAULT => {
@@ -1023,7 +1003,7 @@ impl<'a> Parser<'a> {
             self.cursor += 1;
             if escaped_indexes
                 .get(escaped_index)
-                .map_or(false, |(row, _)| *row + 1 <= self.cursor)
+                .is_some_and(|(row, _)| *row < self.cursor)
             {
                 self.cursor += escaped_indexes[escaped_index].1;
                 escaped_index += 1
@@ -1065,14 +1045,13 @@ impl<'a> Parser<'a> {
                                 },
                             },
                         )]
-                        .into_iter(),
                     );
                     _ = edges.try_reserve(32);
                     edges
                 },
                 rules: StrHashMap::with_capacity(32),
                 phonys: {
-                    let mut phonys = StrHashSet::from_iter(PHONY_TARGETS.into_iter().cloned());
+                    let mut phonys = StrHashSet::from_iter(PHONY_TARGETS.iter().cloned());
                     _ = phonys.try_reserve(32);
                     phonys
                 },

@@ -1,6 +1,6 @@
+use crate::cli::Cli;
 use crate::command::Command;
 use crate::dbg_unwrap::DbgUnwrap;
-use crate::flags::Flags;
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -29,7 +29,7 @@ pub type SubprocessMap = DashMap<i32, Arc<Subprocess>>;
 
 #[cfg_attr(feature = "dbg", derive(Debug))]
 pub struct Poller {
-    pub flags: Arc<Flags>,
+    pub flags: Arc<Cli>,
     pub stop: Arc<AtomicBool>,
     pub jobs_done: Arc<AtomicUsize>,
     pub active_fds: Arc<AtomicUsize>,
@@ -40,7 +40,7 @@ pub struct Poller {
 impl Poller {
     #[inline]
     pub fn spawn(
-        flags: Arc<Flags>,
+        flags: Arc<Cli>,
         stop: Arc<AtomicBool>,
         edges_done: Arc<AtomicUsize>,
         active_fds: Arc<AtomicUsize>,
@@ -90,11 +90,11 @@ impl Poller {
         let mut handled_pids = HashSet::new();
         let mut printed_pids = HashSet::new();
 
-        let print_edge = |target: &str, command: &Box<str>, description: &Option<Box<str>>| {
-            if !self.flags.quiet() {
+        let print_edge = |target: &str, command: &str, description: &Option<Box<str>>| {
+            if !self.flags.quiet {
                 let output = Command {
                     target: Cow::Borrowed(target),
-                    command: Cow::Borrowed(&command),
+                    command: Cow::Borrowed(command),
                     description: description.as_deref().map(Into::into),
                 }
                 .to_string(&self.flags);
@@ -117,7 +117,7 @@ impl Poller {
             }
 
             if let Err(e) = poll(&mut poll_fds, 1000u16) {
-                _ = println!("poll failed: {e}");
+                println!("poll failed: {e}");
                 break;
             }
 
@@ -170,19 +170,17 @@ impl Poller {
                                 _ = printed_pids.insert(*pid)
                             }
 
-                            if self.flags.rush() && !handled_pids.contains(pid) {
+                            if self.flags.rush && !handled_pids.contains(pid) {
                                 self.edge_is_done()
                             }
 
                             if !handled_pids.contains(pid) {
-                                if !self.flags.rush() {
+                                if !self.flags.rush {
                                     // wait on process only if `-k` flag is specified to achieve maximum speed
                                     let exit_code = Self::get_process_exit_code(*pid);
-                                    if exit_code.map_or(false, |code| code != 0) {
+                                    if exit_code.is_some_and(|code| code != 0) {
                                         edges_failed += 1;
-                                        if edges_failed
-                                            >= *self.flags.max_fail_count().unwrap_or(&1)
-                                        {
+                                        if edges_failed >= self.flags.max_fail_count {
                                             self.stop.store(true, Ordering::Relaxed);
                                             break 'outer;
                                         }

@@ -1,4 +1,12 @@
+*
+
+!**/
+!**/*.md
+!**/*.toml
+!**/*.rs
+!**/*.rok
+!**/*.lang
+
 target
-*.rush
-*.ninja
-Cargo.lock
+
+

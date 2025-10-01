@@ -52,7 +52,7 @@ where
     T: std::fmt::Display,
 {
     let mut buf = String::with_capacity(256);
-    slice.first().map(|s| buf.push_str(&s.to_string()));
+    if let Some(s) = slice.first() { buf.push_str(&s.to_string()) }
     slice.iter().skip(1).for_each(|s| {
         buf.push_str(sep);
         buf.push_str(&s.to_string())
@@ -75,7 +75,7 @@ pub fn unreachable() -> ! {
 
 #[inline]
 #[cfg_attr(feature = "dbg", track_caller)]
-pub fn read_file_into_arena<'bump, P>(arena: &'bump Bump, path: P) -> io::Result<&'bump mut [u8]>
+pub fn read_file_into_arena<P>(arena: &Bump, path: P) -> io::Result<&mut [u8]>
 where
     P: AsRef<Path>,
 {
@@ -89,15 +89,14 @@ where
 
 #[inline]
 #[cfg_attr(feature = "dbg", track_caller)]
-pub fn read_file_into_arena_str<'bump, P>(arena: &'bump Bump, path: P) -> io::Result<&'bump str>
+pub fn read_file_into_arena_str<P>(arena: &Bump, path: P) -> io::Result<&str>
 where
     P: AsRef<Path>,
 {
     match read_file_into_arena(arena, path) {
         Ok(bytes) => std::str::from_utf8(&*bytes).map_err(|e| {
             let kind = ErrorKind::InvalidData;
-            let err = Error::new(kind, e);
-            err
+            Error::new(kind, e)
         }),
         Err(e) => Err(e),
     }

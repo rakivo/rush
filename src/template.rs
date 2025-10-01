@@ -36,13 +36,13 @@ impl<'a> Template<'a> {
         fn is_joined_static(s: &str) -> bool {
             s.as_bytes()
                 .first()
-                .map_or(false, |b| !b.is_ascii_whitespace())
+                .is_some_and(|b| !b.is_ascii_whitespace())
         }
 
         while let Some(i) = s[start..].find('$') {
             let i = start + i;
             if i > start {
-                let ref not_trimmed = s[start..i];
+                let not_trimmed = &s[start..i];
                 let trimmed = not_trimmed.trim();
                 if !trimmed.is_empty() {
                     let chunk = if is_joined_static(not_trimmed) {
@@ -73,8 +73,7 @@ impl<'a> Template<'a> {
                 if i == 0 {
                     return false;
                 }
-                !s[i - 1..placeholder_end]
-                    .as_bytes()
+                !s.as_bytes()[i - 1..placeholder_end]
                     .iter()
                     .any(|b| b.is_ascii_whitespace())
             };
@@ -96,7 +95,7 @@ impl<'a> Template<'a> {
 
                 chunks.push(chunk);
             } else {
-                report_panic!(loc, "empty placeholder")
+                ereportln!(loc, "empty placeholder")
             }
 
             start = placeholder_end;
@@ -106,7 +105,7 @@ impl<'a> Template<'a> {
         }
 
         if start < s.len() {
-            let ref not_trimmed = s[start..];
+            let not_trimmed = &s[start..];
             let trimmed = not_trimmed.trim();
             if !trimmed.is_empty() {
                 let chunk = if is_joined_static(not_trimmed) {
@@ -140,10 +139,10 @@ impl<'a> Template<'a> {
         }) {
             if !shadows
                 .as_ref()
-                .map_or(false, |s| s.contains_key(placeholder))
+                .is_some_and(|s| s.contains_key(placeholder))
                 && !defs.contains_key(placeholder)
             {
-                eprintln!("{}", report_fmt!(self.loc, "warning: undefined variable: {placeholder}"));
+                ereportln!(self.loc, "warning: undefined variable: {placeholder}");
                 any_err = true;
             }
         }
@@ -182,11 +181,11 @@ impl<'a> Template<'a> {
                         "out" => target_str,
                         _ => shadows
                             .as_ref()
-                            .and_then(|shadows| shadows.get(placeholder).map(|shadow| *shadow))
+                            .and_then(|shadows| shadows.get(placeholder).copied())
                             .or_else(|| defs.get(placeholder).map(|def| def.0.as_str()))
                             .unwrap_or_else(|| {
-                                eprintln!("{}", report_fmt!(self.loc, "warning: undefined variable: {placeholder}"));
-                                "" // Use empty string as fallback
+                                ereportln!(self.loc, "warning: undefined variable: {placeholder}");
+                                "" // use empty string as fallback
                             }),
                     };
 
@@ -206,11 +205,11 @@ impl<'a> Template<'a> {
                         "out" => target_str,
                         _ => shadows
                             .as_ref()
-                            .and_then(|shadows| shadows.get(placeholder).map(|shadow| *shadow))
+                            .and_then(|shadows| shadows.get(placeholder).copied())
                             .or_else(|| defs.get(placeholder).map(|def| def.0.as_str()))
                             .unwrap_or_else(|| {
-                                eprintln!("{}", report_fmt!(self.loc, "warning: undefined variable: {placeholder}"));
-                                "" // Use empty string as fallback
+                                ereportln!(self.loc, "warning: undefined variable: {placeholder}");
+                                "" // use empty string as fallback
                             }),
                     };
                     ret.push_str(compiled);
@@ -267,7 +266,11 @@ impl<'a> Template<'a> {
                             .get(placeholder)
                             .map(|def| def.0.as_str())
                             .unwrap_or_else(|| {
-                                report_panic!(self.loc, "undefined variable: {placeholder}")
+                                ereportln!{
+                                    self.loc,
+                                    "undefined variable: {placeholder}"
+                                };
+                                "" // use empty string as fallback
                             }),
                     };
 
@@ -286,7 +289,7 @@ impl<'a> Template<'a> {
                         .map(|def| def.0.as_str())
                         .unwrap_or_else(|| {
                             report_panic!(self.loc, "undefined variable: {placeholder}")
-                        }),
+                        })
                 }),
             }
         }
@@ -301,7 +304,7 @@ impl<'a> Template<'a> {
         compiled_defs: &mut comp::Defs<'b>,
     ) {
         if compiling.contains(name) {
-            report_panic! {
+            report_panic!{
                 def.0.loc,
                 "circular reference detected involving {name}"
             }
@@ -329,7 +332,7 @@ impl<'a> Template<'a> {
                     }
 
                     if compiling.contains(placeholder) {
-                        report_panic! {
+                        report_panic!{
                             def.0.loc,
                             "circular reference detected involving {placeholder}"
                         }
@@ -348,17 +351,20 @@ impl<'a> Template<'a> {
                             }
                             compiled_defs.get(placeholder).unwrap_dbg().0.as_str()
                         }
-                        None => report_panic! {
-                            def.0.loc,
-                            "undefined variable: {placeholder}"
-                        },
+                        None => {
+                            ereportln!{
+                                def.0.loc,
+                                "undefined variable: {placeholder}"
+                            };
+                            "" // use empty string as fallback
+                        }
                     };
 
                     ret.push_str(compiled)
                 }
                 TemplateChunk::JoinedPlaceholder(placeholder) => {
                     if compiling.contains(placeholder) {
-                        report_panic! {
+                        report_panic!{
                             def.0.loc,
                             "circular reference detected involving {placeholder}"
                         }
@@ -377,10 +383,13 @@ impl<'a> Template<'a> {
                             }
                             compiled_defs.get(placeholder).unwrap_dbg().0.as_str()
                         }
-                        None => report_panic! {
-                            def.0.loc,
-                            "undefined variable: {placeholder}"
-                        },
+                        None => {
+                            ereportln!{
+                                def.0.loc,
+                                "undefined variable: {placeholder}"
+                            };
+                            "" // use empty string as fallback
+                        }
                     };
 
                     ret.push_str(compiled)

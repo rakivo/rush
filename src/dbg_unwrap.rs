@@ -6,8 +6,7 @@ impl<T> DbgUnwrap<T> for std::option::Option<T> {
     #[track_caller]
     #[inline(always)]
     fn unwrap_dbg(self) -> T {
-        #[cfg(feature = "dbg")]
-        {
+        #[cfg(feature = "dbg")] {
             self.unwrap()
         }
         #[cfg(not(feature = "dbg"))]
@@ -24,8 +23,7 @@ where
     #[track_caller]
     #[inline(always)]
     fn unwrap_dbg(self) -> T {
-        #[cfg(feature = "dbg")]
-        {
+        #[cfg(feature = "dbg")] {
             self.unwrap()
         }
         #[cfg(not(feature = "dbg"))]
