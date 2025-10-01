@@ -21,17 +21,12 @@ memmap2             = { version = "0.9.5",   default-features = false }
 indexmap            = { version = "2.7.1",   default-features = false }
 bumpalo             = { version = "3.17.0",  default-features = false }
 rustc-edit-distance = { version = "0.1.0",   default-features = false }
+fxhash              = { version = "0.2.1",   default-features = false }
 tramer              = { version = "0.1.0",   default-features = false, optional = true }
 crossbeam-channel   = { version = "0.5.14",  default-features = false, features = ["std"] }
 nix                 = { version = "0.29.0",  default-features = false, features = ["poll"] }
 dashmap             = { version = "6.1.0",   default-features = false, features = ["inline"] }
 clap                = { version = "4.5",     default-features = false, features = ["std", "help", "derive"] }
-
-[dependencies.fxhash]
-git = "https://github.com/rakivo/fxhash"
-rev = "2b61551"
-features = []
-default-features = false
 
 [profile.dev]
 opt-level = 0

@@ -162,8 +162,8 @@ pub mod prep {
     impl<'a> Defs<'a> {
         #[inline]
         pub fn compile(&self) -> comp::Defs<'a> {
-            let mut compiled_defs = comp::Defs::new();
-            let mut compiling = StrHashSet::with_capacity(128);
+            let mut compiled_defs = comp::Defs::default();
+            let mut compiling = StrHashSet::with_capacity_and_hasher(128, FxBuildHasher::new());
             for (name, def) in self.0.iter() {
                 Template::compile_def_recursive(name, def, self, &mut compiling, &mut compiled_defs)
             }
@@ -708,7 +708,8 @@ impl<'a> Parser<'a> {
                             shadows.insert(name, def);
                         }
                         None => {
-                            let mut _shadows = StrHashMap::with_capacity(4);
+                            let mut _shadows =
+                                StrHashMap::with_capacity_and_hasher(4, FxBuildHasher::new());
                             _shadows.insert(name, def);
                             shadows.replace(_shadows);
                         }
@@ -1027,7 +1028,10 @@ impl<'a> Parser<'a> {
             file_path,
             parsed: Parsed {
                 default_target: None,
-                defs: prep::Defs(StrHashMap::with_capacity(32)),
+                defs: prep::Defs(StrHashMap::with_capacity_and_hasher(
+                    32,
+                    FxBuildHasher::new(),
+                )),
                 edges: {
                     let mut edges = StrHashMap::from_iter([(
                         CLEAN_TARGET,
@@ -1046,7 +1050,7 @@ impl<'a> Parser<'a> {
                     _ = edges.try_reserve(32);
                     edges
                 },
-                rules: StrHashMap::with_capacity(32),
+                rules: StrHashMap::with_capacity_and_hasher(32, FxBuildHasher::new()),
                 phonys: {
                     let mut phonys = StrHashSet::from_iter(PHONY_TARGETS.iter().cloned());
                     _ = phonys.try_reserve(32);

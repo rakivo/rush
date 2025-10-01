@@ -21,6 +21,7 @@ use std::thread;
 use std::time::Duration;
 
 use dashmap::DashMap;
+use fxhash::FxBuildHasher;
 
 #[derive(PartialEq)]
 #[cfg_attr(feature = "dbg", derive(Debug))]
@@ -134,7 +135,7 @@ impl<'a> CommandRunner<'a> {
             db_write: Db::write(),
             clean: OnceLock::new(),
             metadata_cache: MetadataCache::new(n),
-            executed_edges: StrHashSet::with_capacity(n),
+            executed_edges: StrHashSet::with_capacity_and_hasher(n, FxBuildHasher::new()),
         }
     }
 
@@ -158,7 +159,7 @@ impl<'a> CommandRunner<'a> {
             .get(target)
             .cloned()
             .unwrap_or_default();
-        let mut subgraph = Graph::with_capacity(deps.len() + 1);
+        let mut subgraph = Graph::with_capacity_and_hasher(deps.len() + 1, FxBuildHasher::new());
 
         subgraph.insert(target, Arc::clone(&deps));
         for dep in deps.iter() {

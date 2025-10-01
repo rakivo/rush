@@ -8,6 +8,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use bumpalo::Bump;
+use fxhash::FxBuildHasher;
 #[cfg(feature = "dbg")]
 use tramer::tramer;
 
@@ -88,9 +89,9 @@ pub fn build_dependency_graph<'a>(
     }
 
     let n = compiled.edges.len();
-    let mut graph = Graph::with_capacity(n);
-    let mut visited = StrHashSet::with_capacity(n);
-    let mut transitive_deps = Graph::with_capacity(n);
+    let mut graph = Graph::with_capacity_and_hasher(n, FxBuildHasher::new());
+    let mut visited = StrHashSet::with_capacity_and_hasher(n, FxBuildHasher::new());
+    let mut transitive_deps = Graph::with_capacity_and_hasher(n, FxBuildHasher::new());
 
     for target in compiled.edges.keys() {
         collect_deps(
@@ -116,7 +117,8 @@ pub fn build_dependency_graph<'a>(
             debug_assert!(edge.is_some());
             edge
         } else {
-            let mut reverse_graph = StrHashMap::<StrHashSet>::with_capacity(n);
+            let mut reverse_graph =
+                StrHashMap::<StrHashSet>::with_capacity_and_hasher(n, FxBuildHasher::new());
             for (node, deps) in graph.iter() {
                 for dep in deps.iter() {
                     reverse_graph.entry(*dep).or_default().insert(node);
@@ -139,8 +141,8 @@ pub fn build_dependency_graph<'a>(
 
 pub fn topological_sort<'a>(graph: &Graph<'a>, context: &Compiled) -> Levels<'a> {
     let mut levels = Vec::with_capacity(8);
-    let mut parent = StrHashMap::with_capacity(graph.len());
-    let mut in_degree = StrHashMap::with_capacity(graph.len());
+    let mut parent = StrHashMap::with_capacity_and_hasher(graph.len(), FxBuildHasher::new());
+    let mut in_degree = StrHashMap::with_capacity_and_hasher(graph.len(), FxBuildHasher::new());
 
     for (node, deps) in graph.iter() {
         in_degree.entry(node).or_insert(0);
@@ -209,7 +211,7 @@ pub fn topological_sort<'a>(graph: &Graph<'a>, context: &Compiled) -> Levels<'a>
         reconstruct_cycle(
             cycle_node,
             graph,
-            &mut StrHashSet::with_capacity(graph.len()),
+            &mut StrHashSet::with_capacity_and_hasher(graph.len(), FxBuildHasher::new()),
             &mut cycle_path,
         );
 

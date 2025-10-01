@@ -65,7 +65,8 @@ where
 #[cold]
 #[cfg_attr(feature = "dbg", track_caller)]
 pub fn unreachable() -> ! {
-    #[cfg(feature = "dbg")] {
+    #[cfg(feature = "dbg")]
+    {
         unreachable!()
     }
     #[cfg(not(feature = "dbg"))]
