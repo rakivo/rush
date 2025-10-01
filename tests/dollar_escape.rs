@@ -57,7 +57,7 @@ build hello: echo
         );
 
         let out = run_rush(file_name);
-        _ = remove_rush(file_name);
+        remove_rush(file_name);
 
         assert!(out.status.success());
 
