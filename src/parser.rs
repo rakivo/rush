@@ -687,7 +687,7 @@ impl<'a> Parser<'a> {
             prep::Def(Template::new(parse_shadow(), get_loc()))
         };
 
-        // TODO: we should move context here and this match should return another updated context
+        // TODO(#67): we should move context here and this match should return another updated context
         match &mut self.context {
             Context::Job {
                 target, shadows, ..
@@ -800,7 +800,7 @@ impl<'a> Parser<'a> {
                             },
                         };
 
-                        // TODO: preprocess allocated string in-place, without additional allocation
+                        // TODO: preprocess allocated string in-place, without additional allocation?
                         let buf = self.arena.alloc_slice_fill_default(content.len());
 
                         let mut string =
@@ -1065,3 +1065,4 @@ impl<'a> Parser<'a> {
         parser.parsed
     }
 }
+     
