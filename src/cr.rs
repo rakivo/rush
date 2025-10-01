@@ -320,8 +320,6 @@ impl<'a> CommandRunner<'a> {
 
         #[inline]
         fn needs_rebuild<'a>(_self: &CommandRunner<'a>, edge: &Edge<'a>, command: &str) -> bool {
-            // in `check_is_up_to_date` mode `always_build` is disabled
-            // TODO: make that happen in the `Mode` struct
             if _self.flags.always_build && !_self.flags.check_is_up_to_date {
                 return true;
             }
@@ -415,7 +413,6 @@ impl<'a> CommandRunner<'a> {
     }
 
     fn resolve_and_run(&mut self, edge: &'a Edge<'a>) {
-        // TODO: reserve total amount of edges here
         let mut stack = vec![edge];
         while let Some(edge) = stack.pop() {
             if self.executed_edges.contains(edge.target) {
