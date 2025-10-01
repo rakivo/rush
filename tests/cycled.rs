@@ -1,6 +1,6 @@
+use std::fs::{self, File};
 use std::io::Write;
 use std::path::PathBuf;
-use std::fs::{self, File};
 use std::process::{Command, Output};
 
 const MANIFEST_PATH: &str = env!("CARGO_MANIFEST_DIR");
@@ -14,7 +14,7 @@ fn create_rush_file(name: &str, content: &str) {
 
     let mut file = match File::create(&path_buf) {
         Ok(ok) => ok,
-        Err(e) => panic!("could not create {path}: {e}")
+        Err(e) => panic!("could not create {path}: {e}"),
     };
 
     if let Err(e) = file.write_all(content.as_bytes()) {
@@ -46,22 +46,23 @@ mod tests {
     fn cycled() {
         let file_name = "cycled";
 
-        create_rush_file(file_name, r#"rule echo
+        create_rush_file(
+            file_name,
+            r#"rule echo
   command = echo "hello $in"
 
 build hello: echo hello
-build all: hello"#);
+build all: hello"#,
+        );
 
         let out = run_rush(file_name);
         _ = remove_rush(file_name);
 
         assert!(!out.status.success());
 
-        let stderr = unsafe {
-            std::str::from_utf8_unchecked(&out.stderr)
-        };
+        let stderr = unsafe { std::str::from_utf8_unchecked(&out.stderr) };
 
-        assert!{
+        assert! {
             stderr.contains(r#"cycled.rush:4: edge "hello" depends on itself"#)
         }
     }
@@ -70,27 +71,28 @@ build all: hello"#);
     fn cycled_path() {
         let file_name = "cycled_path";
 
-        create_rush_file(file_name, r#"rule echo
+        create_rush_file(
+            file_name,
+            r#"rule echo
   command = echo "Building $out"
 
 build A: echo B
 build B: echo C
 build C: echo A
 
-default A"#);
+default A"#,
+        );
 
         let out = run_rush(file_name);
         _ = remove_rush(file_name);
 
         assert!(!out.status.success());
 
-        let stderr = unsafe {
-            std::str::from_utf8_unchecked(&out.stderr)
-        };
+        let stderr = unsafe { std::str::from_utf8_unchecked(&out.stderr) };
 
-        assert!{
+        assert! {
             stderr.contains(r#"cycled_path.rush:4: cycle detected: A -> B -> C -> A
-note: edge "A" is causing the cycle"#)
+        note: edge "A" is causing the cycle"#)
         }
     }
 }

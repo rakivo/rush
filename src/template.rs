@@ -140,9 +140,11 @@ impl<'a> Template<'a> {
         let mut any_err = false;
 
         for placeholder in self.chunks.iter().filter_map(|c| match c {
-            TemplateChunk::Placeholder(p) |
-            TemplateChunk::JoinedPlaceholder(p)
-                if !Self::CONSTANT_PLACEHOLDERS.contains(p) => Some(p),
+            TemplateChunk::Placeholder(p) | TemplateChunk::JoinedPlaceholder(p)
+                if !Self::CONSTANT_PLACEHOLDERS.contains(p) =>
+            {
+                Some(p)
+            }
 
             _ => None,
         }) {
@@ -275,7 +277,7 @@ impl<'a> Template<'a> {
                             .get(placeholder)
                             .map(|def| def.0.as_str())
                             .unwrap_or_else(|| {
-                                ereportln!{
+                                ereportln! {
                                     self.loc,
                                     "undefined variable: {placeholder}"
                                 };
@@ -298,7 +300,7 @@ impl<'a> Template<'a> {
                         .map(|def| def.0.as_str())
                         .unwrap_or_else(|| {
                             report_panic!(self.loc, "undefined variable: {placeholder}")
-                        })
+                        }),
                 }),
             }
         }
@@ -313,7 +315,7 @@ impl<'a> Template<'a> {
         compiled_defs: &mut comp::Defs<'b>,
     ) {
         if compiling.contains(name) {
-            report_panic!{
+            report_panic! {
                 def.0.loc,
                 "circular reference detected involving {name}"
             }
@@ -341,7 +343,7 @@ impl<'a> Template<'a> {
                     }
 
                     if compiling.contains(placeholder) {
-                        report_panic!{
+                        report_panic! {
                             def.0.loc,
                             "circular reference detected involving {placeholder}"
                         }
@@ -361,7 +363,7 @@ impl<'a> Template<'a> {
                             compiled_defs.get(placeholder).unwrap_dbg().0.as_str()
                         }
                         None => {
-                            ereportln!{
+                            ereportln! {
                                 def.0.loc,
                                 "undefined variable: {placeholder}"
                             };
@@ -373,7 +375,7 @@ impl<'a> Template<'a> {
                 }
                 TemplateChunk::JoinedPlaceholder(placeholder) => {
                     if compiling.contains(placeholder) {
-                        report_panic!{
+                        report_panic! {
                             def.0.loc,
                             "circular reference detected involving {placeholder}"
                         }
@@ -393,7 +395,7 @@ impl<'a> Template<'a> {
                             compiled_defs.get(placeholder).unwrap_dbg().0.as_str()
                         }
                         None => {
-                            ereportln!{
+                            ereportln! {
                                 def.0.loc,
                                 "undefined variable: {placeholder}"
                             };

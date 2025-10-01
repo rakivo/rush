@@ -1,15 +1,14 @@
-
 #![allow(clippy::collapsible_if)]
 
 #[macro_use]
 mod loc;
 
+mod cli;
 mod command;
 mod consts;
 mod cr;
 mod db;
 mod dbg_unwrap;
-mod cli;
 mod graph;
 mod parser;
 mod poll;
@@ -18,9 +17,9 @@ mod types;
 mod util;
 mod ux;
 
+use cli::Cli;
 use cr::CommandRunner;
 use db::Db;
-use cli::Cli;
 use graph::build_dependency_graph;
 use parser::{comp, read_file, Parser};
 

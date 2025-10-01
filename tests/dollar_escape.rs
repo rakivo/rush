@@ -1,6 +1,6 @@
+use std::fs::{self, File};
 use std::io::Write;
 use std::path::PathBuf;
-use std::fs::{self, File};
 use std::process::{Command, Output};
 
 const MANIFEST_PATH: &str = env!("CARGO_MANIFEST_DIR");
@@ -14,7 +14,7 @@ fn create_rush_file(name: &str, content: &str) {
 
     let mut file = match File::create(&path_buf) {
         Ok(ok) => ok,
-        Err(e) => panic!("could not create {path}: {e}")
+        Err(e) => panic!("could not create {path}: {e}"),
     };
 
     if let Err(e) = file.write_all(content.as_bytes()) {
@@ -46,21 +46,22 @@ mod tests {
     fn dollar_escape() {
         let file_name = "dollar_escape";
 
-        create_rush_file(file_name, r#"
+        create_rush_file(
+            file_name,
+            r#"
 rule echo
   command = echo "hello $$in"
 
 build hello: echo
-"#);
+"#,
+        );
 
         let out = run_rush(file_name);
         _ = remove_rush(file_name);
 
         assert!(out.status.success());
 
-        let stdout = unsafe {
-            std::str::from_utf8_unchecked(&out.stdout)
-        };
+        let stdout = unsafe { std::str::from_utf8_unchecked(&out.stdout) };
 
         assert!(stdout.contains("hello $in"));
     }
