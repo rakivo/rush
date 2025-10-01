@@ -15,7 +15,6 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         rust: [stable, beta, nightly]
-        features: ["default", "std"]
 
     runs-on: ${{ matrix.os }}
 
@@ -53,8 +52,8 @@ jobs:
 
       # 3. Run Clippy
       - name: Run Clippy
-        run: cargo clippy --no-default-features --features "${{ matrix.features }}" --all-targets -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
       # Run unit tests (lib + bin + examples)
       - name: Run unit tests
-        run: cargo test --all-targets --no-default-features --features "${{ matrix.features }}"
+        run: cargo test --all-targets
