@@ -1,4 +1,4 @@
-use std::{mem, cmp};
+use std::{cmp, mem};
 
 //
 // this code is derived from the Rust compiler (`rustc`), specifically,
@@ -30,13 +30,17 @@ fn edit_distance(a: &str, b: &str, limit: usize) -> Option<usize> {
 
     // Strip common prefix.
     while let Some(((b_char, b_rest), (a_char, a_rest))) = b.split_first().zip(a.split_first()) {
-        if a_char != b_char { break }
+        if a_char != b_char {
+            break;
+        }
         a = a_rest;
         b = b_rest;
     }
     // Strip common suffix.
     while let Some(((b_char, b_rest), (a_char, a_rest))) = b.split_last().zip(a.split_last()) {
-        if a_char != b_char { break }
+        if a_char != b_char {
+            break;
+        }
         a = a_rest;
         b = b_rest;
     }
@@ -89,7 +93,6 @@ fn edit_distance(a: &str, b: &str, limit: usize) -> Option<usize> {
     (distance <= limit).then_some(distance)
 }
 
-
 fn edit_distance_with_substrings(a: &str, b: &str, limit: usize) -> Option<usize> {
     let n = a.chars().count();
     let m = b.chars().count();
@@ -132,9 +135,9 @@ fn find_best_match_for_name_impl<'a>(
     // 2. Edit distance match
     // 3. Sorted word match
     if let Some(c) = candidates.iter().find(|c| {
-        c.to_uppercase() == lookup_uppercase         ||
-        c.to_uppercase().contains(&lookup_uppercase) ||
-        lookup_uppercase.contains(&c.to_uppercase())
+        c.to_uppercase() == lookup_uppercase
+            || c.to_uppercase().contains(&lookup_uppercase)
+            || lookup_uppercase.contains(&c.to_uppercase())
     }) {
         return Some(*c);
     }
@@ -178,12 +181,7 @@ fn find_best_match_for_name_impl<'a>(
     // we select `force_capture` with a extra round of edit distance calculation.
     if next_candidates.len() > 1 {
         debug_assert!(use_substring_score);
-        best = find_best_match_for_name_impl(
-            false,
-            &next_candidates,
-            lookup,
-            Some(lookup.len()),
-        );
+        best = find_best_match_for_name_impl(false, &next_candidates, lookup, Some(lookup.len()));
     }
     if best.is_some() {
         return best;

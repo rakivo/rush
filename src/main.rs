@@ -3,26 +3,26 @@
 #[macro_use]
 mod loc;
 
-mod ux;
+mod command;
+mod consts;
 mod cr;
 mod db;
-mod poll;
-mod util;
-mod flags;
-mod types;
-mod graph;
-mod parser;
-mod consts;
-mod command;
-mod template;
 mod dbg_unwrap;
 mod edit_distance;
+mod flags;
+mod graph;
+mod parser;
+mod poll;
+mod template;
+mod types;
+mod util;
+mod ux;
 
+use cr::CommandRunner;
 use db::Db;
 use flags::Flags;
-use cr::CommandRunner;
 use graph::build_dependency_graph;
-use parser::{comp, Parser, read_file};
+use parser::{comp, read_file, Parser};
 
 use std::env;
 use std::process::ExitCode;
@@ -36,19 +36,20 @@ fn main() -> ExitCode {
 
     if flags.help() {
         Flags::print_help();
-        return ExitCode::SUCCESS
+        return ExitCode::SUCCESS;
     }
 
     if let Some(cd) = flags.change_dir() {
         if let Err(e) = env::set_current_dir(cd) {
             eprintln!("[could not enter {cd:?}]: {e}");
-            return ExitCode::FAILURE
+            return ExitCode::FAILURE;
         } else {
             println!("[changed directory to {cd:?}]")
         }
     }
 
-    let rush_file_path = flags.file_path()
+    let rush_file_path = flags
+        .file_path()
         .map(|s| s.as_str())
         .map(|s| s.strip_prefix("./").unwrap_or(s).trim())
         .unwrap_or(Parser::RUSH_FILE_PATH)
@@ -56,7 +57,7 @@ fn main() -> ExitCode {
 
     let Some(mmap) = read_file(&rush_file_path) else {
         eprintln!("could not read: {rush_file_path}");
-        return ExitCode::FAILURE
+        return ExitCode::FAILURE;
     };
 
     let content_ = unsafe { std::str::from_utf8_unchecked(&mmap[..]) };
@@ -70,20 +71,21 @@ fn main() -> ExitCode {
 
     let context = context.compile(&arena);
 
-    #[cfg(feature = "dbg")] {
+    #[cfg(feature = "dbg")]
+    {
         println!("real size: {size}", size = arena.allocated_bytes())
     }
 
     if flags.list_jobs() {
         let edges = context.pretty_print_targets();
         println!("available jobs: [{edges}]");
-        return ExitCode::SUCCESS
+        return ExitCode::SUCCESS;
     }
 
     if flags.list_rules() {
         let rules = context.pretty_print_rules();
         println!("available rules: [{rules}]");
-        return ExitCode::SUCCESS
+        return ExitCode::SUCCESS;
     }
 
     if flags.list_jobs_and_rules() {
@@ -92,45 +94,37 @@ fn main() -> ExitCode {
 
         let rules = context.pretty_print_rules();
         println!("available rules: [{rules}]");
-        return ExitCode::SUCCESS
+        return ExitCode::SUCCESS;
     }
 
     let default_edge = flags.default_target().map(|t| {
-        context.edges.get(t.as_str()).unwrap_or_else(|| {
-            util::report_undefined_target(t, None, &context)
-        })
+        context
+            .edges
+            .get(t.as_str())
+            .unwrap_or_else(|| util::report_undefined_target(t, None, &context))
     });
 
     let mmap = Db::read_cache(&context.cache_file_path);
-    let content = mmap.as_ref().map(|mmap| unsafe {
-        std::str::from_utf8_unchecked(&mmap[..])
-    });
+    let content = mmap
+        .as_ref()
+        .map(|mmap| unsafe { std::str::from_utf8_unchecked(&mmap[..]) });
     let db = content.and_then(|content| Db::read(content).ok());
 
-    let (graph, default_edge, transitive_deps) = build_dependency_graph(
-        &arena,
-        &context,
-        default_edge
-    );
+    let (graph, default_edge, transitive_deps) =
+        build_dependency_graph(&arena, &context, default_edge);
 
     if flags.print_default_job() {
         if let Some(comp::Edge { target, .. }) = default_edge.as_ref() {
             println!("default job: {target}");
-            return ExitCode::SUCCESS
+            return ExitCode::SUCCESS;
         } else {
             println!("no default job");
-            return ExitCode::SUCCESS
+            return ExitCode::SUCCESS;
         }
     }
 
-    _ = CommandRunner::run(
-        &context,
-        graph,
-        transitive_deps,
-        flags,
-        db,
-        default_edge
-    ).write_finish(&context.cache_file_path);
+    _ = CommandRunner::run(&context, graph, transitive_deps, flags, db, default_edge)
+        .write_finish(&context.cache_file_path);
 
     ExitCode::SUCCESS
 }
